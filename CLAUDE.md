@@ -111,13 +111,13 @@ tail -f ~/.exam-tracker/frontend.log
 |------|------|------|
 | POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式），录入后自动导出当天 Excel |
 | GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`warnings` 为连续缺交预警（连续 2 次黄、≥3 次红） |
-| GET  | `/correlation` | 缺交 × 成绩相关：默认总缺交 × 主三门排名；`?subject=` 切到该科缺交 × 该科年级百分位 |
-| GET  | `/correlation/subjects` | 各科「缺交拖成绩」皮尔逊相关系数排序 |
+| GET  | `/correlation` | 缺交 × 成绩相关：默认总缺交 × 主三门排名；`?subject=` 切到该科缺交 × 该科年级百分位。不传 `?class_num=` 时跨全花名册（我教的所有班并集），传了限定单班 |
+| GET  | `/correlation/subjects` | 各科「缺交拖成绩」皮尔逊相关系数排序（同样默认全花名册）|
 | GET  | `/student/{student_id}` | 单个学生作业概况（供学生画像页作业卡片） |
 | GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（供看板图表下钻） |
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
-| GET  | `/api/weekly-focus` | 本周关注名单：合并连续缺交预警 + 本周缺交激增 + 最近考试临界/薄弱/偏科 + 谈话跟进待办（缺交驱动，不依赖新考试） |
+| GET  | `/api/weekly-focus` | 本周关注名单：合并连续缺交预警 + 本周缺交激增 + 最近考试临界/薄弱/偏科 + 谈话跟进待办（缺交驱动，不依赖新考试）。不传 `?class_num=` 时跨全花名册 |
 
 ### notes router（`/api/notes`，`notes/router.py`）
 | 方法 | 路径 | 说明 |
@@ -150,13 +150,13 @@ tail -f ~/.exam-tracker/frontend.log
 
 ## 数据流关键路径
 
-**上传链路**：`ingest/router.py` → `filename_parser.py`（文件名解析年级/学期/考试类型）→ `excel_parser.py`（解析 Excel，高一固定列 vs 高二/三 3+3 两种 schema；教学版额外探测「教学班/走班/选科班」列表头，命中则逐行写 `class_label`）→ 写入 SQLite。教学版：`POST /api/teacher/bind-class`（旧单班绑定）**已废弃**，由 `/api/teaching/*` 配置流程取代；上传 `commit` 后返回 `detected_classes`（候选行政班号 + 教学班标签）供班级配置向导预填，并调 `teaching/service.sync_members_after_upload` 自动维护教学班成员。
+**上传链路**：`ingest/router.py` → `filename_parser.py`（文件名解析年级/学期/考试类型）→ `excel_parser.py`（解析 Excel，高一固定列 vs 高二/三 3+3 两种 schema；教学版额外探测「教学班/走班/选科班」列表头，命中则逐行写 `class_label`）→ 写入 SQLite。教学版：`POST /api/teacher/bind-class`（旧单班绑定）**已废弃**，由 `/api/teaching/*` 配置流程取代，**前端上传页的「绑定班级」步骤已移除**（现为「① 选 Excel → ② 解析确认」两步，班级在 `/settings/classes` 维护）；上传 `commit` 后返回 `detected_classes`（候选行政班号 + 教学班标签）供班级配置向导预填，并调 `teaching/service.sync_members_after_upload` 自动维护教学班成员。
 
 **读端链路**：`analysis/router.py` 直接用 SQLAlchemy 查询，**没有使用** `analysis/trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py`（它们是早期抽象，router 内联了逻辑）。改查询逻辑只需改 `router.py`。
 
 **段位阈值**：所有段位计算（`rank_bands`、`focus-list`、`band-trend`、AI 工具）必须调用 `analysis/config.py` 的 `get_band_config()`，不能硬编码默认值。用户在前端修改后，页面展示与 AI 问答口径同步。
 
-**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。**教学版多班口径**：`grade_correlation` / `subject_correlation_ranking` / `weekly_focus` 的 `class_num` 缺省为 `None`＝跨全花名册（我教的所有班并集，前端缺省不传），传具体班号才限定单班——旧版硬编码 `class_num=6` 已移除。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
 
 **档案 / 主动提醒 / 备份**：`notes/router.py` 管理 `student_note`（成长/谈话档案），AI 工具 `student_notes` 可读取。`homework/service.weekly_focus()` 合成「本周关注」，复用 `warnings` 与 `chat/tools.focus_list`（懒导入避免循环）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用同一备份目录 `~/.exam-tracker-backups`；`run.py init` 清空前自动快照。
 

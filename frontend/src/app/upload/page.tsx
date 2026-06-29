@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import { useRef, useState } from 'react'
 import Link from 'next/link'
 import {
   Check,
@@ -18,7 +18,6 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Progress } from '@/components/ui/progress'
-import { Separator } from '@/components/ui/separator'
 import {
   Select,
   SelectContent,
@@ -35,13 +34,7 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 
-type StepKey = 'class' | 'file' | 'done'
-
-interface TeacherInfo {
-  target_class_high1: number | null
-  target_class_high2: number | null
-  target_class_high3: number | null
-}
+type StepKey = 'file' | 'done'
 
 interface UploadResult {
   filename: string
@@ -56,8 +49,6 @@ interface UploadResponse {
   detected_class?: number
   detected_grade?: number
 }
-
-const NO_CLASS = '__none__'
 
 const KIND_LABEL: Record<string, string> = {
   student_scores: '学生分数表',
@@ -99,14 +90,6 @@ function monthOptions(): number[] {
   return Array.from({ length: 12 }, (_, i) => i + 1)
 }
 
-function classOptions() {
-  return Array.from({ length: 20 }, (_, i) => i + 1)
-}
-
-function selectValueOf(n: number | null | undefined): string {
-  return n == null ? NO_CLASS : String(n)
-}
-
 function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
@@ -120,9 +103,8 @@ interface StepDef {
 }
 
 const STEPS: StepDef[] = [
-  { key: 'class', index: 1, title: '绑定班级' },
-  { key: 'file', index: 2, title: '选择 Excel 文件' },
-  { key: 'done', index: 3, title: '解析与确认' },
+  { key: 'file', index: 1, title: '选择 Excel 文件' },
+  { key: 'done', index: 2, title: '解析与确认' },
 ]
 
 function StepIndicator({
@@ -185,20 +167,11 @@ function StepIndicator({
 }
 
 export default function UploadPage() {
-  const [step, setStep] = useState<StepKey>('class')
+  const [step, setStep] = useState<StepKey>('file')
   const [completed, setCompleted] = useState<Record<StepKey, boolean>>({
-    class: false,
     file: false,
     done: false,
   })
-
-  // 班级绑定
-  const [teacher, setTeacher] = useState<TeacherInfo | null>(null)
-  const [bindHigh1, setBindHigh1] = useState<string>(NO_CLASS)
-  const [bindHigh2, setBindHigh2] = useState<string>(NO_CLASS)
-  const [bindHigh3, setBindHigh3] = useState<string>(NO_CLASS)
-  const [savingBind, setSavingBind] = useState(false)
-  const [bindError, setBindError] = useState<string | null>(null)
 
   // 文件上传
   const [files, setFiles] = useState<File[]>([])
@@ -206,7 +179,6 @@ export default function UploadPage() {
   const [uploading, setUploading] = useState(false)
   const [uploadError, setUploadError] = useState<string | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
-  const fileSectionRef = useRef<HTMLDivElement>(null)
 
   // 解析结果
   const [results, setResults] = useState<UploadResult[]>([])
@@ -218,86 +190,6 @@ export default function UploadPage() {
   const [previewItems, setPreviewItems] = useState<PreviewItem[]>([])
   const [confirmOpen, setConfirmOpen] = useState(false)
   const [committing, setCommitting] = useState(false)
-
-  // 拉取已绑定状态
-  useEffect(() => {
-    let aborted = false
-    fetch('/api/teacher')
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data: TeacherInfo | null) => {
-        if (aborted || !data) return
-        setTeacher(data)
-        setBindHigh1(selectValueOf(data.target_class_high1))
-        setBindHigh2(selectValueOf(data.target_class_high2))
-        setBindHigh3(selectValueOf(data.target_class_high3))
-        const anyBound =
-          data.target_class_high1 != null ||
-          data.target_class_high2 != null ||
-          data.target_class_high3 != null
-        if (anyBound) {
-          setCompleted((c) => ({ ...c, class: true }))
-          setStep((s) => (s === 'class' ? 'file' : s))
-        }
-      })
-      .catch(() => undefined)
-    return () => {
-      aborted = true
-    }
-  }, [])
-
-  function parseSelect(v: string): number | null {
-    return v === NO_CLASS ? null : Number(v)
-  }
-
-  async function postBind(grade: 1 | 2 | 3, classNum: number | null) {
-    // 接口必须传 class_num；未带班用 0 占位实际意义不明，因此仅在 classNum != null 时调用
-    if (classNum == null) return
-    const res = await fetch('/api/teacher/bind-class', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ class_num: classNum, grade }),
-    })
-    if (!res.ok) {
-      throw new Error(`保存高${grade}班级失败 (${res.status})`)
-    }
-  }
-
-  async function handleSaveBind() {
-    setSavingBind(true)
-    setBindError(null)
-    try {
-      const h1 = parseSelect(bindHigh1)
-      const h2 = parseSelect(bindHigh2)
-      const h3 = parseSelect(bindHigh3)
-
-      if (h1 == null && h2 == null && h3 == null) {
-        setBindError('至少为一个年级选择班级')
-        setSavingBind(false)
-        return
-      }
-
-      // 依次提交（后端按 grade 分字段保存）
-      if (h1 != null) await postBind(1, h1)
-      if (h2 != null) await postBind(2, h2)
-      if (h3 != null) await postBind(3, h3)
-
-      setTeacher({
-        target_class_high1: h1,
-        target_class_high2: h2,
-        target_class_high3: h3,
-      })
-      setCompleted((c) => ({ ...c, class: true }))
-      setStep('file')
-      // 滚动到 Step 2
-      window.setTimeout(() => {
-        fileSectionRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })
-      }, 80)
-    } catch (err) {
-      setBindError(err instanceof Error ? err.message : '保存失败')
-    } finally {
-      setSavingBind(false)
-    }
-  }
 
   function addFiles(incoming: FileList | File[]) {
     const next = Array.from(incoming).filter((f) => f.name.toLowerCase().endsWith('.xlsx'))
@@ -401,12 +293,6 @@ export default function UploadPage() {
     }
   }
 
-  const boundBadges: Array<{ grade: number; classNum: number | null }> = [
-    { grade: 1, classNum: teacher?.target_class_high1 ?? null },
-    { grade: 2, classNum: teacher?.target_class_high2 ?? null },
-    { grade: 3, classNum: teacher?.target_class_high3 ?? null },
-  ]
-
   return (
     <div className="space-y-6">
       {/* 顶部 */}
@@ -414,7 +300,7 @@ export default function UploadPage() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight text-slate-900">数据上传</h1>
           <p className="mt-1 text-sm text-slate-500">
-            上传学生分数表 / 班级均分表 / 名次段表（.xlsx）
+            上传学生分数表 / 班级均分表 / 名次段表（.xlsx）。班级在「班级配置」里维护，上传后自动归类。
           </p>
         </div>
         <Button variant="outline" disabled title="即将上线">
@@ -423,94 +309,17 @@ export default function UploadPage() {
         </Button>
       </div>
 
-      {/* 三步指示器 */}
+      {/* 步骤指示器 */}
       <Card>
         <CardContent className="py-5">
           <StepIndicator currentStep={step} completed={completed} />
         </CardContent>
       </Card>
 
-      {/* Step 1: 绑定班级 */}
+      {/* Step 1: 上传文件 */}
       <Card>
         <CardHeader>
-          <div className="flex items-center justify-between gap-4">
-            <div>
-              <CardTitle className="text-base">Step 1 · 绑定班级</CardTitle>
-              <CardDescription>选择本学年所带的班级，可同时绑定高一 / 高二 / 高三</CardDescription>
-            </div>
-            <div className="flex flex-wrap items-center gap-2">
-              {boundBadges.map(({ grade, classNum }) =>
-                classNum != null ? (
-                  <Badge key={grade} variant="success">
-                    {formatClassLabel(grade, classNum)}
-                  </Badge>
-                ) : (
-                  <Badge key={grade} variant="outline">
-                    {formatGradeLabel(grade)} 未绑定
-                  </Badge>
-                )
-              )}
-            </div>
-          </div>
-        </CardHeader>
-        <CardContent className="space-y-4">
-          <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
-            {([1, 2, 3] as const).map((g) => {
-              const value = g === 1 ? bindHigh1 : g === 2 ? bindHigh2 : bindHigh3
-              const setValue = g === 1 ? setBindHigh1 : g === 2 ? setBindHigh2 : setBindHigh3
-              return (
-                <div key={g} className="space-y-1.5">
-                  <label className="text-xs font-medium text-slate-600">高{g} 班级</label>
-                  <Select value={value} onValueChange={setValue}>
-                    <SelectTrigger>
-                      <SelectValue placeholder="选择班级" />
-                    </SelectTrigger>
-                    <SelectContent>
-                      <SelectItem value={NO_CLASS}>未带班</SelectItem>
-                      {classOptions().map((n) => (
-                        <SelectItem key={n} value={String(n)}>
-                          {n} 班
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
-                </div>
-              )
-            })}
-          </div>
-
-          {bindError && (
-            <Card className="border-danger-500 bg-danger-50">
-              <CardContent className="flex items-start gap-2 py-3">
-                <AlertTriangle className="mt-0.5 h-4 w-4 text-danger-500" />
-                <div className="text-sm text-danger-500">{bindError}</div>
-              </CardContent>
-            </Card>
-          )}
-
-          <div className="flex items-center justify-end gap-2">
-            <Button onClick={handleSaveBind} disabled={savingBind}>
-              {savingBind ? (
-                <>
-                  <Loader2 className="mr-1 h-4 w-4 animate-spin" />
-                  保存中
-                </>
-              ) : completed.class ? (
-                '更新绑定'
-              ) : (
-                '保存绑定'
-              )}
-            </Button>
-          </div>
-        </CardContent>
-      </Card>
-
-      <Separator />
-
-      {/* Step 2: 上传文件 */}
-      <Card ref={fileSectionRef}>
-        <CardHeader>
-          <CardTitle className="text-base">Step 2 · 选择 Excel 文件</CardTitle>
+          <CardTitle className="text-base">Step 1 · 选择 Excel 文件</CardTitle>
           <CardDescription>
             支持一次拖入多份 .xlsx；学生分数表 / 班级均分表 / 名次段表均可
           </CardDescription>

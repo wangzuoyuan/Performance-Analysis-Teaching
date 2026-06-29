@@ -187,27 +187,18 @@ export default function Dashboard() {
   useEffect(() => {
     let cancelled = false
     async function load() {
-      const [, examsRes, teacherRes] = await Promise.all([
+      const [, examsRes] = await Promise.all([
         safeJson<unknown>('/api/health'),
         safeJson<{ exams?: Exam[] }>('/api/exams'),
-        safeJson<{
-          name?: string | null
-          target_class_high1?: number | null
-          target_class_high2?: number | null
-          target_class_high3?: number | null
-        }>('/api/teacher'),
       ])
       if (cancelled) return
 
       const examsList = examsRes?.exams ?? []
       setExams(examsList)
 
-      const noClass =
-        !teacherRes ||
-        (!teacherRes.target_class_high1 &&
-          !teacherRes.target_class_high2 &&
-          !teacherRes.target_class_high3)
-      setShowUploadPrompt(noClass)
+      // 教学版：是否提示「去上传成绩」只看有没有任何成绩数据，
+      // 不再依赖已废弃的旧单班字段 target_class_highN（读侧已弃用）。
+      setShowUploadPrompt(examsList.length === 0)
       setLoading(false)
 
       // 拉每场考试的 stats（时间线徽章用），与最新关注名单历史

@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import Link from 'next/link'
 import { ChevronLeft, Plus, Trash2 } from 'lucide-react'
 
@@ -29,6 +29,7 @@ interface RosterRow {
   gender: string | null
   excluded: number
   record_count: number
+  class_num: number | null
 }
 
 export default function HomeworkSettingsPage() {
@@ -43,6 +44,24 @@ export default function HomeworkSettingsPage() {
   // 新增学生
   const [newName, setNewName] = useState('')
   const [newSeat, setNewSeat] = useState('')
+  const [newClass, setNewClass] = useState('')
+
+  // 花名册里最常见的班号，作为「添加学生」班号留空时的默认值
+  const defaultClass = useMemo(() => {
+    const counts = new Map<number, number>()
+    for (const r of roster) {
+      if (r.class_num != null) counts.set(r.class_num, (counts.get(r.class_num) ?? 0) + 1)
+    }
+    let best: number | null = null
+    let bestN = 0
+    for (const [cls, n] of counts) {
+      if (n > bestN) {
+        best = cls
+        bestN = n
+      }
+    }
+    return best
+  }, [roster])
 
   const loadRoster = useCallback(async () => {
     const data = await fetch('/api/homework/roster').then((r) => r.json())
@@ -79,18 +98,24 @@ export default function HomeworkSettingsPage() {
 
   async function addStudent() {
     if (!newName.trim()) return
+    const classNum = newClass.trim() ? Number(newClass) : defaultClass
+    if (classNum == null || Number.isNaN(classNum)) {
+      alert('请填写班号（花名册为空时无法自动推断）')
+      return
+    }
     const res = await fetch('/api/homework/roster', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: newName.trim(),
         seat_no: newSeat ? Number(newSeat) : null,
-        class_num: 6,
+        class_num: classNum,
       }),
     })
     if (res.ok) {
       setNewName('')
       setNewSeat('')
+      setNewClass('')
       await loadRoster()
     } else {
       const data = await res.json().catch(() => ({}))
@@ -181,6 +206,13 @@ export default function HomeworkSettingsPage() {
               placeholder="姓名"
               className="w-32 rounded-md border border-slate-200 px-2 py-1 text-sm"
             />
+            <input
+              value={newClass}
+              onChange={(e) => setNewClass(e.target.value)}
+              inputMode="numeric"
+              placeholder={defaultClass != null ? `班号（默认 ${defaultClass}）` : '班号'}
+              className="w-32 rounded-md border border-slate-200 px-2 py-1 text-sm"
+            />
             <Button variant="outline" size="sm" onClick={addStudent}>
               <Plus className="mr-1 h-4 w-4" />
               添加学生
@@ -193,6 +225,7 @@ export default function HomeworkSettingsPage() {
                 <TableRow>
                   <TableHead>座号</TableHead>
                   <TableHead>姓名</TableHead>
+                  <TableHead>班级</TableHead>
                   <TableHead>性别</TableHead>
                   <TableHead className="text-right">记录数</TableHead>
                   <TableHead className="text-center">排除统计</TableHead>
@@ -214,6 +247,7 @@ export default function HomeworkSettingsPage() {
                         </Badge>
                       )}
                     </TableCell>
+                    <TableCell className="text-slate-500">{row.class_num ?? '—'}</TableCell>
                     <TableCell className="text-slate-500">{row.gender ?? '—'}</TableCell>
                     <TableCell className="text-right tabular-nums">{row.record_count}</TableCell>
                     <TableCell className="text-center">

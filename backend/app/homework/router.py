@@ -100,7 +100,7 @@ async def hw_warnings():
 
 
 @router.get("/homework/correlation")
-async def hw_correlation(class_num: int = 6, exam_id: Optional[int] = None,
+async def hw_correlation(class_num: Optional[int] = None, exam_id: Optional[int] = None,
                          total_type: str = "主三门", subject: str = ""):
     db = next(get_db())
     try:
@@ -112,7 +112,7 @@ async def hw_correlation(class_num: int = 6, exam_id: Optional[int] = None,
 
 
 @router.get("/homework/correlation/subjects")
-async def hw_correlation_subjects(class_num: int = 6, exam_id: Optional[int] = None):
+async def hw_correlation_subjects(class_num: Optional[int] = None, exam_id: Optional[int] = None):
     db = next(get_db())
     try:
         return service.subject_correlation_ranking(db, class_num, exam_id)
@@ -131,7 +131,7 @@ async def hw_student_summary(student_id: str):
 
 
 @router.get("/weekly-focus")
-async def weekly_focus(class_num: int = 6):
+async def weekly_focus(class_num: Optional[int] = None):
     """本周关注名单（仪表盘主动提醒）。"""
     db = next(get_db())
     try:

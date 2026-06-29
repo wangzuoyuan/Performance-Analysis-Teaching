@@ -50,11 +50,12 @@ export default function CorrelationPage() {
   const load = useCallback(async (sub: string) => {
     setError(null)
     try {
-      const q = `class_num=6${sub ? `&subject=${encodeURIComponent(sub)}` : ''}`
-      const corr = await fetch(`/api/homework/correlation?${q}`).then((r) => r.json())
+      // 不传 class_num：后端按全花名册（我教的所有班并集）统计
+      const q = sub ? `subject=${encodeURIComponent(sub)}` : ''
+      const corr = await fetch(`/api/homework/correlation${q ? `?${q}` : ''}`).then((r) => r.json())
       setData(corr)
       if (!sub) {
-        const rk = await fetch('/api/homework/correlation/subjects?class_num=6').then((r) => r.json())
+        const rk = await fetch('/api/homework/correlation/subjects').then((r) => r.json())
         setRanking(rk.rankings || [])
       }
     } catch {

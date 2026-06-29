@@ -15,7 +15,17 @@ const SEGMENT_LABELS: Record<string, string> = {
   compare: '班级对比',
   exam: '考试列表',
   student: '学生检索',
+  homework: '作业跟踪',
+  settings: '设置',
+  classes: '班级配置',
+  manage: '记录管理',
+  warnings: '缺交预警',
+  correlation: '缺交 × 成绩',
+  report: '家长会一页纸',
 }
+
+// 这些段仅作为父级路径、没有自己的页面，面包屑里不可点击（避免跳 404）
+const NO_PAGE_SEGMENTS = new Set(['settings'])
 
 interface Crumb {
   label: string
@@ -44,7 +54,8 @@ function buildCrumbs(pathname: string, dynamicLabels: Record<string, string> = {
       crumbs.push({ label })
     } else {
       const label = SEGMENT_LABELS[seg] ?? seg
-      crumbs.push({ label, href: i === segments.length - 1 ? undefined : acc })
+      const isLast = i === segments.length - 1
+      crumbs.push({ label, href: isLast || NO_PAGE_SEGMENTS.has(seg) ? undefined : acc })
     }
   })
   return crumbs

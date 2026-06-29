@@ -1298,7 +1298,7 @@ def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, 
 
 
 def class_homework_ranking(
-    class_num: int = 6,
+    class_num: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 10,
@@ -1327,7 +1327,7 @@ def class_homework_ranking(
 
 
 def homework_grade_correlation(
-    class_num: int = 6,
+    class_num: Optional[int] = None,
     exam_id: Optional[int] = None,
     total_type: str = "主三门",
     subject: Optional[str] = None,
@@ -1653,7 +1653,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_num": {"type": "integer", "description": "班号，默认6"},
+                "class_num": {"type": "integer", "description": "行政班号；不填=我教的所有班并集（全花名册）"},
                 "start_date": {"type": "string", "description": "起始日期 YYYY-MM-DD；不填用学期开始"},
                 "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD；不填用学期结束"},
                 "limit": {"type": "integer", "description": "返回人数，默认10"},
@@ -1666,7 +1666,7 @@ TOOLS = [
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_num": {"type": "integer", "description": "班号，默认6"},
+                "class_num": {"type": "integer", "description": "行政班号；不填=我教的所有班并集（全花名册）"},
                 "exam_id": {"type": "integer", "description": "考试ID；不填取最新一场"},
                 "total_type": {"type": "string", "description": "总分类型，默认主三门（仅总览模式用）"},
                 "subject": {"type": "string", "description": "学科名（语文/数学/英语/物理/化学/生物/政治/历史/地理）；传了就看该科缺交×该科百分位"},

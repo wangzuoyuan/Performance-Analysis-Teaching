@@ -310,12 +310,13 @@ def _latest_exam_id(db):
     return exam.id if exam else None
 
 
-def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
+def grade_correlation(db, class_num=None, exam_id=None, total_type="主三门",
                       start=None, end=None, subject=None):
     """班级「缺交 × 成绩」相关性数据。
 
     - 总分模式（subject 为空）：X=学期总缺交次数，Y=该次考试 total_type 学籍排名。
     - 单科模式（subject 非空）：X=该科学期缺交次数，Y=该科年级百分位（越小越靠前）。
+    - class_num=None（教学版默认）：跨全花名册（我教的所有班并集）。
     """
     from app.db.models import SubjectScore, TotalScore
 
@@ -325,10 +326,10 @@ def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
     if exam_id is None:
         exam_id = _latest_exam_id(db)
 
-    roster = {
-        r.student_id: r
-        for r in db.query(ClassRoster).filter(ClassRoster.class_num == class_num).all()
-    }
+    roster_q = db.query(ClassRoster)
+    if class_num is not None:
+        roster_q = roster_q.filter(ClassRoster.class_num == class_num)
+    roster = {r.student_id: r for r in roster_q.all()}
 
     # 学期内缺交次数（subject 非空时只算该科）
     miss_rows = _base_miss_query(db, start, end, subject=subject, respect_excluded=True).all()
@@ -403,7 +404,7 @@ def grade_correlation(db, class_num, exam_id=None, total_type="主三门",
     }
 
 
-def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=None):
+def subject_correlation_ranking(db, class_num=None, exam_id=None, start=None, end=None):
     """各学科「缺交次数 × 该科年级百分位」皮尔逊相关排序。
 
     r>0 表示该科缺交越多、百分位越大（成绩越差），即"缺交越拖成绩"。
@@ -417,12 +418,10 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
     if exam_id is None:
         exam_id = _latest_exam_id(db)
 
-    excluded = {
-        r.student_id
-        for r in db.query(ClassRoster).filter(
-            ClassRoster.class_num == class_num, ClassRoster.excluded == 1
-        ).all()
-    }
+    excluded_q = db.query(ClassRoster).filter(ClassRoster.excluded == 1)
+    if class_num is not None:
+        excluded_q = excluded_q.filter(ClassRoster.class_num == class_num)
+    excluded = {r.student_id for r in excluded_q.all()}
 
     # 一次取全学期缺交，按 (科目, 学生) 计数
     miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
@@ -459,7 +458,7 @@ def subject_correlation_ranking(db, class_num, exam_id=None, start=None, end=Non
     }
 
 
-def weekly_focus(db, class_num=6, today=None):
+def weekly_focus(db, class_num=None, today=None):
     """本周关注名单：合并连续缺交预警、本周缺交激增、最近一次考试临界/薄弱/
     偏科、谈话跟进待办。主要由缺交信号驱动，不依赖新考试。"""
     from datetime import date, timedelta
@@ -471,12 +470,10 @@ def weekly_focus(db, class_num=6, today=None):
     today = today or date.today().isoformat()
     week_start = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
 
-    roster = {
-        r.student_id: r
-        for r in db.query(ClassRoster).filter(
-            ClassRoster.class_num == class_num, ClassRoster.excluded == 0
-        ).all()
-    }
+    roster_q = db.query(ClassRoster).filter(ClassRoster.excluded == 0)
+    if class_num is not None:
+        roster_q = roster_q.filter(ClassRoster.class_num == class_num)
+    roster = {r.student_id: r for r in roster_q.all()}
     reasons = defaultdict(list)  # student_id -> [理由标签]
 
     def add(sid, tag, weight):

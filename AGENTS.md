@@ -106,7 +106,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 ## 数据流关键路径
 
-**上传链路**：`ingest/router.py` → `filename_parser.py`（文件名解析年级/学期/考试类型）→ `excel_parser.py`（解析 Excel，高一固定列 vs 高二/三 3+3 两种 schema）→ 写入 6 张 SQLite 表。首次上传后弹窗确认班号 → `POST /api/teacher/bind-class`。
+**上传链路**：`ingest/router.py`（`POST /api/uploads/preview` 取回按文件名识别的年级/学期/考试类型，前端逐文件确认后 `POST /api/uploads/commit` 入库）→ `filename_parser.py` → `excel_parser.py`（高一固定列 vs 高二/三 3+3 两种 schema；教学版额外探测「教学班/走班/选科班」列写 `class_label`）→ 写入 SQLite。教学版：旧的 `POST /api/teacher/bind-class`（单班绑定）已废弃、前端上传页的「绑定班级」步骤已移除；班级在 `/settings/classes`（`/api/teaching/*`）维护，`commit` 后由 `teaching/service.sync_members_after_upload` 自动维护教学班成员。
 
 **读端链路**：`analysis/router.py` 直接用 SQLAlchemy 查询，**没有使用** `analysis/trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py` 这些计算模块（它们是早期抽象，当前 router 内联了逻辑）。改查询逻辑只需改 `router.py`。
 

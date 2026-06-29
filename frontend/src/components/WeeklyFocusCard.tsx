@@ -24,12 +24,15 @@ function reasonStyle(reason: string): string {
   return 'bg-slate-100 text-slate-600'
 }
 
-export default function WeeklyFocusCard({ classNum = 6 }: { classNum?: number }) {
+export default function WeeklyFocusCard({ classNum }: { classNum?: number }) {
   const [data, setData] = useState<WeeklyFocus | null>(null)
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    fetch(`/api/weekly-focus?class_num=${classNum}`)
+    // classNum 缺省：后端按全花名册（我教的所有班并集）合成本周关注
+    const url =
+      classNum != null ? `/api/weekly-focus?class_num=${classNum}` : '/api/weekly-focus'
+    fetch(url)
       .then((r) => r.json())
       .then(setData)
       .catch(() => {})
