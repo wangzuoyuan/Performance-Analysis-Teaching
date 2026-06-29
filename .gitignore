@@ -1,0 +1,16 @@
+.env
+node_modules/
+.next/
+tsconfig.tsbuildinfo
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+*.egg-info/
+*.sqlite
+raw/
+
+# Docker 部署的数据卷（含 db.sqlite / 备份 / 导出，绝不入库）
+/data/
+
+.DS_Store

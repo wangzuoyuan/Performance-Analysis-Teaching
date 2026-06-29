@@ -1,0 +1,14 @@
+# compose 内的统一入口：按路径分流，对 SSE 友好。
+# DSM 反向代理只需把域名指到本容器的 8080，路径分流交给这里。
+:8080 {
+	# /api/* → 后端（聊天 SSE 走 flush_interval -1，实时流式不缓冲）
+	handle /api/* {
+		reverse_proxy backend:8000 {
+			flush_interval -1
+		}
+	}
+	# 其余 → 前端
+	handle {
+		reverse_proxy frontend:3000
+	}
+}

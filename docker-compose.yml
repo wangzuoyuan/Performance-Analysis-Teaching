@@ -1,0 +1,48 @@
+# 群晖 NAS 部署：backend + frontend + caddy 三服务。
+# 仅 caddy 对外发布端口 8080（内网 IP 直连 + DSM 反代经 localhost 接入）；
+# backend/frontend 只在 compose 内网可见。
+services:
+  backend:
+    build:
+      context: ./backend
+      network: host            # 构建时借主机 DNS（容器桥接网下路由器 DNS 不应答）
+    dns:                        # 运行时用公共 DNS（backend 要解析 GLM/Anthropic 接口域名）
+      - 223.5.5.5
+      - 119.29.29.29
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env          # CHAT key + APP_PASSWORD + PUBLIC_HOST
+    volumes:
+      - ./data:/data            # db.sqlite / backups / raw / homework_exports
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      network: host            # 构建时借主机 DNS（npm 安装要连外网）
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    restart: unless-stopped
+    depends_on:
+      - backend
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    ports:
+      - "8080:8080"             # 内网 http://NAS-IP:8080 直连；DSM 反代指向 localhost:8080
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
