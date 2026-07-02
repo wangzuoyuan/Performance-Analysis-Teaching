@@ -137,8 +137,7 @@ class ClassRoster(Base):
 
 
 class HomeworkRecord(Base):
-    """缺交记录（对应原 records 表）。每行=某生某天某科欠交一次。
-    remark 非空表示当天请假等情况，缺交看板默认过滤。"""
+    """作业收交记录。旧数据迁移后 submission_status 统一为「缺交」。"""
     __tablename__ = "homework_record"
     id = Column(Integer, primary_key=True)
     student_id = Column(String, ForeignKey("class_roster.student_id"), nullable=False)
@@ -146,6 +145,10 @@ class HomeworkRecord(Base):
     subject = Column(String, nullable=False)
     content = Column(String, nullable=True)
     remark = Column(String, nullable=True)
+    submission_status = Column(String, nullable=False, default="缺交")
+    evaluation = Column(String, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
         Index("idx_hw_student_date", "student_id", "date"),
@@ -173,6 +176,22 @@ class HomeworkSetting(Base):
     __tablename__ = "homework_setting"
     key = Column(String, primary_key=True)
     value = Column(String, nullable=True)
+
+
+class HomeworkSemester(Base):
+    """作业模块的历史学期配置；同一时间只允许一个当前学期。"""
+    __tablename__ = "homework_semester"
+    id = Column(Integer, primary_key=True)
+    name = Column(String, nullable=False)
+    start_date = Column(String, nullable=False)
+    end_date = Column(String, nullable=False)
+    is_current = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        Index("idx_hw_semester_current", "is_current"),
+        UniqueConstraint("name", "start_date", "end_date", name="uq_hw_semester_range"),
+    )
 
 
 # ────────────────────────────── 学生成长 / 谈话档案 ──────────────────────────────

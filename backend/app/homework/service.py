@@ -7,13 +7,17 @@ excluded=1 的学生（指定具体学生查询时不排除）。
 """
 
 from collections import defaultdict
+from datetime import date, datetime, timedelta
 
 from app.db.models import (
     ClassRoster,
+    HomeworkSemester,
     HomeworkRecord,
     SpecialRecord,
     HomeworkSetting,
+    TeachingClass,
 )
+from app.analysis.scope import all_my_member_ids, members_of, student_class_map_multi
 from app.homework.parser import SUBJECT_GROUPS, normalize_subject
 
 DEFAULT_SEMESTER = {
@@ -24,6 +28,19 @@ DEFAULT_SEMESTER = {
 
 
 def get_semester(db):
+    current = (
+        db.query(HomeworkSemester)
+        .filter(HomeworkSemester.is_current == 1)
+        .order_by(HomeworkSemester.id.desc())
+        .first()
+    )
+    if current:
+        return {
+            "semester_id": current.id,
+            "semester_start": current.start_date,
+            "semester_end": current.end_date,
+            "semester_name": current.name,
+        }
     rows = db.query(HomeworkSetting).filter(
         HomeworkSetting.key.in_(["semester_start", "semester_end", "semester_name"])
     ).all()
@@ -35,6 +52,20 @@ def get_semester(db):
 
 
 def set_semester(db, data):
+    current = (
+        db.query(HomeworkSemester)
+        .filter(HomeworkSemester.is_current == 1)
+        .order_by(HomeworkSemester.id.desc())
+        .first()
+    )
+    start = str(data.get("semester_start") or (current.start_date if current else DEFAULT_SEMESTER["semester_start"]))
+    end = str(data.get("semester_end") or (current.end_date if current else DEFAULT_SEMESTER["semester_end"]))
+    name = str(data.get("semester_name") or (current.name if current else "") or f"{start} 至 {end}")
+    if current:
+        current.start_date, current.end_date, current.name = start, end, name
+    else:
+        current = HomeworkSemester(name=name, start_date=start, end_date=end, is_current=1)
+        db.add(current)
     for key in ("semester_start", "semester_end", "semester_name"):
         if key in data and data[key] is not None:
             db.merge(HomeworkSetting(key=key, value=str(data[key])))
@@ -55,16 +86,27 @@ def _subject_keywords(subject):
 
 
 def _base_miss_query(db, start, end, student=None, subject=None,
-                     respect_excluded=True):
+                     respect_excluded=True, teaching_class_id=None):
     """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。"""
+    from sqlalchemy import and_, exists
+
+    has_leave = exists().where(and_(
+        SpecialRecord.student_id == HomeworkRecord.student_id,
+        SpecialRecord.date == HomeworkRecord.date,
+        SpecialRecord.type.like("%请假%"),
+    ))
     q = (
         db.query(HomeworkRecord, ClassRoster)
         .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
         .filter(
             (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
             HomeworkRecord.subject != "全科",
+            HomeworkRecord.submission_status == "缺交",
+            ~has_leave,
         )
     )
+    ids = _scope_student_ids(db, teaching_class_id)
+    q = q.filter(HomeworkRecord.student_id.in_(ids))
     if start and end:
         q = q.filter(HomeworkRecord.date >= start, HomeworkRecord.date <= end)
     if student:
@@ -81,15 +123,36 @@ def _base_miss_query(db, start, end, student=None, subject=None,
     return q
 
 
-def kpi(db, start, end, student=None, subject=None):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
+    """作业范围：None 是「我教的全部班」成员并集，不是全库。"""
+    ids = (
+        members_of(db, int(teaching_class_id))
+        if teaching_class_id is not None
+        else all_my_member_ids(db)
+    )
+    if include_excluded or not ids:
+        return set(ids)
+    excluded = {
+        r[0] for r in db.query(ClassRoster.student_id)
+        .filter(ClassRoster.student_id.in_(ids), ClassRoster.excluded == 1).all()
+    }
+    return set(ids) - excluded
+
+
+def _labels_for(db, student_id):
+    return [row["label"] for row in student_class_map_multi(db).get(student_id, [])]
+
+
+def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
+    rows = _base_miss_query(db, start, end, student, subject,
+                            teaching_class_id=teaching_class_id).all()
     total = len(rows)
 
     subj_counts = defaultdict(int)
     stu_counts = defaultdict(int)
     for rec, roster in rows:
         subj_counts[normalize_subject(rec.subject)] += 1
-        stu_counts[roster.name] += 1
+        stu_counts[(roster.student_id, roster.name)] += 1
 
     if subj_counts:
         worst_name, worst_count = max(subj_counts.items(), key=lambda x: x[1])
@@ -98,8 +161,8 @@ def kpi(db, start, end, student=None, subject=None):
         worst_subject = {"name": "无", "count": 0}
 
     top_students = [
-        {"name": n, "count": c}
-        for n, c in sorted(stu_counts.items(), key=lambda x: x[1], reverse=True)[:5]
+        {"student_id": sid, "name": name, "class_labels": _labels_for(db, sid), "count": c}
+        for (sid, name), c in sorted(stu_counts.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
     return {
         "total_misses": total,
@@ -108,8 +171,9 @@ def kpi(db, start, end, student=None, subject=None):
     }
 
 
-def trend(db, start, end, student=None, subject=None):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def trend(db, start, end, student=None, subject=None, teaching_class_id=None):
+    rows = _base_miss_query(db, start, end, student, subject,
+                            teaching_class_id=teaching_class_id).all()
     by_date = defaultdict(int)
     for rec, _ in rows:
         by_date[rec.date] += 1
@@ -117,60 +181,97 @@ def trend(db, start, end, student=None, subject=None):
     return {"dates": dates, "counts": [by_date[d] for d in dates]}
 
 
-def subjects(db, start, end, student=None, subject=None):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def subjects(db, start, end, student=None, subject=None, teaching_class_id=None):
+    rows = _base_miss_query(db, start, end, student, subject,
+                            teaching_class_id=teaching_class_id).all()
     totals = defaultdict(int)
     detail = defaultdict(lambda: defaultdict(int))
     for rec, roster in rows:
         canonical = normalize_subject(rec.subject)
         totals[canonical] += 1
-        detail[canonical][roster.name] += 1
+        detail[canonical][(roster.student_id, roster.name)] += 1
     out = []
     for name, count in sorted(totals.items(), key=lambda x: x[1], reverse=True):
         students = sorted(detail[name].items(), key=lambda x: x[1], reverse=True)
         out.append({
             "name": name,
             "value": count,
-            "students": [{"name": s, "count": c} for s, c in students],
+            "students": [
+                {"student_id": sid, "name": name, "class_labels": _labels_for(db, sid), "count": c}
+                for (sid, name), c in students
+            ],
         })
     return out
 
 
-def rankings(db, start, end, student=None, subject=None, limit=10):
-    rows = _base_miss_query(db, start, end, student, subject).all()
+def rankings(db, start, end, student=None, subject=None, limit=10,
+             teaching_class_id=None):
+    rows = _base_miss_query(db, start, end, student, subject,
+                            teaching_class_id=teaching_class_id).all()
     counts = defaultdict(int)
     for _, roster in rows:
-        counts[roster.name] += 1
+        counts[(roster.student_id, roster.name)] += 1
     ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
     return {
-        "names": [n for n, _ in ranked],
+        "names": [name for (_, name), _ in ranked],
         "counts": [c for _, c in ranked],
+        "students": [
+            {"student_id": sid, "name": name, "class_labels": _labels_for(db, sid), "count": count}
+            for (sid, name), count in ranked
+        ],
     }
 
 
-def warnings(db, start, end):
+def warnings(db, start, end, teaching_class_id=None):
     """同一学科「当前正在进行」的连续缺交预警。
 
     时间轴 = 该学科全班有人缺交的去重日期；从最近一次收交向前回溯，统计
     某学生连续缺交了最近几次（必须含最后一次收交，否则视为已结束）。
     连续 2 次 → warning（黄），≥3 次 → serious（红）。排除 excluded 学生。
     """
-    rows = _base_miss_query(db, start, end, respect_excluded=True).all()
+    ids = _scope_student_ids(db, teaching_class_id)
+    all_rows = (
+        db.query(HomeworkRecord, ClassRoster)
+        .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
+        .filter(
+            HomeworkRecord.student_id.in_(ids),
+            HomeworkRecord.date >= start,
+            HomeworkRecord.date <= end,
+            HomeworkRecord.subject != "全科",
+        ).all()
+    )
+    leave_pairs = {
+        (sid, day)
+        for sid, day in db.query(SpecialRecord.student_id, SpecialRecord.date).filter(
+            SpecialRecord.student_id.in_(ids),
+            SpecialRecord.date >= start,
+            SpecialRecord.date <= end,
+            SpecialRecord.type.like("%请假%"),
+        ).all()
+    }
 
-    timeline = defaultdict(set)            # subject -> {date}
-    missed = defaultdict(set)             # (subject, name) -> {date}
-    name_to_sid = {}                      # name -> student_id（供预警页链到学生画像）
-    for rec, roster in rows:
+    timeline = defaultdict(set)
+    missed = defaultdict(set)
+    identities = {}
+    for rec, roster in all_rows:
         subj = normalize_subject(rec.subject)
         timeline[subj].add(rec.date)
-        missed[(subj, roster.name)].add(rec.date)
-        name_to_sid[roster.name] = roster.student_id
+        identities[(subj, roster.student_id)] = roster
+        if (
+            rec.submission_status == "缺交"
+            and not (rec.remark or "").strip()
+            and (rec.student_id, rec.date) not in leave_pairs
+        ):
+            missed[(subj, roster.student_id)].add(rec.date)
 
     serious, warning = [], []
-    for (subj, name), miss_dates in missed.items():
+    for (subj, sid), miss_dates in missed.items():
+        roster = identities[(subj, sid)]
         axis = sorted(timeline[subj])
         streak = []
         for d in reversed(axis):
+            if (sid, d) in leave_pairs:
+                continue
             if d in miss_dates:
                 streak.append(d)
             else:
@@ -179,8 +280,9 @@ def warnings(db, start, end):
             continue
         streak.reverse()
         item = {
-            "name": name,
-            "student_id": name_to_sid.get(name),
+            "name": roster.name,
+            "student_id": sid,
+            "class_labels": _labels_for(db, sid),
             "subject": subj,
             "streak": len(streak),
             "dates": streak,
@@ -190,7 +292,7 @@ def warnings(db, start, end):
     sort_key = lambda x: (-x["streak"], x["name"])
     serious.sort(key=sort_key)
     warning.sort(key=sort_key)
-    students = {i["name"] for i in serious + warning}
+    students = {i["student_id"] for i in serious + warning}
     return {
         "serious": serious,
         "warning": warning,
@@ -199,6 +301,287 @@ def warnings(db, start, end):
             "warning": len(warning),
             "students": len(students),
         },
+    }
+
+
+POSITIVE_WORDS = ("优秀", "认真", "良好", "工整", "整洁", "进步", "棒", "优")
+NEGATIVE_WORDS = ("不合格", "不认真", "马虎", "潦草", "敷衍", "不工整", "退步", "差")
+
+
+def evaluation_tone(value):
+    text = (value or "").strip()
+    if any(word in text for word in NEGATIVE_WORDS):
+        return "negative"
+    if any(word in text for word in POSITIVE_WORDS):
+        return "positive"
+    return "neutral"
+
+
+def list_semesters(db):
+    return [
+        {
+            "id": row.id,
+            "name": row.name,
+            "start_date": row.start_date,
+            "end_date": row.end_date,
+            "is_current": bool(row.is_current),
+        }
+        for row in db.query(HomeworkSemester)
+        .order_by(HomeworkSemester.start_date.desc(), HomeworkSemester.id.desc()).all()
+    ]
+
+
+def add_semester(db, name, start_date, end_date, make_current=False):
+    if start_date > end_date:
+        raise ValueError("学期开始日期不能晚于结束日期")
+    if make_current:
+        db.query(HomeworkSemester).update({HomeworkSemester.is_current: 0})
+    row = HomeworkSemester(
+        name=name.strip() or f"{start_date} 至 {end_date}",
+        start_date=start_date,
+        end_date=end_date,
+        is_current=1 if make_current else 0,
+    )
+    db.add(row)
+    db.commit()
+    return list_semesters(db)
+
+
+def set_current_semester(db, semester_id):
+    row = db.query(HomeworkSemester).filter(HomeworkSemester.id == semester_id).first()
+    if not row:
+        return False
+    db.query(HomeworkSemester).update({HomeworkSemester.is_current: 0})
+    row.is_current = 1
+    for key, value in (
+        ("semester_start", row.start_date),
+        ("semester_end", row.end_date),
+        ("semester_name", row.name),
+    ):
+        db.merge(HomeworkSetting(key=key, value=value))
+    db.commit()
+    return True
+
+
+def _period_label(raw_date, group_by):
+    parsed = datetime.strptime(raw_date, "%Y-%m-%d").date()
+    if group_by == "month":
+        return parsed.strftime("%Y-%m")
+    monday = parsed - timedelta(days=parsed.weekday())
+    return monday.isoformat()
+
+
+def _scope_meta(db, teaching_class_id, ids):
+    if teaching_class_id is not None:
+        tc = db.query(TeachingClass).filter(TeachingClass.id == teaching_class_id).first()
+        return {
+            "type": "teaching_class",
+            "teaching_class_id": teaching_class_id,
+            "label": tc.label if tc else "未知教学班",
+            "member_count": len(ids),
+        }
+    return {
+        "type": "all",
+        "teaching_class_id": None,
+        "label": "全部（我教的班）",
+        "member_count": len(ids),
+    }
+
+
+def dashboard(db, start, end, student=None, teaching_class_id=None,
+              group_by="week", limit=10):
+    """作业页单次请求所需的完整聚合数据。"""
+    ids = _scope_student_ids(db, teaching_class_id)
+    roster_rows = (
+        db.query(ClassRoster).filter(
+            ClassRoster.student_id.in_(ids), ClassRoster.excluded == 0
+        ).all()
+    )
+    if student:
+        roster_rows = [r for r in roster_rows if student in r.name]
+    roster = {r.student_id: r for r in roster_rows}
+    ids = set(roster)
+    labels = student_class_map_multi(db)
+
+    records = (
+        db.query(HomeworkRecord)
+        .filter(
+            HomeworkRecord.student_id.in_(ids),
+            HomeworkRecord.date >= start,
+            HomeworkRecord.date <= end,
+        ).order_by(HomeworkRecord.date, HomeworkRecord.id).all()
+    )
+    specials = (
+        db.query(SpecialRecord)
+        .filter(
+            SpecialRecord.student_id.in_(ids),
+            SpecialRecord.date >= start,
+            SpecialRecord.date <= end,
+        ).all()
+    )
+    leave_pairs = {
+        (s.student_id, s.date) for s in specials if "请假" in (s.type or "")
+    }
+    misses = [
+        r for r in records
+        if r.submission_status == "缺交"
+        and r.subject != "全科"
+        and not (r.remark or "").strip()
+        and (r.student_id, r.date) not in leave_pairs
+    ]
+    submitted = [
+        r for r in records
+        if r.submission_status == "已交" and (r.student_id, r.date) not in leave_pairs
+    ]
+
+    def student_item(sid, count=0):
+        row = roster[sid]
+        return {
+            "student_id": sid,
+            "name": row.name,
+            "class_labels": [x["label"] for x in labels.get(sid, [])],
+            "count": count,
+        }
+
+    miss_counts, excellent_counts = defaultdict(int), defaultdict(int)
+    evaluation_counts = {"positive": 0, "neutral": 0, "negative": 0}
+    recent_cutoff = max(start, (date.today() - timedelta(days=29)).isoformat())
+    for rec in misses:
+        miss_counts[rec.student_id] += 1
+    for rec in submitted:
+        tone = evaluation_tone(rec.evaluation)
+        evaluation_counts[tone] += 1
+        if tone == "positive" and rec.date >= recent_cutoff:
+            excellent_counts[rec.student_id] += 1
+
+    missing_ranking = [
+        student_item(sid, count)
+        for sid, count in sorted(miss_counts.items(), key=lambda x: (-x[1], roster[x[0]].name))[:limit]
+    ]
+    excellent_ranking = [
+        student_item(sid, count)
+        for sid, count in sorted(excellent_counts.items(), key=lambda x: (-x[1], roster[x[0]].name))[:limit]
+    ]
+
+    streaks = warnings(db, start, end, teaching_class_id)
+    if student:
+        for key in ("serious", "warning"):
+            streaks[key] = [x for x in streaks[key] if x["student_id"] in ids]
+        streaks["counts"] = {
+            "serious": len(streaks["serious"]),
+            "warning": len(streaks["warning"]),
+            "students": len({x["student_id"] for x in streaks["serious"] + streaks["warning"]}),
+        }
+
+    forgot = defaultdict(int)
+    for sp in specials:
+        if sp.student_id in ids and "忘带" in (sp.type or ""):
+            forgot[sp.student_id] += 1
+    forgot_warnings = [
+        student_item(sid, count)
+        for sid, count in sorted(forgot.items(), key=lambda x: -x[1])
+        if count >= 3
+    ]
+
+    negative_streaks = []
+    by_student_evals = defaultdict(list)
+    for rec in submitted:
+        if rec.evaluation:
+            by_student_evals[rec.student_id].append(rec)
+    for sid, rows in by_student_evals.items():
+        streak = []
+        for rec in reversed(rows):
+            if evaluation_tone(rec.evaluation) == "negative":
+                streak.append(rec)
+            else:
+                break
+        if len(streak) >= 2:
+            item = student_item(sid, len(streak))
+            item["dates"] = sorted(r.date for r in streak)
+            item["evaluations"] = [r.evaluation for r in reversed(streak)]
+            negative_streaks.append(item)
+
+    excellent_stars = [
+        student_item(sid, count)
+        for sid, count in sorted(excellent_counts.items(), key=lambda x: -x[1])
+        if count >= 3
+    ]
+    full_attendance = [student_item(sid) for sid in roster if miss_counts.get(sid, 0) == 0]
+
+    heatmap_counts = defaultdict(int)
+    trend_counts = defaultdict(int)
+    for rec in misses:
+        heatmap_counts[rec.date] += 1
+        trend_counts[_period_label(rec.date, group_by)] += 1
+
+    def class_rate(tc):
+        class_ids = members_of(db, tc.id) & ids
+        class_records = [r for r in records if r.student_id in class_ids]
+        dates = {r.date for r in class_records}
+        leave_count = len({
+            (sid, day) for sid, day in leave_pairs if sid in class_ids and day in dates
+        })
+        denominator = len(class_ids) * len(dates) - leave_count
+        class_misses = sum(1 for r in misses if r.student_id in class_ids)
+        submitted_slots = max(0, denominator - class_misses)
+        return {
+            "teaching_class_id": tc.id,
+            "label": tc.label,
+            "member_count": len(class_ids),
+            "assignment_dates": len(dates),
+            "submitted": submitted_slots,
+            "expected": max(0, denominator),
+            "rate": round(submitted_slots / denominator * 100, 1) if denominator > 0 else 0,
+        }
+
+    classes_q = db.query(TeachingClass)
+    if teaching_class_id is not None:
+        classes_q = classes_q.filter(TeachingClass.id == teaching_class_id)
+    rates = [class_rate(tc) for tc in classes_q.order_by(TeachingClass.sort_order, TeachingClass.id).all()]
+
+    semester_compare = []
+    for sem in db.query(HomeworkSemester).order_by(HomeworkSemester.start_date).all():
+        sem_misses = (
+            db.query(HomeworkRecord)
+            .filter(
+                HomeworkRecord.student_id.in_(ids),
+                HomeworkRecord.date >= sem.start_date,
+                HomeworkRecord.date <= sem.end_date,
+                HomeworkRecord.submission_status == "缺交",
+                HomeworkRecord.subject != "全科",
+                (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
+            ).count()
+        )
+        semester_compare.append({
+            "semester_id": sem.id, "name": sem.name, "misses": sem_misses,
+            "is_current": bool(sem.is_current),
+        })
+
+    return {
+        "scope": _scope_meta(db, teaching_class_id, ids),
+        "date_range": {"start": start, "end": end},
+        "kpi": kpi(db, start, end, student, teaching_class_id=teaching_class_id),
+        "warnings": {
+            "streak": streaks,
+            "quality": negative_streaks,
+            "forgot": forgot_warnings,
+        },
+        "honors": {"excellent": excellent_stars, "full_attendance": full_attendance},
+        "rankings": {"missing": missing_ranking, "excellent": excellent_ranking},
+        "submission_rates": rates,
+        "trend": [
+            {"period": period, "count": count}
+            for period, count in sorted(trend_counts.items())
+        ],
+        "evaluation_distribution": [
+            {"tone": key, "label": {"positive": "正面", "neutral": "一般", "negative": "负面"}[key], "count": value}
+            for key, value in evaluation_counts.items()
+        ],
+        "heatmap": [
+            {"date": day, "count": count}
+            for day, count in sorted(heatmap_counts.items())
+        ],
+        "semester_compare": semester_compare,
     }
 
 
@@ -224,17 +607,11 @@ def student_summary(db, student_id=None, name=None):
     sem = get_semester(db)
     start, end = sem["semester_start"], sem["semester_end"]
 
-    miss_rows = (
-        db.query(HomeworkRecord)
-        .filter(
-            HomeworkRecord.student_id == roster.student_id,
-            (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
-            HomeworkRecord.subject != "全科",
-            HomeworkRecord.date >= start,
-            HomeworkRecord.date <= end,
-        )
-        .all()
-    )
+    miss_rows = [
+        rec for rec, _ in _base_miss_query(db, start, end).filter(
+            HomeworkRecord.student_id == roster.student_id
+        ).all()
+    ]
     by_subject = defaultdict(int)
     for r in miss_rows:
         by_subject[normalize_subject(r.subject)] += 1

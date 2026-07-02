@@ -110,6 +110,10 @@ Base.metadata.create_all(bind=engine)
 from app.db.migrate_teaching import migrate_teaching  # noqa
 migrate_teaching()
 
+# 作业仪表盘迁移：旧缺交记录原样保留并补齐状态/时间戳，学期配置迁入历史表。
+from app.db.migrate_homework_dashboard import migrate_homework_dashboard  # noqa
+migrate_homework_dashboard()
+
 from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa
 from app.chat.session import router as chat_router  # noqa

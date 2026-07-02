@@ -14,6 +14,8 @@ from app.db.models import (
     ClassRoster,
     HomeworkRecord,
     SpecialRecord,
+    TeachingClass,
+    TeachingClassMember,
     get_db,
 )
 from app.homework import service
@@ -23,6 +25,7 @@ from app.homework.parser import (
     parse_homework_item,
     split_colon,
     split_names,
+    parse_name_action,
 )
 
 router = APIRouter(tags=["homework"])
@@ -47,54 +50,80 @@ def _filters(start_date, end_date, student, subject, db):
 
 @router.get("/homework/kpi")
 async def hw_kpi(start_date: str = "", end_date: str = "",
-                 student: str = "", subject: str = ""):
+                 student: str = "", subject: str = "",
+                 teaching_class_id: Optional[int] = None):
     db = next(get_db())
     try:
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.kpi(db, s, e, stu, sub)
+        return service.kpi(db, s, e, stu, sub, teaching_class_id)
     finally:
         db.close()
 
 
 @router.get("/homework/trend")
 async def hw_trend(start_date: str = "", end_date: str = "",
-                   student: str = "", subject: str = ""):
+                   student: str = "", subject: str = "",
+                   teaching_class_id: Optional[int] = None):
     db = next(get_db())
     try:
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.trend(db, s, e, stu, sub)
+        return service.trend(db, s, e, stu, sub, teaching_class_id)
     finally:
         db.close()
 
 
 @router.get("/homework/subjects")
 async def hw_subjects(start_date: str = "", end_date: str = "",
-                      student: str = "", subject: str = ""):
+                      student: str = "", subject: str = "",
+                      teaching_class_id: Optional[int] = None):
     db = next(get_db())
     try:
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.subjects(db, s, e, stu, sub)
+        return service.subjects(db, s, e, stu, sub, teaching_class_id)
     finally:
         db.close()
 
 
 @router.get("/homework/rankings")
 async def hw_rankings(start_date: str = "", end_date: str = "",
-                      student: str = "", subject: str = "", limit: int = 10):
+                      student: str = "", subject: str = "", limit: int = 10,
+                      teaching_class_id: Optional[int] = None):
     db = next(get_db())
     try:
         s, e, stu, sub = _filters(start_date, end_date, student, subject, db)
-        return service.rankings(db, s, e, stu, sub, limit)
+        return service.rankings(db, s, e, stu, sub, limit, teaching_class_id)
     finally:
         db.close()
 
 
 @router.get("/homework/warnings")
-async def hw_warnings():
+async def hw_warnings(start_date: str = "", end_date: str = "",
+                      teaching_class_id: Optional[int] = None):
     db = next(get_db())
     try:
         sem = service.get_semester(db)
-        return service.warnings(db, sem["semester_start"], sem["semester_end"])
+        return service.warnings(
+            db,
+            start_date or sem["semester_start"],
+            end_date or sem["semester_end"],
+            teaching_class_id,
+        )
+    finally:
+        db.close()
+
+
+@router.get("/homework/dashboard")
+async def hw_dashboard(start_date: str = "", end_date: str = "", student: str = "",
+                       teaching_class_id: Optional[int] = None,
+                       group_by: str = Query("week", pattern="^(week|month)$")):
+    db = next(get_db())
+    try:
+        if teaching_class_id is not None and not db.query(TeachingClass).filter(
+            TeachingClass.id == teaching_class_id
+        ).first():
+            raise HTTPException(404, "教学班不存在")
+        s, e, stu, _ = _filters(start_date, end_date, student, "", db)
+        return service.dashboard(db, s, e, stu, teaching_class_id, group_by)
     finally:
         db.close()
 
@@ -146,11 +175,24 @@ class RecordsPayload(BaseModel):
     raw_text: str
     date: Optional[str] = None
     mode: str = "by_student"  # by_student | by_subject
+    teaching_class_id: Optional[int] = None
 
 
-def _find_student_id(db, name):
-    row = db.query(ClassRoster).filter(ClassRoster.name == name).first()
-    return row.student_id if row else None
+def _student_matches(db, name, teaching_class_id=None):
+    q = db.query(ClassRoster)
+    if teaching_class_id is not None:
+        q = q.join(
+            TeachingClassMember,
+            TeachingClassMember.student_id == ClassRoster.student_id,
+        ).filter(TeachingClassMember.teaching_class_id == teaching_class_id)
+    else:
+        q = q.filter(ClassRoster.student_id.in_(service._scope_student_ids(db)))
+    return q.filter(ClassRoster.name == name).all()
+
+
+def _find_student_id(db, name, teaching_class_id=None):
+    matches = _student_matches(db, name, teaching_class_id)
+    return matches[0].student_id if len(matches) == 1 else None
 
 
 @router.post("/homework/records")
@@ -175,7 +217,7 @@ async def hw_add_records(payload: RecordsPayload):
                 names = split_names(right)
                 if not is_subject_item(left):
                     for name in names:
-                        sid = _find_student_id(db, name)
+                        sid = _find_student_id(db, name, payload.teaching_class_id)
                         if not sid:
                             errors.append(f"找不到学生: {name}")
                             continue
@@ -188,17 +230,18 @@ async def hw_add_records(payload: RecordsPayload):
                         continue
                     subj, content, remark = parsed
                     for name in names:
-                        sid = _find_student_id(db, name)
+                        sid = _find_student_id(db, name, payload.teaching_class_id)
                         if not sid:
                             errors.append(f"找不到学生: {name}")
                             continue
                         db.add(HomeworkRecord(student_id=sid, date=date, subject=subj,
-                                              content=content, remark=remark))
+                                              content=content, remark=remark,
+                                              submission_status="缺交"))
                         added += 1
             else:
                 # 学生：科目1、科目2 / 情况
                 name = left
-                sid = _find_student_id(db, name)
+                sid = _find_student_id(db, name, payload.teaching_class_id)
                 if not sid:
                     errors.append(f"找不到学生: {name}")
                     continue
@@ -212,12 +255,114 @@ async def hw_add_records(payload: RecordsPayload):
                             continue
                         subj, content, remark = parsed
                         db.add(HomeworkRecord(student_id=sid, date=date, subject=subj,
-                                              content=content, remark=remark))
+                                              content=content, remark=remark,
+                                              submission_status="缺交"))
                         added += 1
         db.commit()
         if added > 0:
             export_daily_report(date, db=db)
         return {"success": True, "added_count": added, "errors": errors}
+    finally:
+        db.close()
+
+
+class SmartInputPayload(BaseModel):
+    raw_text: str
+    date: Optional[str] = None
+    teaching_class_id: int
+    confirm: bool = False
+
+
+@router.post("/homework/smart-input")
+async def hw_smart_input(payload: SmartInputPayload):
+    if not payload.raw_text.strip():
+        raise HTTPException(400, "请输入记录内容")
+    db = next(get_db())
+    try:
+        if not db.query(TeachingClass).filter(
+            TeachingClass.id == payload.teaching_class_id
+        ).first():
+            raise HTTPException(404, "教学班不存在")
+        members = (
+            db.query(ClassRoster)
+            .join(TeachingClassMember, TeachingClassMember.student_id == ClassRoster.student_id)
+            .filter(TeachingClassMember.teaching_class_id == payload.teaching_class_id)
+            .all()
+        )
+        by_name = {}
+        for member in members:
+            by_name.setdefault(member.name, []).append(member)
+        by_id = {member.student_id: member for member in members}
+        parsed = []
+        for line in payload.raw_text.splitlines():
+            if not line.strip():
+                continue
+            stripped = line.strip()
+            explicit = next(
+                (sid for sid in sorted(by_id, key=len, reverse=True)
+                 if stripped.startswith(sid)),
+                None,
+            )
+            parse_text = stripped[len(explicit):].strip() if explicit else stripped
+            item = parse_name_action(parse_text, by_name.keys())
+            if explicit and not item.get("error"):
+                item["explicit_student_id"] = explicit
+            parsed.append(item)
+        errors = []
+        preview = []
+        for item in parsed:
+            if item.get("error"):
+                errors.append({"raw": item["raw"], "message": item["error"]})
+                continue
+            matches = by_name[item["name"]]
+            explicit_sid = item.pop("explicit_student_id", None)
+            if explicit_sid:
+                if by_id[explicit_sid].name != item["name"]:
+                    errors.append({
+                        "raw": item["raw"],
+                        "message": "学号与姓名不匹配",
+                    })
+                    continue
+                matches = [by_id[explicit_sid]]
+            if len(matches) > 1:
+                errors.append({
+                    "raw": item["raw"],
+                    "message": "当前教学班有同名学生，请改用“学号 姓名+动作”",
+                    "candidates": [
+                        {"student_id": r.student_id, "name": r.name} for r in matches
+                    ],
+                })
+                continue
+            item["student_id"] = matches[0].student_id
+            preview.append(item)
+        if not payload.confirm:
+            return {"success": not errors, "preview": preview, "errors": errors}
+        if errors:
+            raise HTTPException(422, {"message": "存在未匹配或同名记录", "errors": errors})
+        target_date = payload.date or _today()
+        try:
+            for item in preview:
+                if item["special_type"]:
+                    db.add(SpecialRecord(
+                        student_id=item["student_id"], date=target_date,
+                        type=item["special_type"], note=item["content"] or None,
+                    ))
+                    if item["special_type"] == "请假":
+                        continue
+                db.add(HomeworkRecord(
+                    student_id=item["student_id"], date=target_date,
+                    subject=item["subject"] or "综合",
+                    content=item["content"] or None,
+                    submission_status=item["submission_status"],
+                    evaluation=item["evaluation"] or None,
+                ))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        if preview:
+            export_daily_report(target_date, db=db)
+        return {"success": True, "added_count": len(preview), "errors": []}
     finally:
         db.close()
 
@@ -300,7 +445,8 @@ async def hw_delete_special(record_id: int):
 
 @router.get("/homework/manage/records")
 async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
-                         start_date: str = "", end_date: str = ""):
+                         start_date: str = "", end_date: str = "",
+                         teaching_class_id: Optional[int] = None):
     from sqlalchemy import or_
     from app.homework.service import _subject_keywords
 
@@ -314,6 +460,9 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
             db.query(SpecialRecord, ClassRoster)
             .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
         )
+        scope_ids = service._scope_student_ids(db, teaching_class_id)
+        rec_q = rec_q.filter(HomeworkRecord.student_id.in_(scope_ids))
+        sp_q = sp_q.filter(SpecialRecord.student_id.in_(scope_ids))
         if start_date and end_date:
             rec_q = rec_q.filter(HomeworkRecord.date >= start_date, HomeworkRecord.date <= end_date)
             sp_q = sp_q.filter(SpecialRecord.date >= start_date, SpecialRecord.date <= end_date)
@@ -335,14 +484,21 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
                 rec_q = rec_q.filter(HomeworkRecord.subject == subject)
 
         records = [
-            {"id": r.id, "name": roster.name, "date": r.date, "subject": r.subject,
-             "content": r.content or "", "remark": r.remark or "", "is_special": False}
+            {"id": r.id, "student_id": roster.student_id, "name": roster.name,
+             "class_labels": service._labels_for(db, roster.student_id),
+             "date": r.date, "subject": r.subject,
+             "content": r.content or "", "remark": r.remark or "",
+             "submission_status": r.submission_status, "evaluation": r.evaluation or "",
+             "created_at": r.created_at, "updated_at": r.updated_at,
+             "is_special": False}
             for r, roster in rec_q.order_by(HomeworkRecord.date.desc()).limit(200).all()
         ]
         specials = []
         if include_specials:
             specials = [
-                {"id": sr.id, "name": roster.name, "date": sr.date, "subject": "",
+                {"id": sr.id, "student_id": roster.student_id, "name": roster.name,
+                 "class_labels": service._labels_for(db, roster.student_id),
+                 "date": sr.date, "subject": "",
                  "content": sr.note or "", "remark": sr.type, "is_special": True}
                 for sr, roster in sp_q.order_by(SpecialRecord.date.desc()).limit(200).all()
             ]
@@ -356,6 +512,8 @@ class UpdateRecordPayload(BaseModel):
     subject: str = ""
     content: str = ""
     remark: str = ""
+    submission_status: str = "缺交"
+    evaluation: str = ""
 
 
 @router.put("/homework/manage/records/{record_id}")
@@ -368,6 +526,8 @@ async def hw_manage_update(record_id: int, payload: UpdateRecordPayload):
         rec.subject = payload.subject
         rec.content = payload.content
         rec.remark = payload.remark
+        rec.submission_status = payload.submission_status
+        rec.evaluation = payload.evaluation or None
         db.commit()
         export_daily_report(rec.date, db=db)
         return {"success": True}
@@ -482,6 +642,13 @@ class SemesterPayload(BaseModel):
     semester_name: Optional[str] = None
 
 
+class NewSemesterPayload(BaseModel):
+    name: str
+    start_date: str
+    end_date: str
+    make_current: bool = False
+
+
 @router.get("/homework/semester")
 async def hw_get_semester():
     db = next(get_db())
@@ -496,5 +663,39 @@ async def hw_set_semester(payload: SemesterPayload):
     db = next(get_db())
     try:
         return service.set_semester(db, payload.model_dump(exclude_none=True))
+    finally:
+        db.close()
+
+
+@router.get("/homework/semesters")
+async def hw_list_semesters():
+    db = next(get_db())
+    try:
+        return service.list_semesters(db)
+    finally:
+        db.close()
+
+
+@router.post("/homework/semesters")
+async def hw_add_semester(payload: NewSemesterPayload):
+    db = next(get_db())
+    try:
+        try:
+            return service.add_semester(
+                db, payload.name, payload.start_date, payload.end_date, payload.make_current
+            )
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+    finally:
+        db.close()
+
+
+@router.put("/homework/semesters/{semester_id}/current")
+async def hw_set_current_semester(semester_id: int):
+    db = next(get_db())
+    try:
+        if not service.set_current_semester(db, semester_id):
+            raise HTTPException(404, "学期不存在")
+        return service.get_semester(db)
     finally:
         db.close()

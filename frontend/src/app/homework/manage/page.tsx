@@ -2,11 +2,13 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
-import { ChevronLeft, Trash2 } from 'lucide-react'
+import { ChevronLeft, Pencil, Trash2 } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { Dialog, DialogContent, DialogHeader, DialogTitle } from '@/components/ui/dialog'
+import { useClassScope } from '@/lib/class-scope'
 import {
   Table,
   TableBody,
@@ -23,15 +25,20 @@ interface ManageRecord {
   subject: string
   content: string
   remark: string
+  submission_status?: string
+  evaluation?: string
+  class_labels?: string[]
   is_special: boolean
 }
 
 export default function HomeworkManagePage() {
+  const { current } = useClassScope()
   const [records, setRecords] = useState<ManageRecord[]>([])
   const [student, setStudent] = useState('')
   const [date, setDate] = useState('')
   const [subject, setSubject] = useState('')
   const [loading, setLoading] = useState(false)
+  const [editing, setEditing] = useState<ManageRecord | null>(null)
   // 先把 URL 上的 date/student/subject 读进来再触发加载，避免「无筛选请求」
   // 与「带筛选请求」竞争、前者后到把结果覆盖成全量。
   const [ready, setReady] = useState(false)
@@ -50,13 +57,14 @@ export default function HomeworkManagePage() {
     if (student) params.set('student', student)
     if (date) params.set('date', date)
     if (subject) params.set('subject', subject)
+    if (current !== 'all') params.set('teaching_class_id', String(current))
     try {
       const data = await fetch(`/api/homework/manage/records?${params}`).then((r) => r.json())
       setRecords(data)
     } finally {
       setLoading(false)
     }
-  }, [student, date, subject])
+  }, [student, date, subject, current])
 
   useEffect(() => {
     if (ready) load().catch(() => {})
@@ -68,6 +76,23 @@ export default function HomeworkManagePage() {
       ? `/api/homework/special-records/${rec.id}`
       : `/api/homework/manage/records/${rec.id}`
     await fetch(url, { method: 'DELETE' })
+    await load()
+  }
+
+  async function saveEdit() {
+    if (!editing || editing.is_special) return
+    await fetch(`/api/homework/manage/records/${editing.id}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        subject: editing.subject,
+        content: editing.content,
+        remark: editing.remark,
+        submission_status: editing.submission_status || '缺交',
+        evaluation: editing.evaluation || '',
+      }),
+    })
+    setEditing(null)
     await load()
   }
 
@@ -128,7 +153,8 @@ export default function HomeworkManagePage() {
                 <TableRow>
                   <TableHead>日期</TableHead>
                   <TableHead>姓名</TableHead>
-                  <TableHead>类型</TableHead>
+                  <TableHead>班级</TableHead>
+                  <TableHead>状态</TableHead>
                   <TableHead>科目 / 情况</TableHead>
                   <TableHead>说明</TableHead>
                   <TableHead className="text-right">操作</TableHead>
@@ -137,7 +163,7 @@ export default function HomeworkManagePage() {
               <TableBody>
                 {records.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={6} className="py-10 text-center text-sm text-slate-400">
+                    <TableCell colSpan={7} className="py-10 text-center text-sm text-slate-400">
                       {loading ? '加载中…' : '暂无记录'}
                     </TableCell>
                   </TableRow>
@@ -147,15 +173,25 @@ export default function HomeworkManagePage() {
                       <TableCell className="text-slate-500">{rec.date}</TableCell>
                       <TableCell className="font-medium">{rec.name}</TableCell>
                       <TableCell>
+                        {rec.class_labels?.map((label) => <Badge key={label} variant="outline" className="mr-1">{label}</Badge>)}
+                      </TableCell>
+                      <TableCell>
                         {rec.is_special ? (
                           <Badge className="border-transparent bg-warning-50 text-warning-700">特殊</Badge>
+                        ) : rec.submission_status === '已交' ? (
+                          <Badge className="border-transparent bg-success-50 text-success-700">已交</Badge>
                         ) : (
                           <Badge className="border-transparent bg-slate-100 text-slate-600">缺交</Badge>
                         )}
                       </TableCell>
                       <TableCell>{rec.is_special ? rec.remark : rec.subject}</TableCell>
-                      <TableCell className="text-slate-500">{rec.content || rec.remark || '—'}</TableCell>
+                      <TableCell className="text-slate-500">{rec.evaluation || rec.content || rec.remark || '—'}</TableCell>
                       <TableCell className="text-right">
+                        {!rec.is_special && (
+                          <button onClick={() => setEditing({ ...rec })} className="mr-3 text-slate-400 hover:text-brand-600" aria-label="编辑">
+                            <Pencil className="h-4 w-4" />
+                          </button>
+                        )}
                         <button
                           onClick={() => remove(rec)}
                           className="text-slate-400 hover:text-danger-500"
@@ -172,6 +208,40 @@ export default function HomeworkManagePage() {
           </div>
         </CardContent>
       </Card>
+
+      <Dialog open={!!editing} onOpenChange={(open) => !open && setEditing(null)}>
+        <DialogContent>
+          <DialogHeader><DialogTitle>编辑作业记录</DialogTitle></DialogHeader>
+          {editing && (
+            <div className="space-y-3">
+              <div className="text-sm text-slate-500">{editing.date} · {editing.name}</div>
+              <label className="block text-sm">提交状态
+                <select value={editing.submission_status || '缺交'} onChange={(e) => setEditing({ ...editing, submission_status: e.target.value })}
+                  className="mt-1 w-full rounded-md border border-slate-200 px-2 py-2">
+                  <option value="缺交">缺交</option><option value="已交">已交</option>
+                </select>
+              </label>
+              <label className="block text-sm">科目
+                <input value={editing.subject} onChange={(e) => setEditing({ ...editing, subject: e.target.value })}
+                  className="mt-1 w-full rounded-md border border-slate-200 px-2 py-2" />
+              </label>
+              <label className="block text-sm">评价
+                <input value={editing.evaluation || ''} onChange={(e) => setEditing({ ...editing, evaluation: e.target.value })}
+                  placeholder="优秀、认真、马虎……" className="mt-1 w-full rounded-md border border-slate-200 px-2 py-2" />
+              </label>
+              <label className="block text-sm">说明
+                <textarea value={editing.content} onChange={(e) => setEditing({ ...editing, content: e.target.value })}
+                  rows={3} className="mt-1 w-full rounded-md border border-slate-200 px-2 py-2" />
+              </label>
+              <label className="block text-sm">特殊备注
+                <input value={editing.remark} onChange={(e) => setEditing({ ...editing, remark: e.target.value })}
+                  className="mt-1 w-full rounded-md border border-slate-200 px-2 py-2" />
+              </label>
+              <Button onClick={saveEdit} className="w-full">保存修改</Button>
+            </div>
+          )}
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

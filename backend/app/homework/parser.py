@@ -87,3 +87,62 @@ def split_colon(line):
     if len(parts) < 2:
         return None
     return parts[0].strip(), parts[1].strip()
+
+
+POSITIVE_EVALUATIONS = ("优秀", "认真", "良好", "工整", "整洁", "进步", "棒", "优")
+NEGATIVE_EVALUATIONS = ("不合格", "不认真", "马虎", "潦草", "敷衍", "不工整", "退步", "差")
+LEAVE_WORDS = ("请假", "病假", "事假")
+FORGOT_WORDS = ("忘带", "没带", "未带")
+MISSING_WORDS = ("缺交", "未交", "没交", "欠交")
+
+
+def parse_name_action(line, known_names):
+    """解析参考项目的「姓名+动作」语法，姓名按当前教学班最长前缀匹配。"""
+    raw = line.strip()
+    name = next(
+        (candidate for candidate in sorted(known_names, key=len, reverse=True)
+         if raw.startswith(candidate)),
+        None,
+    )
+    if not name:
+        return {"raw": raw, "error": "未匹配到当前教学班学生"}
+    action = raw[len(name):].strip(" ：:,，、")
+    if not action:
+        return {
+            "raw": raw, "name": name, "subject": "综合",
+            "submission_status": "缺交", "evaluation": "", "content": "",
+            "special_type": "",
+        }
+    if any(word in action for word in LEAVE_WORDS):
+        return {
+            "raw": raw, "name": name, "subject": "综合",
+            "submission_status": "已交", "evaluation": "", "content": "",
+            "special_type": "请假",
+        }
+    if any(word in action for word in FORGOT_WORDS):
+        return {
+            "raw": raw, "name": name, "subject": normalize_subject(action),
+            "submission_status": "缺交", "evaluation": "", "content": action,
+            "special_type": "忘带",
+        }
+    subject = next(
+        (canonical for canonical, words in SUBJECT_GROUPS
+         if any(word in action for word in words)),
+        "综合",
+    )
+    if any(word in action for word in MISSING_WORDS):
+        content = action
+        for word in MISSING_WORDS:
+            content = content.replace(word, "")
+        return {
+            "raw": raw, "name": name, "subject": subject,
+            "submission_status": "缺交", "evaluation": "", "content": content.strip(),
+            "special_type": "",
+        }
+    tone_words = POSITIVE_EVALUATIONS + NEGATIVE_EVALUATIONS + ("合格", "一般")
+    evaluation = next((word for word in tone_words if word in action), action)
+    return {
+        "raw": raw, "name": name, "subject": subject,
+        "submission_status": "已交", "evaluation": evaluation, "content": "",
+        "special_type": "",
+    }

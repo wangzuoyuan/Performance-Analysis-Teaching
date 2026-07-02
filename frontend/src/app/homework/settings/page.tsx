@@ -22,6 +22,13 @@ interface Semester {
   semester_end: string
   semester_name: string
 }
+interface SemesterHistory {
+  id: number
+  name: string
+  start_date: string
+  end_date: string
+  is_current: boolean
+}
 interface RosterRow {
   student_id: string
   name: string
@@ -39,6 +46,8 @@ export default function HomeworkSettingsPage() {
     semester_name: '',
   })
   const [semSaved, setSemSaved] = useState<string | null>(null)
+  const [semesters, setSemesters] = useState<SemesterHistory[]>([])
+  const [newSemester, setNewSemester] = useState({ name: '', start_date: '', end_date: '' })
   const [roster, setRoster] = useState<RosterRow[]>([])
 
   // 新增学生
@@ -67,6 +76,10 @@ export default function HomeworkSettingsPage() {
     const data = await fetch('/api/homework/roster').then((r) => r.json())
     setRoster(data)
   }, [])
+  const loadSemesters = useCallback(async () => {
+    const data = await fetch('/api/homework/semesters').then((r) => r.json())
+    setSemesters(data)
+  }, [])
 
   useEffect(() => {
     fetch('/api/homework/semester')
@@ -74,7 +87,8 @@ export default function HomeworkSettingsPage() {
       .then(setSemester)
       .catch(() => {})
     loadRoster().catch(() => {})
-  }, [loadRoster])
+    loadSemesters().catch(() => {})
+  }, [loadRoster, loadSemesters])
 
   async function saveSemester() {
     setSemSaved(null)
@@ -88,6 +102,28 @@ export default function HomeworkSettingsPage() {
       setSemester(data)
       setSemSaved('已保存')
       setTimeout(() => setSemSaved(null), 2000)
+      await loadSemesters()
+    }
+  }
+
+  async function addSemester() {
+    if (!newSemester.start_date || !newSemester.end_date) return
+    const res = await fetch('/api/homework/semesters', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...newSemester, make_current: false }),
+    })
+    if (res.ok) {
+      setSemesters(await res.json())
+      setNewSemester({ name: '', start_date: '', end_date: '' })
+    }
+  }
+
+  async function makeCurrent(id: number) {
+    const res = await fetch(`/api/homework/semesters/${id}/current`, { method: 'PUT' })
+    if (res.ok) {
+      setSemester(await res.json())
+      await loadSemesters()
     }
   }
 
@@ -178,6 +214,33 @@ export default function HomeworkSettingsPage() {
             </label>
             <Button onClick={saveSemester}>保存</Button>
             {semSaved && <span className="text-sm text-success-600">{semSaved}</span>}
+          </div>
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader><CardTitle className="text-base">历史学期</CardTitle></CardHeader>
+        <CardContent className="space-y-4">
+          <div className="grid gap-2 md:grid-cols-[1fr_160px_160px_auto]">
+            <input value={newSemester.name} onChange={(e) => setNewSemester({ ...newSemester, name: e.target.value })}
+              placeholder="学期名称" className="rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+            <input type="date" value={newSemester.start_date} onChange={(e) => setNewSemester({ ...newSemester, start_date: e.target.value })}
+              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+            <input type="date" value={newSemester.end_date} onChange={(e) => setNewSemester({ ...newSemester, end_date: e.target.value })}
+              className="rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+            <Button variant="outline" onClick={addSemester}>添加历史学期</Button>
+          </div>
+          <div className="space-y-2">
+            {semesters.map((item) => (
+              <div key={item.id} className="flex flex-col justify-between gap-2 rounded-lg border border-slate-200 p-3 sm:flex-row sm:items-center">
+                <div>
+                  <span className="font-medium">{item.name}</span>
+                  {item.is_current && <Badge className="ml-2 border-0 bg-brand-50 text-brand-700">当前</Badge>}
+                  <div className="text-xs text-slate-400">{item.start_date} 至 {item.end_date}</div>
+                </div>
+                {!item.is_current && <Button size="sm" variant="ghost" onClick={() => makeCurrent(item.id)}>设为当前学期</Button>}
+              </div>
+            ))}
           </div>
         </CardContent>
       </Card>

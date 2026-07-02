@@ -7,6 +7,7 @@ import { ChevronLeft } from 'lucide-react'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { useClassScope } from '@/lib/class-scope'
 
 interface WarnItem {
   name: string
@@ -41,14 +42,16 @@ function dateRange(dates: string[]) {
 }
 
 export default function WarningsPage() {
+  const { current } = useClassScope()
   const [data, setData] = useState<Warnings | null>(null)
 
   useEffect(() => {
-    fetch('/api/homework/warnings')
+    const query = current === 'all' ? '' : `?teaching_class_id=${current}`
+    fetch(`/api/homework/warnings${query}`)
       .then((r) => r.json())
       .then(setData)
       .catch(() => {})
-  }, [])
+  }, [current])
 
   const all = useMemo(() => [...(data?.serious || []), ...(data?.warning || [])], [data])
 
