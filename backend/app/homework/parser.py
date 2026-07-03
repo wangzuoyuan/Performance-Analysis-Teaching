@@ -139,7 +139,9 @@ def parse_name_action(line, known_names):
             "submission_status": "缺交", "evaluation": "", "content": content.strip(),
             "special_type": "",
         }
-    tone_words = POSITIVE_EVALUATIONS + NEGATIVE_EVALUATIONS + ("合格", "一般")
+    # 负面词优先匹配：像「不认真」「不工整」内含正面子串「认真」「工整」，
+    # 若正面在前会被误判为正面，进而让质量预警/评价分布反转，故负面在前。
+    tone_words = NEGATIVE_EVALUATIONS + POSITIVE_EVALUATIONS + ("合格", "一般")
     evaluation = next((word for word in tone_words if word in action), action)
     return {
         "raw": raw, "name": name, "subject": subject,

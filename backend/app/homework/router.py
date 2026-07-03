@@ -377,6 +377,7 @@ class SpecialPayload(BaseModel):
     raw_text: str
     date: Optional[str] = None
     mode: str = "by_student"  # by_student | by_type
+    teaching_class_id: Optional[int] = None
 
 
 @router.post("/homework/special-records")
@@ -396,16 +397,16 @@ async def hw_add_special(payload: SpecialPayload):
             left, right = parts
             if payload.mode == "by_type":
                 for name in split_names(right):
-                    sid = _find_student_id(db, name)
+                    sid, err = _resolve_student(db, name, payload.teaching_class_id)
                     if not sid:
-                        errors.append(f"找不到学生: {name}")
+                        errors.append(err)
                         continue
                     db.add(SpecialRecord(student_id=sid, date=date, type=left, note=None))
                     added += 1
             else:
-                sid = _find_student_id(db, left)
+                sid, err = _resolve_student(db, left, payload.teaching_class_id)
                 if not sid:
-                    errors.append(f"找不到学生: {left}")
+                    errors.append(err)
                     continue
                 for rec_type in split_names(right):
                     db.add(SpecialRecord(student_id=sid, date=date, type=rec_type, note=None))
