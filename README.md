@@ -1,5 +1,10 @@
 # 成绩分析（教学版）
 
+![version](https://img.shields.io/badge/version-1.0.0-blue)
+![license](https://img.shields.io/badge/license-MIT-green)
+![python](https://img.shields.io/badge/python-3.10%2B-blue)
+![Next.js](https://img.shields.io/badge/Next.js-14-black)
+
 > 任课老师的多教学班成绩与教学质量分析 Web 应用。
 > 一位老师同时任教**多个教学班**（高一＝行政班数字，高二/三可为走班班名如「物A1」「史B3」），
 > 所有质量分析按「我教的教学班成员集合」进行，并支持跨学年学情继承。
@@ -146,6 +151,10 @@ cd backend && source .venv/bin/activate && pytest tests/
 覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `backup_weekly`，以及教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除）。
 
 > 注：`test_homework_router::test_toggle_excluded_roundtrip` 依赖已跑过 `homework/migrate.py`（把旧 `homework.db` 迁入），全新空库下会因花名册为空而跳过失败，属环境依赖，不影响功能。
+
+## 版本
+
+当前版本 **v1.0.0**（首个正式发布）。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
 
 ## 设计文档
 
