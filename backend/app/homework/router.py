@@ -18,6 +18,7 @@ from app.db.models import (
     TeachingClassMember,
     get_db,
 )
+from app.analysis.scope import student_class_map_multi
 from app.homework import service
 from app.homework.export import export_daily_report
 from app.homework.parser import (
@@ -190,9 +191,14 @@ def _student_matches(db, name, teaching_class_id=None):
     return q.filter(ClassRoster.name == name).all()
 
 
-def _find_student_id(db, name, teaching_class_id=None):
+def _resolve_student(db, name, teaching_class_id=None):
+    """按姓名解析学号，返回 (student_id, error)。同名时给出明确提示而非「找不到」。"""
     matches = _student_matches(db, name, teaching_class_id)
-    return matches[0].student_id if len(matches) == 1 else None
+    if not matches:
+        return None, f"找不到学生: {name}"
+    if len(matches) > 1:
+        return None, f"同名学生: {name}（请改用智能录入，以「学号 姓名+动作」消歧）"
+    return matches[0].student_id, None
 
 
 @router.post("/homework/records")
@@ -217,9 +223,9 @@ async def hw_add_records(payload: RecordsPayload):
                 names = split_names(right)
                 if not is_subject_item(left):
                     for name in names:
-                        sid = _find_student_id(db, name, payload.teaching_class_id)
+                        sid, err = _resolve_student(db, name, payload.teaching_class_id)
                         if not sid:
-                            errors.append(f"找不到学生: {name}")
+                            errors.append(err)
                             continue
                         db.add(SpecialRecord(student_id=sid, date=date, type=left, note=None))
                         added += 1
@@ -230,9 +236,9 @@ async def hw_add_records(payload: RecordsPayload):
                         continue
                     subj, content, remark = parsed
                     for name in names:
-                        sid = _find_student_id(db, name, payload.teaching_class_id)
+                        sid, err = _resolve_student(db, name, payload.teaching_class_id)
                         if not sid:
-                            errors.append(f"找不到学生: {name}")
+                            errors.append(err)
                             continue
                         db.add(HomeworkRecord(student_id=sid, date=date, subject=subj,
                                               content=content, remark=remark,
@@ -241,9 +247,9 @@ async def hw_add_records(payload: RecordsPayload):
             else:
                 # 学生：科目1、科目2 / 情况
                 name = left
-                sid = _find_student_id(db, name, payload.teaching_class_id)
+                sid, err = _resolve_student(db, name, payload.teaching_class_id)
                 if not sid:
-                    errors.append(f"找不到学生: {name}")
+                    errors.append(err)
                     continue
                 for item in split_names(right):
                     if not is_subject_item(item):
@@ -460,7 +466,8 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
             db.query(SpecialRecord, ClassRoster)
             .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
         )
-        scope_ids = service._scope_student_ids(db, teaching_class_id)
+        # 记录管理是运维视角：excluded 学生的历史记录也要能查到、能改能删
+        scope_ids = service._scope_student_ids(db, teaching_class_id, include_excluded=True)
         rec_q = rec_q.filter(HomeworkRecord.student_id.in_(scope_ids))
         sp_q = sp_q.filter(SpecialRecord.student_id.in_(scope_ids))
         if start_date and end_date:
@@ -483,9 +490,10 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
             else:
                 rec_q = rec_q.filter(HomeworkRecord.subject == subject)
 
+        labels = student_class_map_multi(db)
         records = [
             {"id": r.id, "student_id": roster.student_id, "name": roster.name,
-             "class_labels": service._labels_for(db, roster.student_id),
+             "class_labels": service._labels_for(labels, roster.student_id),
              "date": r.date, "subject": r.subject,
              "content": r.content or "", "remark": r.remark or "",
              "submission_status": r.submission_status, "evaluation": r.evaluation or "",
@@ -497,7 +505,7 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
         if include_specials:
             specials = [
                 {"id": sr.id, "student_id": roster.student_id, "name": roster.name,
-                 "class_labels": service._labels_for(db, roster.student_id),
+                 "class_labels": service._labels_for(labels, roster.student_id),
                  "date": sr.date, "subject": "",
                  "content": sr.note or "", "remark": sr.type, "is_special": True}
                 for sr, roster in sp_q.order_by(SpecialRecord.date.desc()).limit(200).all()

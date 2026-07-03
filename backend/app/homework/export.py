@@ -45,10 +45,13 @@ def export_daily_report(target_date, db=None):
     try:
         roster = {r.student_id: r for r in db.query(ClassRoster).all()}
 
-        # 缺交记录（含说明/特殊情况备注）
+        # 缺交记录（含说明/特殊情况备注）；「已交」的收交/评价记录不属于缺交导出
         records = (
             db.query(HomeworkRecord)
-            .filter(HomeworkRecord.date == target_date)
+            .filter(
+                HomeworkRecord.date == target_date,
+                HomeworkRecord.submission_status == "缺交",
+            )
             .all()
         )
         specials = (

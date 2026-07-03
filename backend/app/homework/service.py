@@ -18,7 +18,12 @@ from app.db.models import (
     TeachingClass,
 )
 from app.analysis.scope import all_my_member_ids, members_of, student_class_map_multi
-from app.homework.parser import SUBJECT_GROUPS, normalize_subject
+from app.homework.parser import (
+    NEGATIVE_EVALUATIONS,
+    POSITIVE_EVALUATIONS,
+    SUBJECT_GROUPS,
+    normalize_subject,
+)
 
 DEFAULT_SEMESTER = {
     "semester_start": "2026-02-17",
@@ -85,9 +90,9 @@ def _subject_keywords(subject):
     return None
 
 
-def _base_miss_query(db, start, end, student=None, subject=None,
-                     respect_excluded=True, teaching_class_id=None):
-    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。"""
+def _miss_filters():
+    """有效缺交的统一 SQL 谓词：状态=缺交、非全科、remark 为空、当天无请假。
+    所有缺交口径（KPI/排行/预警/学期对比）必须复用这一份，避免各处漂移。"""
     from sqlalchemy import and_, exists
 
     has_leave = exists().where(and_(
@@ -95,18 +100,26 @@ def _base_miss_query(db, start, end, student=None, subject=None,
         SpecialRecord.date == HomeworkRecord.date,
         SpecialRecord.type.like("%请假%"),
     ))
+    return [
+        (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
+        HomeworkRecord.subject != "全科",
+        HomeworkRecord.submission_status == "缺交",
+        ~has_leave,
+    ]
+
+
+def _base_miss_query(db, start, end, student=None, subject=None,
+                     respect_excluded=True, teaching_class_id=None, scoped=True):
+    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。"""
     q = (
         db.query(HomeworkRecord, ClassRoster)
         .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
-        .filter(
-            (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
-            HomeworkRecord.subject != "全科",
-            HomeworkRecord.submission_status == "缺交",
-            ~has_leave,
-        )
+        .filter(*_miss_filters())
     )
-    ids = _scope_student_ids(db, teaching_class_id)
-    q = q.filter(HomeworkRecord.student_id.in_(ids))
+    if scoped:
+        # excluded 的剔除交给下方 roster 层，保留「指定学生查询时不排除」的口径
+        ids = _scope_student_ids(db, teaching_class_id, include_excluded=True)
+        q = q.filter(HomeworkRecord.student_id.in_(ids))
     if start and end:
         q = q.filter(HomeworkRecord.date >= start, HomeworkRecord.date <= end)
     if student:
@@ -124,12 +137,14 @@ def _base_miss_query(db, start, end, student=None, subject=None,
 
 
 def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
-    """作业范围：None 是「我教的全部班」成员并集，不是全库。"""
-    ids = (
-        members_of(db, int(teaching_class_id))
-        if teaching_class_id is not None
-        else all_my_member_ids(db)
-    )
+    """作业范围：指定教学班＝该班成员；None＝我教的全部班成员并集。
+    尚未配置任何教学班时回落到全花名册（旧版口径），避免看板/录入整体失明。"""
+    if teaching_class_id is not None:
+        ids = members_of(db, int(teaching_class_id))
+    else:
+        ids = all_my_member_ids(db)
+        if not ids:
+            ids = {r[0] for r in db.query(ClassRoster.student_id).all()}
     if include_excluded or not ids:
         return set(ids)
     excluded = {
@@ -139,8 +154,9 @@ def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
     return set(ids) - excluded
 
 
-def _labels_for(db, student_id):
-    return [row["label"] for row in student_class_map_multi(db).get(student_id, [])]
+def _labels_for(labels, student_id):
+    """labels 为 student_class_map_multi(db) 的结果；调用方每次请求只建一次。"""
+    return [row["label"] for row in labels.get(student_id, [])]
 
 
 def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
@@ -160,8 +176,9 @@ def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
     else:
         worst_subject = {"name": "无", "count": 0}
 
+    labels = student_class_map_multi(db)
     top_students = [
-        {"student_id": sid, "name": name, "class_labels": _labels_for(db, sid), "count": c}
+        {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": c}
         for (sid, name), c in sorted(stu_counts.items(), key=lambda x: x[1], reverse=True)[:5]
     ]
     return {
@@ -190,6 +207,7 @@ def subjects(db, start, end, student=None, subject=None, teaching_class_id=None)
         canonical = normalize_subject(rec.subject)
         totals[canonical] += 1
         detail[canonical][(roster.student_id, roster.name)] += 1
+    labels = student_class_map_multi(db)
     out = []
     for name, count in sorted(totals.items(), key=lambda x: x[1], reverse=True):
         students = sorted(detail[name].items(), key=lambda x: x[1], reverse=True)
@@ -197,7 +215,7 @@ def subjects(db, start, end, student=None, subject=None, teaching_class_id=None)
             "name": name,
             "value": count,
             "students": [
-                {"student_id": sid, "name": name, "class_labels": _labels_for(db, sid), "count": c}
+                {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": c}
                 for (sid, name), c in students
             ],
         })
@@ -212,11 +230,12 @@ def rankings(db, start, end, student=None, subject=None, limit=10,
     for _, roster in rows:
         counts[(roster.student_id, roster.name)] += 1
     ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
+    labels = student_class_map_multi(db)
     return {
         "names": [name for (_, name), _ in ranked],
         "counts": [c for _, c in ranked],
         "students": [
-            {"student_id": sid, "name": name, "class_labels": _labels_for(db, sid), "count": count}
+            {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": count}
             for (sid, name), count in ranked
         ],
     }
@@ -225,9 +244,11 @@ def rankings(db, start, end, student=None, subject=None, limit=10,
 def warnings(db, start, end, teaching_class_id=None):
     """同一学科「当前正在进行」的连续缺交预警。
 
-    时间轴 = 该学科全班有人缺交的去重日期；从最近一次收交向前回溯，统计
-    某学生连续缺交了最近几次（必须含最后一次收交，否则视为已结束）。
-    连续 2 次 → warning（黄），≥3 次 → serious（红）。排除 excluded 学生。
+    时间轴 = 该学科全班有人缺交的去重日期 ∪ 该生自身有记录的日期；从最近
+    一次向前回溯，统计某学生连续缺交了最近几次（必须含最后一次，否则视为
+    已结束）。本人一条「已交」会终结自己的连击，但其他学生的「已交」记录
+    不影响本人。连续 2 次 → warning（黄），≥3 次 → serious（红）。
+    排除 excluded 学生。
     """
     ids = _scope_student_ids(db, teaching_class_id)
     all_rows = (
@@ -250,24 +271,27 @@ def warnings(db, start, end, teaching_class_id=None):
         ).all()
     }
 
-    timeline = defaultdict(set)
+    timeline = defaultdict(set)           # subject -> 有人缺交的日期
+    own_dates = defaultdict(set)          # (subject, sid) -> 该生自身有记录的日期
     missed = defaultdict(set)
     identities = {}
     for rec, roster in all_rows:
         subj = normalize_subject(rec.subject)
-        timeline[subj].add(rec.date)
         identities[(subj, roster.student_id)] = roster
+        own_dates[(subj, roster.student_id)].add(rec.date)
         if (
             rec.submission_status == "缺交"
             and not (rec.remark or "").strip()
             and (rec.student_id, rec.date) not in leave_pairs
         ):
             missed[(subj, roster.student_id)].add(rec.date)
+            timeline[subj].add(rec.date)
 
+    labels = student_class_map_multi(db)
     serious, warning = [], []
     for (subj, sid), miss_dates in missed.items():
         roster = identities[(subj, sid)]
-        axis = sorted(timeline[subj])
+        axis = sorted(timeline[subj] | own_dates[(subj, sid)])
         streak = []
         for d in reversed(axis):
             if (sid, d) in leave_pairs:
@@ -282,7 +306,7 @@ def warnings(db, start, end, teaching_class_id=None):
         item = {
             "name": roster.name,
             "student_id": sid,
-            "class_labels": _labels_for(db, sid),
+            "class_labels": _labels_for(labels, sid),
             "subject": subj,
             "streak": len(streak),
             "dates": streak,
@@ -304,8 +328,9 @@ def warnings(db, start, end, teaching_class_id=None):
     }
 
 
-POSITIVE_WORDS = ("优秀", "认真", "良好", "工整", "整洁", "进步", "棒", "优")
-NEGATIVE_WORDS = ("不合格", "不认真", "马虎", "潦草", "敷衍", "不工整", "退步", "差")
+# 评价词表唯一来源在 parser.py（录入解析与看板口径必须一致）
+POSITIVE_WORDS = POSITIVE_EVALUATIONS
+NEGATIVE_WORDS = NEGATIVE_EVALUATIONS
 
 
 def evaluation_tone(value):
@@ -334,10 +359,18 @@ def list_semesters(db):
 def add_semester(db, name, start_date, end_date, make_current=False):
     if start_date > end_date:
         raise ValueError("学期开始日期不能晚于结束日期")
+    final_name = name.strip() or f"{start_date} 至 {end_date}"
+    duplicate = db.query(HomeworkSemester).filter(
+        HomeworkSemester.name == final_name,
+        HomeworkSemester.start_date == start_date,
+        HomeworkSemester.end_date == end_date,
+    ).first()
+    if duplicate:
+        raise ValueError("同名同起止日期的学期已存在")
     if make_current:
         db.query(HomeworkSemester).update({HomeworkSemester.is_current: 0})
     row = HomeworkSemester(
-        name=name.strip() or f"{start_date} 至 {end_date}",
+        name=final_name,
         start_date=start_date,
         end_date=end_date,
         is_current=1 if make_current else 0,
@@ -390,23 +423,30 @@ def _scope_meta(db, teaching_class_id, ids):
 
 def dashboard(db, start, end, student=None, teaching_class_id=None,
               group_by="week", limit=10):
-    """作业页单次请求所需的完整聚合数据。"""
-    ids = _scope_student_ids(db, teaching_class_id)
+    """作业页单次请求所需的完整聚合数据。
+
+    姓名筛选只作用于按学生的榜单/预警/荣誉/趋势；教学班提交率与学期对比
+    始终按完整范围计算，避免筛一个人时把班级指标算成单人指标。
+    """
+    scope_ids = _scope_student_ids(db, teaching_class_id)
     roster_rows = (
         db.query(ClassRoster).filter(
-            ClassRoster.student_id.in_(ids), ClassRoster.excluded == 0
+            ClassRoster.student_id.in_(scope_ids), ClassRoster.excluded == 0
         ).all()
     )
-    if student:
-        roster_rows = [r for r in roster_rows if student in r.name]
-    roster = {r.student_id: r for r in roster_rows}
+    roster_all = {r.student_id: r for r in roster_rows}
+    ids_all = set(roster_all)
+    roster = (
+        {sid: r for sid, r in roster_all.items() if student in r.name}
+        if student else roster_all
+    )
     ids = set(roster)
     labels = student_class_map_multi(db)
 
     records = (
         db.query(HomeworkRecord)
         .filter(
-            HomeworkRecord.student_id.in_(ids),
+            HomeworkRecord.student_id.in_(ids_all),
             HomeworkRecord.date >= start,
             HomeworkRecord.date <= end,
         ).order_by(HomeworkRecord.date, HomeworkRecord.id).all()
@@ -414,7 +454,7 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     specials = (
         db.query(SpecialRecord)
         .filter(
-            SpecialRecord.student_id.in_(ids),
+            SpecialRecord.student_id.in_(ids_all),
             SpecialRecord.date >= start,
             SpecialRecord.date <= end,
         ).all()
@@ -422,36 +462,43 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     leave_pairs = {
         (s.student_id, s.date) for s in specials if "请假" in (s.type or "")
     }
-    misses = [
-        r for r in records
-        if r.submission_status == "缺交"
-        and r.subject != "全科"
-        and not (r.remark or "").strip()
-        and (r.student_id, r.date) not in leave_pairs
-    ]
+
+    def is_valid_miss(rec):
+        # 与 _miss_filters() 同一口径的内存版
+        return (
+            rec.submission_status == "缺交"
+            and rec.subject != "全科"
+            and not (rec.remark or "").strip()
+            and (rec.student_id, rec.date) not in leave_pairs
+        )
+
+    misses_all = [r for r in records if is_valid_miss(r)]
+    misses = [r for r in misses_all if r.student_id in ids]
     submitted = [
         r for r in records
-        if r.submission_status == "已交" and (r.student_id, r.date) not in leave_pairs
+        if r.student_id in ids
+        and r.submission_status == "已交"
+        and (r.student_id, r.date) not in leave_pairs
     ]
 
     def student_item(sid, count=0):
-        row = roster[sid]
+        row = roster_all[sid]
         return {
             "student_id": sid,
             "name": row.name,
-            "class_labels": [x["label"] for x in labels.get(sid, [])],
+            "class_labels": _labels_for(labels, sid),
             "count": count,
         }
 
     miss_counts, excellent_counts = defaultdict(int), defaultdict(int)
     evaluation_counts = {"positive": 0, "neutral": 0, "negative": 0}
-    recent_cutoff = max(start, (date.today() - timedelta(days=29)).isoformat())
     for rec in misses:
         miss_counts[rec.student_id] += 1
+    # 优秀统计跟随所选区间（不锚定「今天」，历史区间同样有效）
     for rec in submitted:
         tone = evaluation_tone(rec.evaluation)
         evaluation_counts[tone] += 1
-        if tone == "positive" and rec.date >= recent_cutoff:
+        if tone == "positive":
             excellent_counts[rec.student_id] += 1
 
     missing_ranking = [
@@ -506,50 +553,74 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
         for sid, count in sorted(excellent_counts.items(), key=lambda x: -x[1])
         if count >= 3
     ]
-    full_attendance = [student_item(sid) for sid in roster if miss_counts.get(sid, 0) == 0]
 
     heatmap_counts = defaultdict(int)
     trend_counts = defaultdict(int)
+    subject_totals = defaultdict(int)
     for rec in misses:
         heatmap_counts[rec.date] += 1
         trend_counts[_period_label(rec.date, group_by)] += 1
+        subject_totals[normalize_subject(rec.subject)] += 1
 
-    def class_rate(tc):
-        class_ids = members_of(db, tc.id) & ids
-        class_records = [r for r in records if r.student_id in class_ids]
-        dates = {r.date for r in class_records}
-        leave_count = len({
-            (sid, day) for sid, day in leave_pairs if sid in class_ids and day in dates
-        })
-        denominator = len(class_ids) * len(dates) - leave_count
-        class_misses = sum(1 for r in misses if r.student_id in class_ids)
-        submitted_slots = max(0, denominator - class_misses)
-        return {
+    # 教学班提交率：按完整范围（ids_all）计算，不受姓名筛选影响。
+    # 口径假设：某班任一成员有记录的日期即视为该班一次收交、全员应交；
+    # 区间内无任何记录的班无法估计，rate 返回 None（前端显示「—」）。
+    members_by_class = defaultdict(set)
+    for sid, rows in labels.items():
+        for row in rows:
+            members_by_class[row["teaching_class_id"]].add(sid)
+
+    classes_q = db.query(TeachingClass)
+    if teaching_class_id is not None:
+        classes_q = classes_q.filter(TeachingClass.id == teaching_class_id)
+    classes = classes_q.order_by(TeachingClass.sort_order, TeachingClass.id).all()
+
+    rates = []
+    eligible_full_attendance = set()
+    for tc in classes:
+        class_ids = members_by_class.get(tc.id, set()) & ids_all
+        dates = {r.date for r in records if r.student_id in class_ids}
+        if class_ids and dates:
+            eligible_full_attendance |= class_ids
+            leave_count = len({
+                (sid, day) for sid, day in leave_pairs
+                if sid in class_ids and day in dates
+            })
+            denominator = len(class_ids) * len(dates) - leave_count
+            class_misses = sum(1 for r in misses_all if r.student_id in class_ids)
+            submitted_slots = max(0, denominator - class_misses)
+            rate = round(submitted_slots / denominator * 100, 1) if denominator > 0 else None
+        else:
+            denominator, submitted_slots, rate = 0, 0, None
+        rates.append({
             "teaching_class_id": tc.id,
             "label": tc.label,
             "member_count": len(class_ids),
             "assignment_dates": len(dates),
             "submitted": submitted_slots,
             "expected": max(0, denominator),
-            "rate": round(submitted_slots / denominator * 100, 1) if denominator > 0 else 0,
-        }
+            "rate": rate,
+        })
 
-    classes_q = db.query(TeachingClass)
-    if teaching_class_id is not None:
-        classes_q = classes_q.filter(TeachingClass.id == teaching_class_id)
-    rates = [class_rate(tc) for tc in classes_q.order_by(TeachingClass.sort_order, TeachingClass.id).all()]
+    if not classes:
+        # 未配置教学班（回落全花名册）：区间内有过任何记录即视为有作业安排
+        eligible_full_attendance = ids_all if records else set()
+    # 全勤之星只发给「所在班在区间内确实有收交记录」的学生，
+    # 避免零数据班/空区间把全班都评成星。
+    full_attendance = [
+        student_item(sid) for sid in roster
+        if sid in eligible_full_attendance and miss_counts.get(sid, 0) == 0
+    ]
 
     semester_compare = []
     for sem in db.query(HomeworkSemester).order_by(HomeworkSemester.start_date).all():
         sem_misses = (
             db.query(HomeworkRecord)
             .filter(
-                HomeworkRecord.student_id.in_(ids),
+                HomeworkRecord.student_id.in_(ids_all),
                 HomeworkRecord.date >= sem.start_date,
                 HomeworkRecord.date <= sem.end_date,
-                HomeworkRecord.submission_status == "缺交",
-                HomeworkRecord.subject != "全科",
-                (HomeworkRecord.remark.is_(None)) | (HomeworkRecord.remark == ""),
+                *_miss_filters(),
             ).count()
         )
         semester_compare.append({
@@ -558,9 +629,13 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
         })
 
     return {
-        "scope": _scope_meta(db, teaching_class_id, ids),
+        "scope": _scope_meta(db, teaching_class_id, ids_all),
         "date_range": {"start": start, "end": end},
         "kpi": kpi(db, start, end, student, teaching_class_id=teaching_class_id),
+        "subjects": [
+            {"name": key, "value": value}
+            for key, value in sorted(subject_totals.items(), key=lambda x: -x[1])
+        ],
         "warnings": {
             "streak": streaks,
             "quality": negative_streaks,
@@ -607,10 +682,11 @@ def student_summary(db, student_id=None, name=None):
     sem = get_semester(db)
     start, end = sem["semester_start"], sem["semester_end"]
 
+    # 指定学生查询：不走教学班 scope、不排除 excluded（口径见模块 docstring）
     miss_rows = [
-        rec for rec, _ in _base_miss_query(db, start, end).filter(
-            HomeworkRecord.student_id == roster.student_id
-        ).all()
+        rec for rec, _ in _base_miss_query(
+            db, start, end, respect_excluded=False, scoped=False
+        ).filter(HomeworkRecord.student_id == roster.student_id).all()
     ]
     by_subject = defaultdict(int)
     for r in miss_rows:
@@ -632,7 +708,8 @@ def student_summary(db, student_id=None, name=None):
     # 该生当前连续缺交预警
     all_warn = warnings(db, start, end)
     student_warnings = [
-        w for w in (all_warn["serious"] + all_warn["warning"]) if w["name"] == roster.name
+        w for w in (all_warn["serious"] + all_warn["warning"])
+        if w["student_id"] == roster.student_id
     ]
 
     recent_records = [
