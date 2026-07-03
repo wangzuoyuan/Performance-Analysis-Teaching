@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useState } from 'react'
 import Link from 'next/link'
+import { useRouter } from 'next/navigation'
 import {
   AlertTriangle, Award, CalendarDays, CheckCircle2, ClipboardList,
   Medal, Search, Sparkles, UserCheck,
@@ -35,6 +36,7 @@ type Dashboard = {
   scope: { label: string; member_count: number }
   date_range: { start: string; end: string }
   kpi: { total_misses: number; worst_subject: { name: string; count: number } }
+  subjects: { name: string; value: number }[]
   warnings: {
     streak: {
       serious: StreakItem[]
@@ -52,7 +54,7 @@ type Dashboard = {
     member_count: number
     submitted: number
     expected: number
-    rate: number
+    rate: number | null
   }[]
   trend: { period: string; count: number }[]
   evaluation_distribution: { tone: string; label: string; count: number }[]
@@ -72,9 +74,39 @@ type PreviewItem = {
 type PreviewError = { raw: string; message: string; candidates?: { student_id: string; name: string }[] }
 
 const CHART_COLORS = ['#2563eb', '#94a3b8', '#ef4444']
+const PIE_COLORS = [
+  '#2563eb', '#0f766e', '#7c3aed', '#db2777', '#ea580c',
+  '#0891b2', '#65a30d', '#dc2626', '#9333ea', '#475569',
+]
+// 热力图分级：只用 brand token 类，避免硬编码色值
+const HEAT_LEVELS = [
+  'bg-brand-100 text-brand-900',
+  'bg-brand-200 text-brand-900',
+  'bg-brand-300 text-brand-900',
+  'bg-brand-500 text-white',
+  'bg-brand-600 text-white',
+]
+
+function heatClass(ratio: number) {
+  const index = Math.min(HEAT_LEVELS.length - 1, Math.floor(ratio * HEAT_LEVELS.length))
+  return HEAT_LEVELS[index]
+}
 
 function today() {
   return new Date().toISOString().slice(0, 10)
+}
+
+/** 趋势图的周期标签 → 起止日期（周=周一起 7 天；月=整月）。 */
+function periodRange(period: string, mode: 'week' | 'month') {
+  if (mode === 'month') {
+    const [year, month] = period.split('-').map(Number)
+    const lastDay = new Date(year, month, 0).getDate()
+    return { start: `${period}-01`, end: `${period}-${String(lastDay).padStart(2, '0')}` }
+  }
+  const monday = new Date(`${period}T00:00:00`)
+  const sunday = new Date(monday)
+  sunday.setDate(monday.getDate() + 6)
+  return { start: period, end: sunday.toISOString().slice(0, 10) }
 }
 
 function StudentName({
@@ -98,6 +130,7 @@ function Empty({ text = '暂无数据' }: { text?: string }) {
 }
 
 export default function HomeworkPage() {
+  const router = useRouter()
   const { current, currentClass } = useClassScope()
   const [data, setData] = useState<Dashboard | null>(null)
   const [loading, setLoading] = useState(true)
@@ -105,6 +138,8 @@ export default function HomeworkPage() {
   const [startDate, setStartDate] = useState('')
   const [endDate, setEndDate] = useState('')
   const [student, setStudent] = useState('')
+  // 生效中的筛选：点「应用筛选」才更新，避免每敲一个字符就重新拉取
+  const [applied, setApplied] = useState({ start: '', end: '', student: '' })
   const [groupBy, setGroupBy] = useState<'week' | 'month'>('week')
 
   const [entryDate, setEntryDate] = useState(today())
@@ -124,40 +159,36 @@ export default function HomeworkPage() {
     setError('')
     const params = new URLSearchParams({ group_by: groupBy })
     if (current !== 'all') params.set('teaching_class_id', String(current))
-    if (startDate) params.set('start_date', startDate)
-    if (endDate) params.set('end_date', endDate)
-    if (student.trim()) params.set('student', student.trim())
+    if (applied.start) params.set('start_date', applied.start)
+    if (applied.end) params.set('end_date', applied.end)
+    if (applied.student) params.set('student', applied.student)
     try {
       const response = await fetch(`/api/homework/dashboard?${params}`)
       if (!response.ok) throw new Error('加载失败')
       const payload = await response.json()
       setData(payload)
-      if (!startDate) setStartDate(payload.date_range.start)
-      if (!endDate) setEndDate(payload.date_range.end)
+      setStartDate((prev) => prev || payload.date_range.start)
+      setEndDate((prev) => prev || payload.date_range.end)
     } catch {
       setError('作业看板加载失败，请检查后端服务。')
     } finally {
       setLoading(false)
     }
-  }, [current, endDate, groupBy, startDate, student])
+  }, [current, groupBy, applied])
 
   useEffect(() => {
     load()
   }, [load])
 
+  /** 带教学班参数跳到记录管理页下钻（日期/科目/学生筛选沿用 manage 页逻辑）。 */
+  const goManage = (params: Record<string, string>) => {
+    const query = new URLSearchParams(params)
+    router.push(`/homework/manage?${query}`)
+  }
+
   async function previewEntry() {
     if (current === 'all' || !raw.trim()) return
     setFeedback('')
-    if (entryMode !== 'smart') {
-      setPreview(raw.split('\n').filter(Boolean).map((line) => ({
-        raw: line, student_id: '', name: line.split(/[：:]/)[0],
-        subject: entryMode === 'by_subject' ? line.split(/[：:]/)[0] : '按科目拆分',
-        submission_status: '缺交', evaluation: '', content: '', special_type: '',
-      })))
-      setPreviewErrors([])
-      setPreviewOpen(true)
-      return
-    }
     const response = await fetch('/api/homework/smart-input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -187,8 +218,11 @@ export default function HomeworkPage() {
       })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.detail?.message || payload.detail || '录入失败')
-      setFeedback(`已录入 ${payload.added_count} 条记录`)
-      setRaw('')
+      const entryErrors = (payload.errors ?? []) as string[]
+      setFeedback(
+        `已录入 ${payload.added_count} 条记录${entryErrors.length ? `，${entryErrors.length} 条有问题：${entryErrors.join('；')}` : ''}`
+      )
+      if (payload.added_count > 0) setRaw('')
       setPreviewOpen(false)
       await load()
     } catch (reason) {
@@ -265,7 +299,12 @@ export default function HomeworkPage() {
               <input type="date" value={entryDate} onChange={(event) => setEntryDate(event.target.value)}
                 className="mt-1 block w-full rounded-md border border-slate-200 px-2 py-1.5 text-slate-700" />
             </label>
-            <Button onClick={previewEntry} disabled={current === 'all' || !raw.trim()}>解析并预览</Button>
+            <Button
+              onClick={entryMode === 'smart' ? previewEntry : confirmEntry}
+              disabled={current === 'all' || !raw.trim() || saving}
+            >
+              {entryMode === 'smart' ? '解析并预览' : saving ? '录入中…' : '直接录入'}
+            </Button>
             <p className="text-xs text-slate-400">姓名只在当前教学班匹配；同名学生需用学号消歧。</p>
             {feedback && <p className="text-sm text-brand-700">{feedback}</p>}
           </div>
@@ -289,7 +328,12 @@ export default function HomeworkPage() {
                 className="w-full rounded-md border border-slate-200 py-1.5 pl-8 pr-2 text-sm" />
             </div>
           </label>
-          <Button variant="outline" onClick={load}>应用筛选</Button>
+          <Button
+            variant="outline"
+            onClick={() => setApplied({ start: startDate, end: endDate, student: student.trim() })}
+          >
+            应用筛选
+          </Button>
         </CardContent>
       </Card>
 
@@ -410,7 +454,7 @@ export default function HomeworkPage() {
                   <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
                   <XAxis type="number" domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
                   <YAxis dataKey="label" type="category" width={74} />
-                  <Tooltip formatter={(value) => [`${value}%`, '提交率']} />
+                  <Tooltip formatter={(value) => [value == null ? '—（区间内无记录）' : `${value}%`, '提交率']} />
                   <Bar dataKey="rate" fill="#2563eb" radius={[0, 5, 5, 0]} />
                 </BarChart>
               </ResponsiveContainer>
@@ -432,7 +476,16 @@ export default function HomeworkPage() {
           <CardContent className="h-72">
             {(data?.trend.length ?? 0) === 0 ? <Empty /> : (
               <ResponsiveContainer width="100%" height="100%">
-                <AreaChart data={data?.trend}>
+                <AreaChart
+                  data={data?.trend}
+                  style={{ cursor: 'pointer' }}
+                  onClick={(state) => {
+                    const period = state?.activeLabel
+                    if (typeof period !== 'string' || !period) return
+                    const range = periodRange(period, groupBy)
+                    goManage({ start_date: range.start, end_date: range.end })
+                  }}
+                >
                   <defs><linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2563eb" stopOpacity={0.28} /><stop offset="100%" stopColor="#2563eb" stopOpacity={0.02} /></linearGradient></defs>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="period" tick={{ fontSize: 11 }} />
@@ -446,11 +499,37 @@ export default function HomeworkPage() {
         </Card>
       </div>
 
-      <div className="grid gap-4 xl:grid-cols-3">
+      <div className="grid gap-4 lg:grid-cols-2">
+        <Card className="overflow-hidden">
+          <CardHeader><CardTitle className="text-base">各科缺交占比</CardTitle></CardHeader>
+          <CardContent className="h-64">
+            {(data?.subjects.length ?? 0) === 0 ? <Empty /> : (
+              <>
+                <ResponsiveContainer width="100%" height="88%">
+                  <PieChart>
+                    <Pie
+                      data={data?.subjects} dataKey="value" nameKey="name"
+                      cx="50%" cy="50%" outerRadius={78}
+                      label={(entry: { name?: string; value?: number }) => `${entry.name} ${entry.value}`}
+                      onClick={(entry: { name?: string }) => entry?.name && goManage({ subject: entry.name })}
+                      style={{ cursor: 'pointer' }}
+                    >
+                      {data?.subjects.map((item, index) => (
+                        <Cell key={item.name} fill={PIE_COLORS[index % PIE_COLORS.length]} />
+                      ))}
+                    </Pie>
+                    <Tooltip />
+                  </PieChart>
+                </ResponsiveContainer>
+                <p className="text-center text-xs text-slate-400">点某学科可查看该科缺交明细</p>
+              </>
+            )}
+          </CardContent>
+        </Card>
         <Card className="overflow-hidden">
           <CardHeader><CardTitle className="text-base">评价分布</CardTitle></CardHeader>
           <CardContent className="h-64">
-            {(data?.evaluation_distribution.every((x) => x.count === 0)) ? <Empty /> : (
+            {(data?.evaluation_distribution.every((x) => x.count === 0) ?? true) ? <Empty /> : (
               <ResponsiveContainer width="100%" height="100%">
                 <PieChart>
                   <Pie data={data?.evaluation_distribution} dataKey="count" nameKey="label" innerRadius={48} outerRadius={82} paddingAngle={3}>
@@ -462,23 +541,27 @@ export default function HomeworkPage() {
             )}
           </CardContent>
         </Card>
-        <Card className="xl:col-span-2">
-          <CardHeader><CardTitle className="flex items-center gap-2 text-base"><CalendarDays className="h-4 w-4" />每日缺交热力图</CardTitle></CardHeader>
-          <CardContent>
-            {(data?.heatmap.length ?? 0) === 0 ? <Empty /> : (
-              <div className="grid grid-cols-7 gap-2 sm:grid-cols-10 md:grid-cols-14">
+      </div>
+
+      <Card>
+        <CardHeader><CardTitle className="flex items-center gap-2 text-base"><CalendarDays className="h-4 w-4" />每日缺交热力图</CardTitle></CardHeader>
+        <CardContent>
+          {(data?.heatmap.length ?? 0) === 0 ? <Empty /> : (
+            <>
+              <div className="grid grid-cols-7 gap-2 sm:grid-cols-10 md:grid-cols-12">
                 {data?.heatmap.map((item) => (
-                  <button key={item.date} title={`${item.date}：${item.count} 次`}
-                    className="aspect-square rounded-md text-[10px] font-medium"
-                    style={{ backgroundColor: `rgba(37,99,235,${0.14 + item.count / heatMax * 0.78})`, color: item.count / heatMax > 0.55 ? 'white' : '#1e3a8a' }}>
+                  <button key={item.date} title={`${item.date}：${item.count} 次，点击查看明细`}
+                    onClick={() => goManage({ date: item.date })}
+                    className={`aspect-square rounded-md text-[10px] font-medium ${heatClass(item.count / heatMax)}`}>
                     {item.date.slice(8)}
                   </button>
                 ))}
               </div>
-            )}
-          </CardContent>
-        </Card>
-      </div>
+              <p className="mt-2 text-xs text-slate-400">点某天可查看当天缺交明细</p>
+            </>
+          )}
+        </CardContent>
+      </Card>
 
       <Card className="overflow-hidden">
         <CardHeader><CardTitle className="flex items-center gap-2 text-base"><Medal className="h-4 w-4" />学期缺交对比</CardTitle></CardHeader>
