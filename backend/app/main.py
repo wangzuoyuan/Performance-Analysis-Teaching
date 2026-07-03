@@ -5,7 +5,7 @@ import os
 
 from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
 
-app = FastAPI(title="成绩追踪 API", version="0.1.0")
+app = FastAPI(title="成绩追踪 API", version="1.0.0")
 
 # 生产同源（经反代）时无需 CORS；本地 dev 前端 3000 → 后端 8000 跨源需放行。
 # 额外可用 CORS_ORIGINS（逗号分隔）显式追加来源。
@@ -46,7 +46,7 @@ os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "0.1.0"}
+    return {"ok": True, "version": app.version}
 
 @app.get("/")
 def root():
