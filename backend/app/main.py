@@ -46,7 +46,7 @@ os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
 
 @app.get("/api/health")
 def health():
-    return {"ok": True, "version": "0.1.0"}
+    return {"ok": True, "version": app.version}
 
 @app.get("/")
 def root():
