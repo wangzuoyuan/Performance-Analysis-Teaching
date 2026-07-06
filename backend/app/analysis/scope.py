@@ -19,7 +19,7 @@ from typing import Optional
 # ────────────────────────────── 教学班成员范围 ──────────────────────────────
 
 def members_of(db, teaching_class_id: int) -> set[str]:
-    """某教学班的成员学号集合。"""
+    """某教学班的成员学号集合（排除「仅姓名」占位 _anon:，它们没有成绩数据）。"""
     from app.db.models import TeachingClassMember
 
     rows = (
@@ -27,7 +27,19 @@ def members_of(db, teaching_class_id: int) -> set[str]:
         .filter(TeachingClassMember.teaching_class_id == teaching_class_id)
         .all()
     )
-    return {r[0] for r in rows}
+    return {r[0] for r in rows if r[0] and not r[0].startswith("_anon:")}
+
+
+def count_members(db, teaching_class_id: int) -> int:
+    """某教学班的成员总数（含「仅姓名」占位成员）——口径与成员列表一致，
+    供班级卡片 / 仪表盘统一展示「班里多少人」。"""
+    from app.db.models import TeachingClassMember
+
+    return (
+        db.query(TeachingClassMember)
+        .filter(TeachingClassMember.teaching_class_id == teaching_class_id)
+        .count()
+    )
 
 
 def resolve_scope(db, *, teaching_class_id: Optional[int] = None) -> Optional[set[str]]:
@@ -82,7 +94,8 @@ def my_class_labels(db, grade: Optional[int] = None) -> dict[str, int]:
 
 
 def all_my_member_ids(db, grade: Optional[int] = None) -> set[str]:
-    """我教的所有班（可限定年级）的成员并集，供总览仪表盘 & 全局学生检索。"""
+    """我教的所有班（可限定年级）的成员并集，供总览仪表盘 & 全局学生检索。
+    排除「仅姓名」占位 _anon:（它们没有成绩，不作为可检索学生）。"""
     from app.db.models import TeachingClass, TeachingClassMember
     from sqlalchemy import distinct
 
@@ -91,7 +104,7 @@ def all_my_member_ids(db, grade: Optional[int] = None) -> set[str]:
     )
     if grade is not None:
         q = q.filter(TeachingClass.grade == grade)
-    return {r[0] for r in q.all()}
+    return {r[0] for r in q.all() if r[0] and not r[0].startswith("_anon:")}
 
 
 def student_class_map(db, grade: Optional[int] = None) -> dict[str, tuple[str, int]]:

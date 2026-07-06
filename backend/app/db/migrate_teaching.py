@@ -93,6 +93,27 @@ def _backfill_class_average_labels(db) -> int:
     return updated
 
 
+def _backfill_member_names(db) -> int:
+    """teaching_class_member.name 为空时，按学号反查姓名回填（仅 NULL 行，幂等）。
+    新增 name 列后让旧成员也能直接展示姓名，与「仅姓名录入」的新成员一致。"""
+    # 延迟导入：service 依赖 analysis.scope（函数内 import），此处安全
+    from app.teaching.service import student_name, ANON_PREFIX
+
+    rows = db.query(TeachingClassMember).filter(TeachingClassMember.name.is_(None)).all()
+    updated = 0
+    for row in rows:
+        if row.student_id and row.student_id.startswith(ANON_PREFIX):
+            # 仅姓名占位学号：姓名即后缀
+            row.name = row.student_id[len(ANON_PREFIX):]
+            updated += 1
+            continue
+        nm = student_name(db, row.student_id)
+        if nm:
+            row.name = nm
+            updated += 1
+    return updated
+
+
 def migrate_teaching(db=None) -> dict:
     """执行教学版迁移。db 为空时自建 session。返回各步骤计数，便于日志/排查。"""
     own = db is None
@@ -108,10 +129,12 @@ def migrate_teaching(db=None) -> dict:
         added_columns.append(("class_average", "class_label", _add_column(db, "class_average", "class_label", "TEXT")))
         added_columns.append(("class_roster", "class_label", _add_column(db, "class_roster", "class_label", "TEXT")))
         added_columns.append(("teacher", "current_teaching_class_id", _add_column(db, "teacher", "current_teaching_class_id", "INTEGER")))
+        added_columns.append(("teaching_class_member", "name", _add_column(db, "teaching_class_member", "name", "TEXT")))
 
         # 3) 回填
         new_classes = _backfill_from_old_target_class(db)
         relabeled = _backfill_class_average_labels(db)
+        named_members = _backfill_member_names(db)
 
         # 4) 版本标记
         marker = db.query(HomeworkSetting).filter(HomeworkSetting.key == "schema_version").first()
@@ -125,6 +148,7 @@ def migrate_teaching(db=None) -> dict:
             "added_columns": [name for name, _, added in added_columns if added],
             "new_teaching_classes": new_classes,
             "relabelled_class_averages": relabeled,
+            "named_members": named_members,
             "schema_version": SCHEMA_VERSION,
         }
     except Exception:

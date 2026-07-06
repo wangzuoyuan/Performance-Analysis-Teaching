@@ -47,9 +47,10 @@ const GRADE_LABEL: Record<number, string> = { 1: '高一', 2: '高二', 3: '高�
 interface ClassMember {
   student_id: string
   name: string
+  has_student_id: boolean
   source: 'manual' | 'parser' | 'class_num' | 'roster' | string
   class_num: number | null
-  state: 'inherited' | 'new' | string
+  state: 'inherited' | 'new' | 'name_only' | string
 }
 
 interface Candidate {
@@ -76,6 +77,7 @@ export default function SettingsClassesPage() {
 
   const [createOpen, setCreateOpen] = useState(false)
   const [editOpen, setEditOpen] = useState(false)
+  const [editingMember, setEditingMember] = useState<ClassMember | null>(null)
 
   // 自动选中第一个班（仅在无选中且列表非空时）
   useEffect(() => {
@@ -305,6 +307,7 @@ export default function SettingsClassesPage() {
                 busy={busy}
                 onAdded={() => refreshBoth()}
                 onRemove={removeMember}
+                onEdit={(m) => setEditingMember(m)}
               />
             ) : (
               <div className="py-10 text-center text-sm text-slate-400">
@@ -333,6 +336,20 @@ export default function SettingsClassesPage() {
           onSaved={() => {
             refresh()
             setEditOpen(false)
+          }}
+        />
+      )}
+
+      {selected && editingMember && (
+        <EditMemberDialog
+          tc={selected}
+          member={editingMember}
+          onOpenChange={(v) => {
+            if (!v) setEditingMember(null)
+          }}
+          onSaved={() => {
+            setEditingMember(null)
+            refreshBoth()
           }}
         />
       )}
@@ -488,6 +505,7 @@ function MembersPanel(props: {
   busy: boolean
   onAdded: () => void
   onRemove: (studentId: string) => void
+  onEdit: (m: ClassMember) => void
 }) {
   const { tc, members, loading, busy } = props
   const [tab, setTab] = useState<'table' | 'add' | 'import'>('table')
@@ -531,13 +549,21 @@ function MembersPanel(props: {
                     <TableHead className="w-20">来源</TableHead>
                     <TableHead className="w-20">行政班</TableHead>
                     <TableHead className="w-20">状态</TableHead>
-                    <TableHead className="w-16 text-right">操作</TableHead>
+                    <TableHead className="w-24 text-right">操作</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
                   {members.map((m) => (
                     <TableRow key={m.student_id}>
-                      <TableCell className="font-mono text-xs">{m.student_id}</TableCell>
+                      <TableCell className="font-mono text-xs">
+                        {m.has_student_id ? (
+                          m.student_id
+                        ) : (
+                          <Badge variant="outline" className="text-xs text-slate-400">
+                            未设置
+                          </Badge>
+                        )}
+                      </TableCell>
                       <TableCell>{m.name}</TableCell>
                       <TableCell>
                         <Badge variant="outline" className="text-xs">
@@ -546,16 +572,27 @@ function MembersPanel(props: {
                       </TableCell>
                       <TableCell>{m.class_num ?? '—'}</TableCell>
                       <TableCell>
-                        {m.state === 'new' ? (
+                        {m.state === 'name_only' ? (
+                          <Badge variant="outline" className="text-xs text-slate-400">仅姓名</Badge>
+                        ) : m.state === 'new' ? (
                           <Badge variant="warning" className="text-xs">新生</Badge>
                         ) : (
                           <Badge variant="success" className="text-xs">老生</Badge>
                         )}
                       </TableCell>
                       <TableCell className="text-right">
-                        <IconBtn title="移除" disabled={busy} danger onClick={() => props.onRemove(m.student_id)}>
-                          <Trash2 className="h-4 w-4" />
-                        </IconBtn>
+                        <div className="flex justify-end gap-1">
+                          <IconBtn
+                            title={m.has_student_id ? '修改学号 / 姓名' : '补录学号'}
+                            disabled={busy}
+                            onClick={() => props.onEdit(m)}
+                          >
+                            <Pencil className="h-4 w-4" />
+                          </IconBtn>
+                          <IconBtn title="移除" disabled={busy} danger onClick={() => props.onRemove(m.student_id)}>
+                            <Trash2 className="h-4 w-4" />
+                          </IconBtn>
+                        </div>
                       </TableCell>
                     </TableRow>
                   ))}
@@ -606,7 +643,12 @@ function AddMembersPanel(props: {
       }
       const added: number = data.added ?? 0
       const amb: { name: string; candidate_ids: string[] }[] = data.ambiguous ?? []
-      setMsg(`已添加 ${added} 人。${amb.length ? `${amb.length} 个姓名需消歧。` : ''}`)
+      const noId: number = (data.name_only ?? []).length
+      setMsg(
+        `已添加 ${added} 人。${noId ? `${noId} 人仅录姓名（暂无学号，可日后补）。` : ''}${
+          amb.length ? `${amb.length} 个姓名需消歧。` : ''
+        }`,
+      )
       if (amb.length) setAmbiguous(amb)
       setValue('')
       props.onAdded()
@@ -634,7 +676,7 @@ function AddMembersPanel(props: {
       <p className="text-xs text-slate-500">
         {mode === 'ids'
           ? '一行一个学号（或逗号 / 空格分隔），直接加入。'
-          : '一行一个姓名；唯一命中自动加入，同名返回候选供确认。'}
+          : '一行一个姓名；唯一命中自动加入，同名返回候选供确认，无匹配则按姓名先加入（日后可补学号）。'}
       </p>
       <textarea
         className="min-h-[120px] w-full rounded-md border border-slate-200 p-2 text-sm"
@@ -753,7 +795,7 @@ function PickCandidateButton(props: {
   )
 }
 
-/* 批量导入：粘贴学号 / 姓名清单，展示四态结果 */
+/* 批量导入：粘贴「学号 姓名」/ 姓名 / 学号清单，展示解析结果 */
 function ImportMembersPanel(props: {
   tc: TeachingClass
   busy: boolean
@@ -761,11 +803,14 @@ function ImportMembersPanel(props: {
 }) {
   const { tc, busy } = props
   const [text, setText] = useState('')
+  const [upsert, setUpsert] = useState(false)
   const [result, setResult] = useState<{
     matched: { student_id: string; name: string; state: 'inherited' | 'new' | string }[]
+    name_only: { student_id: string; name: string; state: string }[]
     ambiguous: { name: string; candidates: Candidate[] }[]
     unmatched: { token: string; name: string }[]
     added_count: number
+    reassigned_count: number
   } | null>(null)
   const [busy2, setBusy2] = useState(false)
 
@@ -776,7 +821,7 @@ function ImportMembersPanel(props: {
       const res = await fetch(`/api/teaching/classes/${tc.id}/members/import`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text }),
+        body: JSON.stringify({ text, upsert }),
       })
       const data = res.ok ? await res.json() : null
       if (!res.ok || !data) {
@@ -793,27 +838,43 @@ function ImportMembersPanel(props: {
   return (
     <div className="space-y-3">
       <p className="text-xs text-slate-500">
-        每行一个学号或姓名（自动判别）。学号直接加入；姓名唯一命中加入，同名返回候选，未命中提示补学号。
+        每行一个，支持三种写法（自动判别）：
+        <span className="ml-1 text-slate-700">「学号 姓名」</span>成对录入；
+        <span className="ml-1 text-slate-700">单学号</span>直接加入；
+        <span className="ml-1 text-slate-700">单姓名</span>唯一命中加入、无匹配则先按姓名加入（日后可补学号）。
       </p>
       <textarea
         className="min-h-[160px] w-full rounded-md border border-slate-200 p-2 text-sm"
-        placeholder={'每行一个，例如：\n20230101\n张三\n李四'}
+        placeholder={'每行一个，例如：\n7250601 张三\n7250602 李四\n王五'}
         value={text}
         onChange={(e) => setText(e.target.value)}
       />
-      <div>
+      <div className="flex flex-wrap items-center gap-3">
         <Button onClick={submit} disabled={busy || busy2} size="sm">
           解析并导入
         </Button>
+        <label className="flex items-center gap-1.5 text-xs text-slate-600">
+          <input
+            type="checkbox"
+            checked={upsert}
+            onChange={(e) => setUpsert(e.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          覆盖模式：按姓名匹配并更新已有成员的学号（学号变更后整表重导用）
+        </label>
       </div>
 
       {result && (
         <div className="space-y-3">
           <div className="flex flex-wrap gap-2 text-sm">
             <Badge variant="success">已匹配 {result.matched.length}</Badge>
+            <Badge variant="outline">仅姓名 {result.name_only.length}</Badge>
             <Badge variant="warning">待消歧 {result.ambiguous.length}</Badge>
             <Badge variant="destructive">未匹配 {result.unmatched.length}</Badge>
-            <span className="self-center text-slate-500">本次新增 {result.added_count} 人</span>
+            <span className="self-center text-slate-500">
+              新增 {result.added_count} 人
+              {result.reassigned_count > 0 && ` · 覆盖 ${result.reassigned_count} 人学号`}
+            </span>
           </div>
 
           {result.matched.length > 0 && (
@@ -837,6 +898,21 @@ function ImportMembersPanel(props: {
             </div>
           )}
 
+          {result.name_only.length > 0 && (
+            <div className="rounded-md border border-slate-200 bg-slate-50/50">
+              <div className="border-b border-slate-100 px-3 py-1.5 text-xs font-medium text-slate-500">
+                仅录入姓名（暂无学号，可在成员列表里逐个补录）
+              </div>
+              <div className="flex flex-wrap gap-1.5 p-3">
+                {result.name_only.map((m) => (
+                  <Badge key={m.student_id} variant="outline" className="text-xs">
+                    {m.name}
+                  </Badge>
+                ))}
+              </div>
+            </div>
+          )}
+
           {result.ambiguous.length > 0 && (
             <ImportAmbiguousBlock tc={tc} items={result.ambiguous} busy={busy} onPicked={props.onAdded} />
           )}
@@ -844,7 +920,7 @@ function ImportMembersPanel(props: {
           {result.unmatched.length > 0 && (
             <div className="rounded-md border border-danger-200 bg-danger-50/40">
               <div className="border-b border-danger-100 px-3 py-1.5 text-xs font-medium text-danger-600">
-                未匹配（补学号后重试）
+                未匹配
               </div>
               <div className="flex flex-wrap gap-1.5 p-3">
                 {result.unmatched.map((u) => (
@@ -1164,5 +1240,95 @@ function Field(props: { label: string; children: React.ReactNode }) {
       <label className="text-xs font-medium text-slate-500">{props.label}</label>
       {props.children}
     </div>
+  )
+}
+
+/* 编辑单个成员：补录 / 修改学号，可同时改姓名。改学号会连带迁移档案、缺交等数据。 */
+function EditMemberDialog(props: {
+  tc: TeachingClass
+  member: ClassMember
+  onOpenChange: (v: boolean) => void
+  onSaved: () => void
+}) {
+  const { tc, member, onOpenChange, onSaved } = props
+  const [sid, setSid] = useState(member.has_student_id ? member.student_id : '')
+  const [name, setName] = useState(member.name ?? '')
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+
+  useEffect(() => {
+    setSid(member.has_student_id ? member.student_id : '')
+    setName(member.name ?? '')
+    setErr(null)
+  }, [member])
+
+  async function submit() {
+    const newId = sid.trim()
+    if (!newId) {
+      setErr('请填写学号')
+      return
+    }
+    setBusy(true)
+    setErr(null)
+    try {
+      const res = await fetch(
+        `/api/teaching/classes/${tc.id}/members/${encodeURIComponent(member.student_id)}`,
+        {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ new_student_id: newId, name: name.trim() || undefined }),
+        },
+      )
+      if (!res.ok) {
+        const d = await res.json().catch(() => null)
+        setErr(d?.detail || '保存失败')
+        return
+      }
+      onSaved()
+    } catch {
+      setErr('保存失败')
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <Dialog open onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{member.has_student_id ? '修改学号 / 姓名' : '补录学号'}</DialogTitle>
+          <DialogDescription>
+            {member.has_student_id
+              ? `「${member.name}」当前学号 ${member.student_id}`
+              : `「${member.name}」目前仅录入了姓名，尚未绑定学号`}
+          </DialogDescription>
+        </DialogHeader>
+        <div className="space-y-3">
+          <Field label="学号">
+            <Input
+              value={sid}
+              onChange={(e) => setSid(e.target.value)}
+              placeholder="如 7250601"
+              className="font-mono"
+            />
+          </Field>
+          <Field label="姓名">
+            <Input value={name} onChange={(e) => setName(e.target.value)} />
+          </Field>
+          <p className="text-xs text-slate-500">
+            改学号后，该生的成长档案、缺交记录会随之迁移到新学号；历史成绩不受影响（跨学年学号变更请用「身份链接」）。
+          </p>
+          {err && <div className="text-sm text-danger-600">{err}</div>}
+        </div>
+        <DialogFooter>
+          <Button variant="outline" onClick={() => onOpenChange(false)} disabled={busy}>
+            取消
+          </Button>
+          <Button onClick={submit} disabled={busy}>
+            保存
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   )
 }

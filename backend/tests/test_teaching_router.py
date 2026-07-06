@@ -3,6 +3,7 @@
 测试自建自删（fixture 清理），不污染共享库。对应 03·§2 班级配置 API。
 """
 import time
+from urllib.parse import quote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -61,7 +62,7 @@ def test_member_crud(make_class):
 
 def test_import_states(make_class):
     tc = make_class()
-    # 真实学号（≥5位数字）→ matched；未知姓名 → unmatched
+    # 真实学号（≥5 位数字）→ matched；未知姓名 → name_only（仅姓名占位成员）
     r = client.post(
         f"/api/teaching/classes/{tc['id']}/members/import",
         json={"text": "7100001\n7100002\n不存在姓名"},
@@ -69,7 +70,200 @@ def test_import_states(make_class):
     rep = r.json()
     matched_ids = {m["student_id"] for m in rep["matched"]}
     assert "7100001" in matched_ids and "7100002" in matched_ids
-    assert any(u.get("token") == "不存在姓名" for u in rep["unmatched"])
+    no_ids = {n["name"] for n in rep["name_only"]}
+    assert "不存在姓名" in no_ids
+    # 成员表里能看到这条仅姓名成员，且标记为未设学号
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    anon = [m for m in members if m["name"] == "不存在姓名"]
+    assert len(anon) == 1 and anon[0]["has_student_id"] is False
+    assert anon[0]["student_id"].startswith("_anon:")
+
+
+def test_import_id_name_pair(make_class):
+    tc = make_class()
+    # 「学号 姓名」一行应成对识别，而非拆成两个 token
+    r = client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "7100001 张三\n7100002 李四"},
+    )
+    rep = r.json()
+    by_id = {m["student_id"]: m["name"] for m in rep["matched"]}
+    assert by_id == {"7100001": "张三", "7100002": "李四"}
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    assert {m["student_id"]: m["name"] for m in members} == {
+        "7100001": "张三",
+        "7100002": "李四",
+    }
+
+
+def test_add_name_only(make_class):
+    tc = make_class()
+    # 添加成员 tab 的「按姓名」：零命中也应落为仅姓名占位
+    r = client.post(
+        f"/api/teaching/classes/{tc['id']}/members",
+        json={"names": ["某新人"]},
+    )
+    assert r.json()["added"] == 1
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    assert any(m["name"] == "某新人" and not m["has_student_id"] for m in members)
+
+
+def test_reassign_member_and_upgrade(make_class):
+    tc = make_class()
+    # 先按姓名导入占位成员，再补学号
+    client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "王小明"},
+    )
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    anon_sid = [m["student_id"] for m in members if m["name"] == "王小明"][0]
+    # PATCH 改学号（URL 含冒号需编码）
+    r = client.patch(
+        f"/api/teaching/classes/{tc['id']}/members/{quote(anon_sid, safe='')}",
+        json={"new_student_id": "7100099", "name": "王小明"},
+    )
+    assert r.status_code == 200, r.text
+    members = r.json()["members"]
+    assert any(m["student_id"] == "7100099" and m["has_student_id"] for m in members)
+    assert all(not m["student_id"].startswith("_anon:") for m in members)
+
+
+def test_reassign_cascades_note(make_class):
+    tc = make_class()
+    sid_old, sid_new = "7100088", "7100077"
+    client.post(f"/api/teaching/classes/{tc['id']}/members", json={"student_ids": [sid_old]})
+    # 在旧学号下写一条档案
+    note = client.post(
+        "/api/notes",
+        json={"student_id": sid_old, "category": "谈话", "content": "旧学号下的谈话"},
+    ).json()
+    # 改学号
+    r = client.patch(
+        f"/api/teaching/classes/{tc['id']}/members/{sid_old}",
+        json={"new_student_id": sid_new, "name": "测试生"},
+    )
+    assert r.status_code == 200, r.text
+    # 档案应随学号迁移到新学号
+    new_notes = client.get(f"/api/notes/{sid_new}").json()
+    assert any(n["id"] == note["id"] for n in new_notes)
+    old_notes = client.get(f"/api/notes/{sid_old}").json()
+    assert all(n["id"] != note["id"] for n in old_notes)
+    # 清理
+    client.delete(f"/api/notes/{note['id']}")
+
+
+def test_no_duplicate_name_only(make_class):
+    tc = make_class()
+    # 先「学号 姓名」导入一个有姓名的真实学号成员
+    client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "7100001 赵六"},
+    )
+    # 再单独导入同名 → 不应产生 _anon:赵六 重复成员
+    client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "赵六"},
+    )
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    assert len(members) == 1
+    assert members[0]["student_id"] == "7100001"
+    assert members[0]["name"] == "赵六"
+
+
+def test_upsert_overwrites_by_name(make_class):
+    tc = make_class()
+    # 先按姓名占位
+    client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "李小华"},
+    )
+    # 覆盖模式重导「学号 姓名」→ 姓名命中占位成员，学号被改写
+    r = client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "7100055 李小华", "upsert": True},
+    )
+    assert r.json()["reassigned_count"] == 1
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    assert len(members) == 1
+    assert members[0]["student_id"] == "7100055"
+    assert members[0]["name"] == "李小华"
+
+
+def test_reassign_conflict_409(make_class):
+    tc = make_class()
+    # 两个不同姓名的学生占住两个学号
+    client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "7100011 甲同学\n7100012 乙同学"},
+    )
+    # 把「甲同学」的学号改成已被「乙同学」占用的 7100012 → 409（不可并成一人）
+    r = client.patch(
+        f"/api/teaching/classes/{tc['id']}/members/7100011",
+        json={"new_student_id": "7100012", "name": "甲同学"},
+    )
+    assert r.status_code == 409
+
+
+def test_reassign_conflict_null_name_409(make_class):
+    tc = make_class()
+    # 按学号加入两个成员（尚无成绩，姓名缓存为空）
+    client.post(
+        f"/api/teaching/classes/{tc['id']}/members",
+        json={"student_ids": ["7100021", "7100022"]},
+    )
+    # 即便不带 name，把 7100021 改成已占用的 7100022 也必须 409，不得静默合并
+    r = client.patch(
+        f"/api/teaching/classes/{tc['id']}/members/7100021",
+        json={"new_student_id": "7100022"},
+    )
+    assert r.status_code == 409
+
+
+def test_anon_reassign_does_not_leak_across_classes(make_class):
+    a = make_class()
+    b = make_class()
+    # 两个班各有一个同名「仅姓名」成员（实际是不同的学生）
+    client.post(f"/api/teaching/classes/{a['id']}/members/import", json={"text": "王某"})
+    client.post(f"/api/teaching/classes/{b['id']}/members/import", json={"text": "王某"})
+    # 给 A 班的王某补学号
+    r = client.patch(
+        f"/api/teaching/classes/{a['id']}/members/{quote('_anon:王某', safe='')}",
+        json={"new_student_id": "7100066", "name": "王某"},
+    )
+    assert r.status_code == 200, r.text
+    # B 班的「仅姓名」王某必须原样保留，不能被级联污染
+    bm = client.get(f"/api/teaching/classes/{b['id']}/members").json()["members"]
+    assert len(bm) == 1
+    assert bm[0]["student_id"] == "_anon:王某"
+    assert bm[0]["has_student_id"] is False
+
+
+def test_import_comma_ids_not_pair(make_class):
+    tc = make_class()
+    # 一行逗号分隔的多个学号：不应被误判为「学号 姓名」把第二个学号当姓名
+    r = client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "7100001,7100002,7100003"},
+    )
+    matched_ids = {m["student_id"] for m in r.json()["matched"]}
+    assert matched_ids == {"7100001", "7100002", "7100003"}
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    assert len(members) == 3
+    assert {m["student_id"] for m in members} == {"7100001", "7100002", "7100003"}
+
+
+def test_upsert_intra_import_same_name_conflict(make_class):
+    tc = make_class()
+    # 同一次导入里同名两个不同学号 → 判歧义、都不落（而不是静默覆盖丢学号）
+    r = client.post(
+        f"/api/teaching/classes/{tc['id']}/members/import",
+        json={"text": "7100001 张三\n7100002 张三", "upsert": True},
+    )
+    rep = r.json()
+    assert len(rep["ambiguous"]) == 1
+    assert rep["ambiguous"][0]["name"] == "张三"
+    members = client.get(f"/api/teaching/classes/{tc['id']}/members").json()["members"]
+    assert members == []
 
 
 def test_current_set_get_clear(make_class):

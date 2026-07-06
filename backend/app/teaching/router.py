@@ -40,7 +40,10 @@ def _member_profile(db, tc_id: int) -> list[dict]:
     )
     out = []
     for m in members:
-        name = service.student_name(db, m.student_id) or m.student_id
+        is_anon = service.is_anon_sid(m.student_id)
+        name = m.name or service.student_name(db, m.student_id)
+        if not name and not is_anon:
+            name = m.student_id
         cls = (
             db.query(SubjectScore.class_num)
             .filter(
@@ -54,9 +57,10 @@ def _member_profile(db, tc_id: int) -> list[dict]:
             {
                 "student_id": m.student_id,
                 "name": name,
+                "has_student_id": not is_anon,
                 "source": m.source,
                 "class_num": roster.class_num if roster else (cls[0] if cls else None),
-                "state": service.classify_member(db, _tc_grade(db, tc_id), m.student_id),
+                "state": "name_only" if is_anon else service.classify_member(db, _tc_grade(db, tc_id), m.student_id),
             }
         )
     return out
@@ -201,48 +205,34 @@ class MembersAdd(BaseModel):
 
 @router.post("/classes/{tc_id}/members")
 def add_members(tc_id: int, payload: MembersAdd, db=Depends(get_db)):
-    from app.db.models import TeachingClass, TeachingClassMember
+    from app.db.models import TeachingClass
 
     tc = _get_or_404(db, TeachingClass, id=tc_id)
-    existing = {
-        r[0]
-        for r in db.query(TeachingClassMember.student_id)
-        .filter(TeachingClassMember.teaching_class_id == tc_id)
-        .all()
-    }
-    added = 0
-    # 学号直接加
-    for sid in payload.student_ids or []:
-        sid = (sid or "").strip()
-        if sid and sid not in existing:
-            db.add(
-                TeachingClassMember(
-                    teaching_class_id=tc_id, student_id=sid, source="manual"
-                )
-            )
-            existing.add(sid)
-            added += 1
-    # 姓名走反查：唯一命中才加，多名返回待消歧
-    resolved_ambiguous = []
-    for name in payload.names or []:
-        name = (name or "").strip()
-        if not name:
-            continue
-        ids = service.name_to_student_ids(db, name)
-        if len(ids) == 1:
-            sid = ids[0]
-            if sid not in existing:
-                db.add(
-                    TeachingClassMember(
-                        teaching_class_id=tc_id, student_id=sid, source="manual"
-                    )
-                )
-                existing.add(sid)
-                added += 1
-        elif len(ids) > 1:
-            resolved_ambiguous.append({"name": name, "candidate_ids": ids})
-    db.commit()
-    return {"added": added, "ambiguous": resolved_ambiguous, "members": _member_profile(db, tc_id)}
+    res = service.add_by_names_and_ids(db, tc, payload.student_ids, payload.names)
+    res["members"] = _member_profile(db, tc_id)
+    return res
+
+
+class MemberReassign(BaseModel):
+    new_student_id: str
+    name: Optional[str] = None
+
+
+@router.patch("/classes/{tc_id}/members/{student_id}")
+def reassign_member(tc_id: int, student_id: str, payload: MemberReassign, db=Depends(get_db)):
+    """修改成员学号（「学号换了」/ 给仅姓名成员补学号）。连带迁移花名册 / 缺交 /
+    特殊 / 档案 / 身份别名等教师侧数据；成绩表不动。"""
+    from app.db.models import TeachingClass
+
+    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    try:
+        res = service.reassign_member_id(db, tc, student_id, payload.new_student_id, payload.name)
+    except service.ConflictError as e:
+        raise HTTPException(409, str(e))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    res["members"] = _member_profile(db, tc_id)
+    return {"ok": True, **res}
 
 
 class MemberRemove(BaseModel):
@@ -271,6 +261,7 @@ def remove_member(tc_id: int, student_id: str, db=Depends(get_db)):
 class ImportPayload(BaseModel):
     tokens: Optional[list[str]] = None
     text: Optional[str] = None
+    upsert: bool = False  # 覆盖模式：按姓名匹配并更新已有成员的学号
 
 
 @router.post("/classes/{tc_id}/members/import")
@@ -278,10 +269,10 @@ def import_members(tc_id: int, payload: ImportPayload, db=Depends(get_db)):
     from app.db.models import TeachingClass
 
     tc = _get_or_404(db, TeachingClass, id=tc_id)
-    raw = payload.tokens or []
-    if payload.text:
-        raw += [line.strip() for line in payload.text.replace(";", "\n").replace(",", "\n").split("\n")]
-    report = service.resolve_import(db, tc, [t for t in raw if t and t.strip()])
+    lines = payload.text.split("\n") if payload.text else []
+    report = service.resolve_import(
+        db, tc, lines=lines, tokens=payload.tokens or [], upsert=payload.upsert
+    )
     report["members"] = _member_profile(db, tc_id)
     return report
 

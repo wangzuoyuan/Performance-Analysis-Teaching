@@ -1066,7 +1066,7 @@ async def dashboard_overview(grade: Optional[int] = None):
     from collections import defaultdict
     from app.db.models import SessionLocal, Exam, TotalScore
     from app.analysis.config import get_band_config
-    from app.analysis.scope import list_classes, members_of
+    from app.analysis.scope import list_classes, members_of, count_members
 
     db = SessionLocal()
     try:
@@ -1090,7 +1090,7 @@ async def dashboard_overview(grade: Optional[int] = None):
             ex = latest_by_grade.get(tc.grade)
             entry = {
                 "id": tc.id, "grade": tc.grade, "label": tc.label,
-                "subject": tc.subject, "kind": tc.kind, "member_count": len(members),
+                "subject": tc.subject, "kind": tc.kind, "member_count": count_members(db, tc.id),
                 "latest_exam": {"id": ex.id, "name": ex.name, "exam_date": ex.exam_date} if ex else None,
                 "main_total_avg": None, "focus_count": 0,
             }

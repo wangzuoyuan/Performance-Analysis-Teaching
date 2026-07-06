@@ -245,7 +245,8 @@ class TeachingClassMember(Base):
     __tablename__ = "teaching_class_member"
     id = Column(Integer, primary_key=True)
     teaching_class_id = Column(Integer, ForeignKey("teaching_class.id"), nullable=False)
-    student_id = Column(String, nullable=False)      # 真实学号
+    student_id = Column(String, nullable=False)      # 真实学号；仅姓名录入时暂填 _anon:姓名 占位
+    name = Column(String, nullable=True)             # 成员姓名缓存；仅姓名录入 / 学号+姓名 导入时填
     source = Column(String, nullable=False, default="manual")  # parser/manual/roster/class_num
     created_at = Column(DateTime, default=datetime.utcnow)
 
