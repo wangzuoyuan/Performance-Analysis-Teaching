@@ -19,8 +19,9 @@ jobs:
         working-directory: backend
     env:
       # 测试用数据目录，避免落到 ~/.exam-tracker
-      EXAM_TRACKER_DIR: ${{ runner.temp }}/exam-data
-      EXAM_TRACKER_BACKUP_DIR: ${{ runner.temp }}/exam-backups
+      # 注意：job 级 env 只能用 github 上下文，runner.* 仅在 step 内可用
+      EXAM_TRACKER_DIR: ${{ github.workspace }}/.ci/exam-data
+      EXAM_TRACKER_BACKUP_DIR: ${{ github.workspace }}/.ci/exam-backups
     steps:
       - uses: actions/checkout@v4
 
