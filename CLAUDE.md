@@ -42,7 +42,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。作业与档案均按真实学号 `student_id` 与成绩表关联。
 
-**教学版新增**（核心）：`teaching_class`（grade+label+subject+kind，唯一键 `(grade,label)`；label 为字符串，高一数字班与高二/三走班名 `物A1`/`史B3` 一视同仁）、`teaching_class_member`（teaching_class_id ↔ 真实学号，含来源 `source`=class_num/parser/manual/roster）。**跨学年身份**：`student_identity`（人）、`student_alias`（学号↔人；分班后学号变更时靠姓名确认/对照表人工建链）。`subject_score`/`class_average`/`class_roster` 各增 `class_label`（教学班标签，可空）；`teacher` 增 `current_teaching_class_id`。旧单班字段 `teacher.target_class_highN` 保留列以兼容旧库但读侧不再使用。启动时 `db/migrate_teaching.py` 幂等建表+补列+把旧 `target_class_highN` 回填为一个行政教学班（仅首次、且尚无任何教学班时）。
+**教学版新增**（核心）：`teaching_class`（grade+label+subject+kind，唯一键 `(grade,label)`；label 为字符串，高一数字班与高二/三走班名 `物A1`/`史B3` 一视同仁）、`teaching_class_member`（teaching_class_id ↔ 真实学号，含来源 `source`=class_num/parser/manual/roster）。**仅姓名占位学号**：老师只填姓名、反查零命中时，成员学号落 `_anon:<教学班id>:姓名` 占位（`teaching/service.py` 的 `anon_sid_for(name, tc_id)`；`is_class_scoped_anon`/`name_from_anon_sid` 兼容旧格式 `_anon:姓名`）——**带教学班 id 是为了让不同班的同名仅姓名学生互不共用学号**，避免作业缺交跨班串数据。占位成员同时补一条 `class_roster` 行以便作业模块跟踪。**跨学年身份**：`student_identity`（人）、`student_alias`（学号↔人；分班后学号变更时靠姓名确认/对照表人工建链）。`subject_score`/`class_average`/`class_roster` 各增 `class_label`（教学班标签，可空）；`teacher` 增 `current_teaching_class_id`。旧单班字段 `teacher.target_class_highN` 保留列以兼容旧库但读侧不再使用。启动时 `db/migrate_teaching.py` 幂等建表+补列+把旧 `target_class_highN` 回填为一个行政教学班（仅首次、且尚无任何教学班时），并幂等 `_rekey_anon_members_class_scoped`（旧 `_anon:姓名` → `_anon:<教学班id>:姓名`，单班占位成员连带迁移其花名册/缺交/档案）+ `_backfill_anon_member_roster`（给仅姓名成员补花名册行）。
 
 ## 部署（Docker / 群晖 NAS）
 
@@ -156,7 +156,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **段位阈值**：所有段位计算（`rank_bands`、`focus-list`、`band-trend`、AI 工具）必须调用 `analysis/config.py` 的 `get_band_config()`，不能硬编码默认值。用户在前端修改后，页面展示与 AI 问答口径同步。
 
-**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。**教学版多班口径**：`grade_correlation` / `subject_correlation_ranking` / `weekly_focus` 的 `class_num` 缺省为 `None`＝跨全花名册（我教的所有班并集，前端缺省不传），传具体班号才限定单班——旧版硬编码 `class_num=6` 已移除。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。**教学版多班口径**：`grade_correlation` / `subject_correlation_ranking` / `weekly_focus` 的 `class_num` 缺省为 `None`＝跨全花名册（我教的所有班并集，前端缺省不传），传具体班号才限定单班——旧版硬编码 `class_num=6` 已移除。**仅姓名成员**：作业范围（`_scope_student_ids`）用 `members_of(..., include_anon=True)` / `all_my_member_ids(..., include_anon=True)` 把 `_anon:` 占位学生纳入（成绩分析侧默认 `include_anon=False` 仍排除，口径不变）；智能录入 `hw_smart_input` 以教学班成员为准按姓名匹配（左连 `class_roster` 回落取名），写入缺交前给缺花名册行的占位学号补建 `class_roster`，使记录进看板/预警。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
 
 **档案 / 主动提醒 / 备份**：`notes/router.py` 管理 `student_note`（成长/谈话档案），AI 工具 `student_notes` 可读取。`homework/service.weekly_focus()` 合成「本周关注」，复用 `warnings` 与 `chat/tools.focus_list`（懒导入避免循环）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用同一备份目录 `~/.exam-tracker-backups`；`run.py init` 清空前自动快照。
 
@@ -197,6 +197,8 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `homework_dashboard`（范围口径 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）/ `teaching_router`（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）/ `scope`（范围解析 / 身份链接）
+
+CI：`.github/workflows/ci.yml`——push 到 `main` 与所有 PR 上跑后端 `pytest` + 前端 `tsc --noEmit`/`next build`。
 
 **无测试**：`analysis/router.py` 的计算逻辑（`trends` / `class_compare` / `focus_list` / `cross_year` / `rank_metrics` 模块同样无测试）。

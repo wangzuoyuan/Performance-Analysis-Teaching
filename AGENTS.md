@@ -156,6 +156,8 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `backup_weekly`
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `homework_dashboard` / `notes_router` / `backup_weekly` / `teaching_router` / `scope`
+
+CI：`.github/workflows/ci.yml` 在 push 到 `main` 与所有 PR 上跑后端 `pytest` + 前端 `tsc --noEmit`/`next build`。
 
 **无测试**：`analysis/router.py` 的计算逻辑（trends / class_compare / focus_list / cross_year 模块同样无测试）。
