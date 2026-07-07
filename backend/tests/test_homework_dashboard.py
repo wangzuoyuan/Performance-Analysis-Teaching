@@ -200,3 +200,142 @@ def test_name_action_parser_supports_status_evaluation_and_special():
     assert excellent["evaluation"] == "优秀"
     forgot = parse_name_action("张三忘带英语作业", names)
     assert forgot["special_type"] == "忘带"
+
+
+def seed_name_only_class(db):
+    """一个只配了「仅姓名」占位成员的教学班（还没上传成绩、没建花名册）。"""
+    db.add_all([
+        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
+        TeachingClassMember(
+            teaching_class_id=1, student_id="_anon:方石", name="方石", source="manual"
+        ),
+        TeachingClassMember(
+            teaching_class_id=1, student_id="_anon:顾陈旗", name="顾陈旗", source="manual"
+        ),
+        HomeworkSemester(
+            id=1, name="测试学期", start_date="2026-03-01",
+            end_date="2026-07-01", is_current=1,
+        ),
+    ])
+    db.commit()
+
+
+def test_name_only_members_counted_as_valid_students():
+    """回归：仅姓名成员曾因 members_of 排除 _anon: 而使教学班「0 名有效学生」。
+
+    启动迁移会给仅姓名成员补花名册行，之后作业看板即把他们算作有效学生。"""
+    from app.db.migrate_teaching import _backfill_anon_member_roster
+
+    db = make_db()
+    seed_name_only_class(db)
+    created = _backfill_anon_member_roster(db)
+    db.commit()
+    assert created == 2
+    result = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=1)
+    assert result["scope"]["member_count"] == 2
+
+
+def test_smart_input_records_name_only_member(monkeypatch):
+    """回归：为仅姓名成员录缺交曾提示「未匹配到当前教学班学生」。
+
+    直连内存库跑通 hw_smart_input 端点：应匹配到姓名、补建花名册行、写入缺交，
+    并在看板 KPI 里可见。"""
+    import asyncio
+    from app.homework import router as hw_router
+
+    db = make_db()
+    seed_name_only_class(db)
+    monkeypatch.setattr(hw_router, "get_db", lambda: iter([db]))
+    monkeypatch.setattr(hw_router, "export_daily_report", lambda *a, **k: None)
+
+    payload = hw_router.SmartInputPayload(
+        raw_text="方石\n顾陈旗物理缺交",
+        teaching_class_id=1,
+        date="2026-03-05",
+        confirm=True,
+    )
+    resp = asyncio.get_event_loop().run_until_complete(
+        hw_router.hw_smart_input(payload)
+    )
+    assert resp["success"] is True
+    assert resp["added_count"] == 2
+
+    # 两名仅姓名学生都补建了花名册行，缺交记录进入看板口径
+    assert db.query(ClassRoster).filter(
+        ClassRoster.student_id == "_anon:方石"
+    ).count() == 1
+    result = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=1)
+    assert result["kpi"]["total_misses"] == 2
+
+
+def test_rekey_scopes_anon_ids_per_class_and_migrates_data():
+    """迁移：旧「全局按姓名」占位学号按教学班隔离；单班占位的花名册/缺交一并改指。"""
+    from app.db.migrate_teaching import _rekey_anon_members_class_scoped
+
+    db = make_db()
+    db.add_all([
+        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
+        TeachingClass(id=2, grade=2, label="物B3", kind="教学", sort_order=2),
+        # 两个班各有一个同名「王某」（旧格式共用一个占位学号）
+        TeachingClassMember(teaching_class_id=1, student_id="_anon:王某", name="王某"),
+        TeachingClassMember(teaching_class_id=2, student_id="_anon:王某", name="王某"),
+        # 只有一个班有的「独苗」，带花名册和一条缺交
+        TeachingClassMember(teaching_class_id=1, student_id="_anon:独苗", name="独苗"),
+        ClassRoster(student_id="_anon:独苗", name="独苗", excluded=0),
+        HomeworkRecord(
+            student_id="_anon:独苗", date="2026-03-01", subject="物理",
+            submission_status="缺交",
+        ),
+    ])
+    db.commit()
+
+    changed = _rekey_anon_members_class_scoped(db)
+    db.commit()
+    assert changed == 3  # 两个王某 + 一个独苗
+
+    ids = {m.teaching_class_id: m.student_id for m in db.query(TeachingClassMember)
+           .filter(TeachingClassMember.name == "王某").all()}
+    assert ids == {1: "_anon:1:王某", 2: "_anon:2:王某"}
+
+    # 独苗只属一个班：花名册与缺交都改指到新学号
+    assert db.query(ClassRoster).filter(ClassRoster.student_id == "_anon:1:独苗").count() == 1
+    assert db.query(ClassRoster).filter(ClassRoster.student_id == "_anon:独苗").count() == 0
+    assert db.query(HomeworkRecord).filter(
+        HomeworkRecord.student_id == "_anon:1:独苗"
+    ).count() == 1
+
+    # 幂等：再跑一次不再改动
+    assert _rekey_anon_members_class_scoped(db) == 0
+
+
+def test_same_name_miss_does_not_leak_across_classes(monkeypatch):
+    """端到端：两个班同名仅姓名学生，给 A 班录缺交不应出现在 B 班看板。"""
+    import asyncio
+    from app.homework import router as hw_router
+    from app.teaching.service import anon_sid_for
+
+    db = make_db()
+    db.add_all([
+        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
+        TeachingClass(id=2, grade=2, label="物B3", kind="教学", sort_order=2),
+        TeachingClassMember(teaching_class_id=1, student_id=anon_sid_for("王某", 1), name="王某"),
+        TeachingClassMember(teaching_class_id=2, student_id=anon_sid_for("王某", 2), name="王某"),
+        HomeworkSemester(
+            id=1, name="测试学期", start_date="2026-03-01",
+            end_date="2026-07-01", is_current=1,
+        ),
+    ])
+    db.commit()
+
+    monkeypatch.setattr(hw_router, "get_db", lambda: iter([db]))
+    monkeypatch.setattr(hw_router, "export_daily_report", lambda *a, **k: None)
+    payload = hw_router.SmartInputPayload(
+        raw_text="王某物理缺交", teaching_class_id=1, date="2026-03-05", confirm=True,
+    )
+    resp = asyncio.get_event_loop().run_until_complete(hw_router.hw_smart_input(payload))
+    assert resp["success"] is True
+
+    a = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=1)
+    b = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=2)
+    assert a["kpi"]["total_misses"] == 1
+    assert b["kpi"]["total_misses"] == 0

@@ -19,6 +19,7 @@ from sqlalchemy import text
 from app.db.models import (
     Base,
     ClassAverage,
+    ClassRoster,
     HomeworkSetting,
     SubjectScore,
     Teacher,
@@ -97,14 +98,14 @@ def _backfill_member_names(db) -> int:
     """teaching_class_member.name 为空时，按学号反查姓名回填（仅 NULL 行，幂等）。
     新增 name 列后让旧成员也能直接展示姓名，与「仅姓名录入」的新成员一致。"""
     # 延迟导入：service 依赖 analysis.scope（函数内 import），此处安全
-    from app.teaching.service import student_name, ANON_PREFIX
+    from app.teaching.service import student_name, is_anon_sid, name_from_anon_sid
 
     rows = db.query(TeachingClassMember).filter(TeachingClassMember.name.is_(None)).all()
     updated = 0
     for row in rows:
-        if row.student_id and row.student_id.startswith(ANON_PREFIX):
-            # 仅姓名占位学号：姓名即后缀
-            row.name = row.student_id[len(ANON_PREFIX):]
+        if is_anon_sid(row.student_id):
+            # 仅姓名占位学号：姓名从后缀取（兼容新旧格式）
+            row.name = name_from_anon_sid(row.student_id)
             updated += 1
             continue
         nm = student_name(db, row.student_id)
@@ -112,6 +113,94 @@ def _backfill_member_names(db) -> int:
             row.name = nm
             updated += 1
     return updated
+
+
+def _backfill_anon_member_roster(db) -> int:
+    """给「仅姓名」占位成员（_anon:）补建花名册行（幂等，只补缺失的）。
+
+    花名册是作业模块的学生主体（HomeworkRecord.student_id 外键指向它），而仅姓名
+    成员此前只落在 teaching_class_member、没有花名册行，导致作业看板「0 名有效学生」、
+    录入缺交时「未匹配到当前教学班学生」。这里把它们补进花名册即可正常跟踪。"""
+    from app.teaching.service import ANON_PREFIX, name_from_anon_sid
+
+    existing = {r[0] for r in db.query(ClassRoster.student_id).all()}
+    # 占位学号已按教学班隔离（_anon:<id>:<姓名>），逐个成员补建花名册
+    rows = (
+        db.query(TeachingClassMember.student_id, TeachingClassMember.name, TeachingClass.label)
+        .join(TeachingClass, TeachingClass.id == TeachingClassMember.teaching_class_id)
+        .filter(TeachingClassMember.student_id.like(f"{ANON_PREFIX}%"))
+        .all()
+    )
+    created = 0
+    seen = set()
+    for sid, name, label in rows:
+        if sid in existing or sid in seen:
+            continue
+        seen.add(sid)
+        db.add(ClassRoster(
+            student_id=sid,
+            name=(name or name_from_anon_sid(sid)),
+            class_label=label,
+        ))
+        created += 1
+    return created
+
+
+def _rekey_anon_members_class_scoped(db) -> int:
+    """把旧的「全局按姓名」占位学号 `_anon:<姓名>` 迁成「按教学班隔离」的
+    `_anon:<教学班id>:<姓名>`，避免不同班的同名仅姓名学生共用一个学号、缺交串班。
+
+    幂等：已是新格式的跳过。旧占位学号只被一个班使用时，连带把它的花名册/缺交/
+    特殊/成长档案改指到新学号；被多个班共用（同名多人）时无法可靠拆分，只改成员
+    学号、旧数据留原处（随后由 _backfill_anon_member_roster 给新学号补空花名册）。"""
+    from collections import defaultdict
+
+    from app.db.models import (
+        ClassRoster,
+        HomeworkRecord,
+        SpecialRecord,
+        StudentNote,
+        TeachingClassMember,
+    )
+    from app.teaching.service import (
+        ANON_PREFIX,
+        anon_sid_for,
+        is_class_scoped_anon,
+        name_from_anon_sid,
+    )
+
+    rows = (
+        db.query(TeachingClassMember)
+        .filter(TeachingClassMember.student_id.like(f"{ANON_PREFIX}%"))
+        .all()
+    )
+    holders: dict[str, list] = defaultdict(list)
+    for row in rows:
+        if not is_class_scoped_anon(row.student_id):
+            holders[row.student_id].append(row)
+
+    changed = 0
+    for old_sid, members in holders.items():
+        name = name_from_anon_sid(old_sid)
+        # 同一 old_sid 在同一个班不会有两行（学号在班内唯一），故各 member 分属不同班
+        unique = len(members) == 1
+        for member in members:
+            member.student_id = anon_sid_for(name, member.teaching_class_id)
+            changed += 1
+        if not unique:
+            continue
+        new_sid = anon_sid_for(name, members[0].teaching_class_id)
+        old_roster = db.query(ClassRoster).filter(ClassRoster.student_id == old_sid).first()
+        if old_roster:
+            if db.query(ClassRoster).filter(ClassRoster.student_id == new_sid).first():
+                db.delete(old_roster)
+            else:
+                old_roster.student_id = new_sid
+        for model in (HomeworkRecord, SpecialRecord, StudentNote):
+            db.query(model).filter(model.student_id == old_sid).update(
+                {model.student_id: new_sid}, synchronize_session=False
+            )
+    return changed
 
 
 def migrate_teaching(db=None) -> dict:
@@ -135,6 +224,9 @@ def migrate_teaching(db=None) -> dict:
         new_classes = _backfill_from_old_target_class(db)
         relabeled = _backfill_class_average_labels(db)
         named_members = _backfill_member_names(db)
+        # 先把旧「全局按姓名」占位学号迁成按班隔离，再据此补花名册
+        rekeyed_anon = _rekey_anon_members_class_scoped(db)
+        anon_roster = _backfill_anon_member_roster(db)
 
         # 4) 版本标记
         marker = db.query(HomeworkSetting).filter(HomeworkSetting.key == "schema_version").first()
@@ -149,6 +241,8 @@ def migrate_teaching(db=None) -> dict:
             "new_teaching_classes": new_classes,
             "relabelled_class_averages": relabeled,
             "named_members": named_members,
+            "rekeyed_anon_members": rekeyed_anon,
+            "anon_member_roster": anon_roster,
             "schema_version": SCHEMA_VERSION,
         }
     except Exception:

@@ -5,6 +5,7 @@
 """
 
 from datetime import datetime
+from types import SimpleNamespace
 
 from fastapi import APIRouter, HTTPException, Query
 from pydantic import BaseModel
@@ -285,19 +286,32 @@ async def hw_smart_input(payload: SmartInputPayload):
         raise HTTPException(400, "请输入记录内容")
     db = next(get_db())
     try:
-        if not db.query(TeachingClass).filter(
+        tc = db.query(TeachingClass).filter(
             TeachingClass.id == payload.teaching_class_id
-        ).first():
+        ).first()
+        if not tc:
             raise HTTPException(404, "教学班不存在")
-        members = (
-            db.query(ClassRoster)
-            .join(TeachingClassMember, TeachingClassMember.student_id == ClassRoster.student_id)
+        # 直接以教学班成员为准（含「仅姓名」占位成员），姓名优先取成员自身缓存，
+        # 其次回落花名册——否则 source=class_num/parser 的成员姓名为空无法按姓名匹配。
+        rows = (
+            db.query(TeachingClassMember, ClassRoster)
+            .outerjoin(
+                ClassRoster,
+                ClassRoster.student_id == TeachingClassMember.student_id,
+            )
             .filter(TeachingClassMember.teaching_class_id == payload.teaching_class_id)
             .all()
         )
+        members = []
+        for member, roster in rows:
+            name = (member.name or (roster.name if roster else None) or "").strip()
+            members.append(
+                SimpleNamespace(student_id=member.student_id, name=name)
+            )
         by_name = {}
         for member in members:
-            by_name.setdefault(member.name, []).append(member)
+            if member.name:
+                by_name.setdefault(member.name, []).append(member)
         by_id = {member.student_id: member for member in members}
         parsed = []
         for line in payload.raw_text.splitlines():
@@ -348,6 +362,17 @@ async def hw_smart_input(payload: SmartInputPayload):
         target_date = payload.date or _today()
         try:
             for item in preview:
+                # 缺交/特殊记录按学号挂到花名册（HomeworkRecord.student_id 外键指向
+                # class_roster）。仅姓名占位成员尚无花名册行时补建一条，使其记录能
+                # 进看板/预警的统计口径，避免录了却「查无此人」。
+                if not db.query(ClassRoster).filter(
+                    ClassRoster.student_id == item["student_id"]
+                ).first():
+                    db.add(ClassRoster(
+                        student_id=item["student_id"],
+                        name=item["name"],
+                        class_label=tc.label,
+                    ))
                 if item["special_type"]:
                     db.add(SpecialRecord(
                         student_id=item["student_id"], date=target_date,
