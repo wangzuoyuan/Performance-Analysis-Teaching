@@ -1,7 +1,7 @@
 """每日缺交记录 Excel 导出。
 
 移植自原「作业跟踪」tracker.export_daily_report，改用 openpyxl（项目已依赖，
-避免引入 pandas）。按学生聚合当天缺交科目/说明/特殊情况，按座号排序，
+避免引入 pandas）。按学生聚合当天缺交作业种类/说明/特殊情况，按座号排序，
 落盘到 <导出根>/<年>/<月>月/<日期>缺交记录.xlsx。
 
 导出根目录用环境变量 HOMEWORK_EXPORT_DIR 配置，默认
@@ -26,7 +26,7 @@ EXPORT_DIR = os.environ.get(
     os.path.join(DATA_DIR, "homework_exports"),
 )
 
-HEADERS = ["学号", "姓名", "缺交科目", "说明", "特殊情况"]
+HEADERS = ["学号", "姓名", "缺交作业种类", "说明", "特殊情况"]
 
 
 def _unique_join(values):
@@ -90,7 +90,7 @@ def export_daily_report(target_date, db=None):
                     "seat": seat if seat is not None else 10**9,
                     "学号": (str(seat) if seat is not None else (sid or "")),
                     "姓名": r.name if r else sid,
-                    "缺交科目": _unique_join(data["subjects"]),
+                    "缺交作业种类": _unique_join(data["subjects"]),
                     "说明": _unique_join(data["contents"]),
                     "特殊情况": _unique_join(data["specials"]),
                 }

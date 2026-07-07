@@ -194,7 +194,7 @@ def test_name_action_parser_supports_status_evaluation_and_special():
     names = {"张三"}
     missing = parse_name_action("张三数学缺交订正", names)
     assert missing["submission_status"] == "缺交"
-    assert missing["subject"] == "数学"
+    assert missing["subject"] == "试卷订正"
     excellent = parse_name_action("张三物理优秀", names)
     assert excellent["submission_status"] == "已交"
     assert excellent["evaluation"] == "优秀"
@@ -254,9 +254,7 @@ def test_smart_input_records_name_only_member(monkeypatch):
         date="2026-03-05",
         confirm=True,
     )
-    resp = asyncio.get_event_loop().run_until_complete(
-        hw_router.hw_smart_input(payload)
-    )
+    resp = asyncio.run(hw_router.hw_smart_input(payload))
     assert resp["success"] is True
     assert resp["added_count"] == 2
 
@@ -332,10 +330,56 @@ def test_same_name_miss_does_not_leak_across_classes(monkeypatch):
     payload = hw_router.SmartInputPayload(
         raw_text="王某物理缺交", teaching_class_id=1, date="2026-03-05", confirm=True,
     )
-    resp = asyncio.get_event_loop().run_until_complete(hw_router.hw_smart_input(payload))
+    resp = asyncio.run(hw_router.hw_smart_input(payload))
     assert resp["success"] is True
 
     a = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=1)
     b = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=2)
     assert a["kpi"]["total_misses"] == 1
     assert b["kpi"]["total_misses"] == 0
+
+
+def test_smart_input_supports_mixed_name_and_type_lines(monkeypatch):
+    """智能录入同一批文本可混写「姓名+动作」与「作业种类/动作：姓名列表」。"""
+    import asyncio
+    from app.homework import router as hw_router
+
+    db = make_db()
+    db.add(TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1))
+    for sid, name in (
+        ("S1", "张三"), ("S2", "李四"), ("S3", "王五"),
+        ("S4", "吴六"), ("S5", "赵七"),
+    ):
+        db.add(ClassRoster(student_id=sid, name=name, excluded=0))
+        db.add(TeachingClassMember(teaching_class_id=1, student_id=sid, name=name))
+    db.add(HomeworkSemester(
+        id=1, name="测试学期", start_date="2026-03-01",
+        end_date="2026-07-01", is_current=1,
+    ))
+    db.commit()
+
+    monkeypatch.setattr(hw_router, "get_db", lambda: iter([db]))
+    monkeypatch.setattr(hw_router, "export_daily_report", lambda *a, **k: None)
+    payload = hw_router.SmartInputPayload(
+        raw_text="张三校本优秀\n订正缺交：李四、王五\n校本差：吴六、赵七",
+        teaching_class_id=1,
+        date="2026-03-05",
+        confirm=True,
+    )
+    resp = asyncio.run(hw_router.hw_smart_input(payload))
+    assert resp["success"] is True
+    assert resp["added_count"] == 5
+
+    rows = {
+        r.student_id: r for r in db.query(HomeworkRecord).order_by(HomeworkRecord.student_id).all()
+    }
+    assert rows["S1"].subject == "校本作业"
+    assert rows["S1"].submission_status == "已交"
+    assert rows["S1"].evaluation == "优秀"
+    assert rows["S2"].subject == "试卷订正"
+    assert rows["S2"].submission_status == "缺交"
+    assert rows["S3"].subject == "试卷订正"
+    assert rows["S4"].subject == "校本作业"
+    assert rows["S4"].evaluation == "差"
+    assert rows["S5"].subject == "校本作业"
+    assert rows["S5"].evaluation == "差"

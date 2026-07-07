@@ -126,7 +126,7 @@ export default function HomeworkManagePage() {
             />
             {subject && (
               <Badge className="border-transparent bg-brand-50 text-brand-700">
-                学科：{subject}
+                作业种类：{subject}
               </Badge>
             )}
             <Button variant="outline" size="sm" onClick={() => load()}>
@@ -155,7 +155,7 @@ export default function HomeworkManagePage() {
                   <TableHead>姓名</TableHead>
                   <TableHead>班级</TableHead>
                   <TableHead>状态</TableHead>
-                  <TableHead>科目 / 情况</TableHead>
+                  <TableHead>作业种类 / 情况</TableHead>
                   <TableHead>说明</TableHead>
                   <TableHead className="text-right">操作</TableHead>
                 </TableRow>
@@ -221,7 +221,7 @@ export default function HomeworkManagePage() {
                   <option value="缺交">缺交</option><option value="已交">已交</option>
                 </select>
               </label>
-              <label className="block text-sm">科目
+              <label className="block text-sm">作业种类
                 <input value={editing.subject} onChange={(e) => setEditing({ ...editing, subject: e.target.value })}
                   className="mt-1 w-full rounded-md border border-slate-200 px-2 py-2" />
               </label>

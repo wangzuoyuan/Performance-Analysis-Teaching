@@ -121,7 +121,7 @@ export default function HomeworkCard({ studentId }: { studentId: string }) {
               <thead>
                 <tr className="text-left text-xs text-slate-400">
                   <th className="py-1 font-normal">日期</th>
-                  <th className="py-1 font-normal">学科</th>
+                  <th className="py-1 font-normal">作业种类</th>
                   <th className="py-1 font-normal">说明</th>
                 </tr>
               </thead>
