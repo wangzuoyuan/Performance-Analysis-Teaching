@@ -37,8 +37,9 @@
 - **学生画像页**：跨学年主三门/五门/+3/3+3 趋势、单科历史、历次明细、教学班内排名（标注口径）、学段履历。
 
 ### 作业 / 档案 / AI / 备份
-- **作业跟踪**：智能文本录入缺交/请假/迟到，看板（每日趋势/各科占比/排行/连续缺交预警）、自动导出 Excel、花名册排除开关、学期配置。**仅按姓名添加的教学班成员也能录缺交并计入看板**（占位学号按教学班隔离，同名跨班互不串数据）。
-- **缺交 × 成绩相关性**：缺交次数与排名散点 + 各科皮尔逊系数排序。
+- **作业跟踪**：面向任课老师的单学科场景，智能文本录入缺交/请假/迟到/评价，按作业种类（校本作业、周末作业、试卷订正、日常作业等）统计，看板（每日趋势/各类作业占比/排行/连续缺交预警）、自动导出 Excel、花名册排除开关、学期配置。**仅按姓名添加的教学班成员也能录缺交并计入看板**（占位学号按教学班隔离，同名跨班互不串数据）。
+- **混合智能录入**：同一批文本可混写 `张三校本优秀`、`订正缺交：李四、王五`、`校本差：吴六、赵七`。
+- **缺交 × 成绩相关性**：总缺交次数与排名散点，辅助识别“高缺交 + 排名靠后”的重点关注学生。
 - **成长/谈话档案**：谈话/观察/家访/家长沟通/奖惩，跟进事项；AI 可读取辅助起草谈话提纲、家长沟通稿。
 - **本周关注**：合并连续缺交预警、本周缺交激增、最近考试临界/薄弱/偏科、谈话跟进待办。
 - **家长会一页纸**：学生页一键生成打印友好单页。
@@ -120,7 +121,7 @@ cd frontend && npm run build        # 生产构建
 **成绩表**：`teacher`、`exam`、`upload`、`subject_score`(+`class_label`)、`total_score`、`class_average`(+`class_label`)、`analysis_config`。
 **教学班表**（教学版核心）：`teaching_class`（grade+label+subject+kind）、`teaching_class_member`（teaching_class_id ↔ 真实学号，含来源 source）。
 **跨学年身份**：`student_identity`（人）、`student_alias`（学号 ↔ 人，分班后学号变更时建链）。
-**作业**：`class_roster`(+`class_label`)、`homework_record`、`special_record`、`homework_setting`。**档案**：`student_note`。
+**作业**：`class_roster`(+`class_label`)、`homework_record`、`special_record`、`homework_setting`。`homework_record.subject` 是兼容旧库/旧 API 的字段名，当前业务含义为“作业种类”。**档案**：`student_note`。
 
 **核心口径**：所有按班级的分析从旧的 `WHERE class_num == N` 改为 `resolve_scope(db, teaching_class_id=...)` 解析成成员学号集合（`None`＝全年级）。段位排名仍是**全年级**口径，只是计数落在「我的班成员」子集上。详见 [CLAUDE.md](CLAUDE.md)。
 
@@ -149,7 +150,7 @@ OPENAI_MODEL=gpt-4o-mini
 ```bash
 cd backend && source .venv/bin/activate && pytest tests/
 ```
-覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `backup_weekly`，教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除），以及作业看板的 **`test_homework_dashboard`**（范围口径 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）。
+覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router` / `notes_router` / `backup_weekly`，教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除），以及作业看板的 **`test_homework_dashboard`**（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）。
 
 **持续集成**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与所有 PR 上跑——后端 `pytest`、前端 `tsc --noEmit` + `next build`。
 

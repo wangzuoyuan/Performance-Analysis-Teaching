@@ -180,7 +180,7 @@ export default function HomeworkPage() {
     load()
   }, [load])
 
-  /** 带教学班参数跳到记录管理页下钻（日期/科目/学生筛选沿用 manage 页逻辑）。 */
+  /** 带教学班参数跳到记录管理页下钻（日期/作业种类/学生筛选沿用 manage 页逻辑）。 */
   const goManage = (params: Record<string, string>) => {
     const query = new URLSearchParams(params)
     router.push(`/homework/manage?${query}`)

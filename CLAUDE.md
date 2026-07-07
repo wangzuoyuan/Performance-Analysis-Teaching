@@ -109,12 +109,12 @@ tail -f ~/.exam-tracker/frontend.log
 ### homework router（`/api/homework`，`homework/router.py`）
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式），录入后自动导出当天 Excel |
-| GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`warnings` 为连续缺交预警（连续 2 次黄、≥3 次红） |
-| GET  | `/correlation` | 缺交 × 成绩相关：默认总缺交 × 主三门排名；`?subject=` 切到该科缺交 × 该科年级百分位。不传 `?class_num=` 时跨全花名册（我教的所有班并集），传了限定单班 |
-| GET  | `/correlation/subjects` | 各科「缺交拖成绩」皮尔逊相关系数排序（同样默认全花名册）|
+| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式；`by_subject` 为兼容旧名，当前含义是“按作业种类”），录入后自动导出当天 Excel |
+| GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`/subjects` 为兼容旧路径，返回各作业种类分布；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
+| GET  | `/correlation` | 缺交 × 成绩相关：默认总缺交 × 主三门排名。不传 `?class_num=` 时跨全花名册（我教的所有班并集），传了限定单班；`?subject=` 为历史兼容的单科学业相关入口，前端不再作为主路径 |
+| GET  | `/correlation/subjects` | 历史兼容：各学科「缺交拖成绩」皮尔逊相关系数排序（前端主路径已收敛为总缺交 × 排名）|
 | GET  | `/student/{student_id}` | 单个学生作业概况（供学生画像页作业卡片） |
-| GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（供看板图表下钻） |
+| GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（`subject` 为兼容参数名，实际筛作业种类，供看板图表下钻） |
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
 | GET  | `/api/weekly-focus` | 本周关注名单：合并连续缺交预警 + 本周缺交激增 + 最近考试临界/薄弱/偏科 + 谈话跟进待办（缺交驱动，不依赖新考试）。不传 `?class_num=` 时跨全花名册 |
@@ -142,7 +142,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 > **教学版**：`class_trend`/`compare_classes`/`focus_list`/`subject_weakness`/`multi_exam_progress_ranking`/`band_trend`/`custom_rank_band_trend`/`rank_range_filter`/`rank_frequency_stat` 均接受 `teaching_class_id`（或 `class_label`）按教学班过滤；`session.py` 系统提示含「多教学班」语义（未指定班=我教的班并集），业务口径（指标选择规则）原文保留。
 
-作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（支持 `subject`，总览附各科皮尔逊相关排序）
+作业 3 个：`student_homework_summary` / `class_homework_ranking` / `homework_grade_correlation`（主口径为总缺交 × 排名；`subject` 参数和各科皮尔逊排序保留为历史兼容入口）
 
 档案 1 个：`student_notes`（读取某生成长/谈话档案，结合成绩与缺交辅助起草谈话提纲/家长沟通稿）
 
@@ -156,7 +156,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **段位阈值**：所有段位计算（`rank_bands`、`focus-list`、`band-trend`、AI 工具）必须调用 `analysis/config.py` 的 `get_band_config()`，不能硬编码默认值。用户在前端修改后，页面展示与 AI 问答口径同步。
 
-**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；学科归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。**教学版多班口径**：`grade_correlation` / `subject_correlation_ranking` / `weekly_focus` 的 `class_num` 缺省为 `None`＝跨全花名册（我教的所有班并集，前端缺省不传），传具体班号才限定单班——旧版硬编码 `class_num=6` 已移除。**仅姓名成员**：作业范围（`_scope_student_ids`）用 `members_of(..., include_anon=True)` / `all_my_member_ids(..., include_anon=True)` 把 `_anon:` 占位学生纳入（成绩分析侧默认 `include_anon=False` 仍排除，口径不变）；智能录入 `hw_smart_input` 以教学班成员为准按姓名匹配（左连 `class_roster` 回落取名），写入缺交前给缺花名册行的占位学号补建 `class_roster`，使记录进看板/预警。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
+**作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；作业种类归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。`HomeworkRecord.subject` / `?subject=` / `/subjects` 是兼容旧库和旧 API 的命名，当前业务含义均为“作业种类”。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。智能录入支持混合写法（如 `张三校本优秀`、`订正缺交：李四、王五`、`校本差：吴六、赵七`），并按作业种类统计校本作业、周末作业、试卷订正、日常作业等。**教学版多班口径**：`grade_correlation` / `subject_correlation_ranking` / `weekly_focus` 的 `class_num` 缺省为 `None`＝跨全花名册（我教的所有班并集，前端缺省不传），传具体班号才限定单班——旧版硬编码 `class_num=6` 已移除。**仅姓名成员**：作业范围（`_scope_student_ids`）用 `members_of(..., include_anon=True)` / `all_my_member_ids(..., include_anon=True)` 把 `_anon:` 占位学生纳入（成绩分析侧默认 `include_anon=False` 仍排除，口径不变）；智能录入 `hw_smart_input` 以教学班成员为准按姓名匹配（左连 `class_roster` 回落取名），写入缺交前给缺花名册行的占位学号补建 `class_roster`，使记录进看板/预警。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 的座号映射到成绩库真实学号，幂等可重跑）。
 
 **档案 / 主动提醒 / 备份**：`notes/router.py` 管理 `student_note`（成长/谈话档案），AI 工具 `student_notes` 可读取。`homework/service.weekly_focus()` 合成「本周关注」，复用 `warnings` 与 `chat/tools.focus_list`（懒导入避免循环）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用同一备份目录 `~/.exam-tracker-backups`；`run.py init` 清空前自动快照。
 
@@ -197,7 +197,7 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（学科解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `homework_dashboard`（范围口径 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）/ `teaching_router`（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）/ `scope`（范围解析 / 身份链接）
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `homework_dashboard`（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）/ `teaching_router`（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）/ `scope`（范围解析 / 身份链接）
 
 CI：`.github/workflows/ci.yml`——push 到 `main` 与所有 PR 上跑后端 `pytest` + 前端 `tsc --noEmit`/`next build`。
 
