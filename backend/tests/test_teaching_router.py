@@ -225,16 +225,22 @@ def test_anon_reassign_does_not_leak_across_classes(make_class):
     # 两个班各有一个同名「仅姓名」成员（实际是不同的学生）
     client.post(f"/api/teaching/classes/{a['id']}/members/import", json={"text": "王某"})
     client.post(f"/api/teaching/classes/{b['id']}/members/import", json={"text": "王某"})
+    # 占位学号按教学班隔离：两个同名成员是不同的占位学号，绝不共用
+    anon_a = f"_anon:{a['id']}:王某"
+    anon_b = f"_anon:{b['id']}:王某"
+    assert anon_a != anon_b
+    am = client.get(f"/api/teaching/classes/{a['id']}/members").json()["members"]
+    assert am[0]["student_id"] == anon_a
     # 给 A 班的王某补学号
     r = client.patch(
-        f"/api/teaching/classes/{a['id']}/members/{quote('_anon:王某', safe='')}",
+        f"/api/teaching/classes/{a['id']}/members/{quote(anon_a, safe='')}",
         json={"new_student_id": "7100066", "name": "王某"},
     )
     assert r.status_code == 200, r.text
     # B 班的「仅姓名」王某必须原样保留，不能被级联污染
     bm = client.get(f"/api/teaching/classes/{b['id']}/members").json()["members"]
     assert len(bm) == 1
-    assert bm[0]["student_id"] == "_anon:王某"
+    assert bm[0]["student_id"] == anon_b
     assert bm[0]["has_student_id"] is False
 
 

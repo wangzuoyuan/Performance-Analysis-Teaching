@@ -2,6 +2,18 @@
 
 本项目所有值得注意的变更记录于此。版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [1.0.3] - 2026-07-07
+
+### 修复
+- **同名仅姓名学生跨教学班串数据**：仅姓名占位学号此前按姓名全局生成（`_anon:姓名`），若两个教学班各有一名同名（实为不同人）的仅姓名学生，会共用同一占位学号——给一个班录缺交会同时出现在另一个班的看板里，「全部班级」人数也会误去重。现改为按教学班隔离（`_anon:<教学班id>:姓名`），从根上杜绝串班。
+  - `anon_sid_for(name, teaching_class_id)` 带上教学班；新增 `is_class_scoped_anon` / `name_from_anon_sid` 兼容新旧格式。
+  - 启动迁移 `_rekey_anon_members_class_scoped` 幂等地把历史 `_anon:姓名` 迁成按班隔离格式；仅属单个班的占位成员，其花名册/缺交/特殊/成长档案一并改指到新学号。
+
+### 工程
+- 新增 GitHub Actions CI：后端 `pytest`、前端 `tsc --noEmit` + `next build`。
+
+[1.0.3]: https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases/tag/v1.0.3
+
 ## [1.0.2] - 2026-07-07
 
 ### 修复

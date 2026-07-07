@@ -27,8 +27,28 @@ def is_anon_sid(sid: Optional[str]) -> bool:
     return bool(sid) and sid.startswith(ANON_PREFIX)
 
 
-def anon_sid_for(name: str) -> str:
-    return f"{ANON_PREFIX}{(name or '').strip()}"
+def anon_sid_for(name: str, teaching_class_id) -> str:
+    """某教学班内「仅姓名」学生的占位学号：`_anon:<教学班id>:<姓名>`。
+
+    带上教学班 id 是为了让不同班的同名仅姓名学生互不共用学号——否则两个班里
+    的同名（且是不同人）会指向同一占位学号，缺交/记录会跨班串到一起。"""
+    return f"{ANON_PREFIX}{int(teaching_class_id)}:{(name or '').strip()}"
+
+
+def is_class_scoped_anon(sid: Optional[str]) -> bool:
+    """占位学号是否已是「按教学班隔离」的新格式 `_anon:<数字>:...`。"""
+    if not is_anon_sid(sid):
+        return False
+    return bool(re.match(r"^\d+:", sid[len(ANON_PREFIX):]))
+
+
+def name_from_anon_sid(sid: Optional[str]) -> str:
+    """从占位学号取回姓名，兼容旧格式 `_anon:<姓名>` 与新格式 `_anon:<id>:<姓名>`。"""
+    if not is_anon_sid(sid):
+        return ""
+    rest = sid[len(ANON_PREFIX):]
+    m = re.match(r"^\d+:(.*)$", rest)
+    return m.group(1) if m else rest
 
 
 def ensure_anon_roster(db, tc, anon_sid: str, name: str) -> None:
@@ -221,7 +241,7 @@ def _place_id(db, tc, sid: str, name, upsert: bool, existing: set, by_name: dict
 
     # 自动升级：存在同名的「仅姓名」占位成员 → 升级为真实学号（避免重复占位）
     if name:
-        anon = anon_sid_for(name)
+        anon = anon_sid_for(name, tc.id)
         if anon in existing:
             reassign_member_id(db, tc, anon, sid, name=name)
             _reindex(existing, by_name, removed_sid=anon, added_sid=sid, added_name=name)
@@ -361,7 +381,7 @@ def resolve_import(
             ambiguous.append(_ambiguous_entry(db, tc.grade, tok))
         else:
             # 零命中：落「仅姓名」占位成员，可日后补学号
-            anon = anon_sid_for(tok)
+            anon = anon_sid_for(tok, tc.id)
             # 本班已有同名成员（含已设学号的）→ 不重复落占位，避免重复
             if tok in by_name:
                 name_only.append({"student_id": by_name[tok][0], "name": tok, "state": "exists"})
@@ -427,7 +447,7 @@ def add_by_names_and_ids(
         elif len(ids) > 1:
             ambiguous.append({"name": name, "candidate_ids": ids})
         else:
-            anon = anon_sid_for(name)
+            anon = anon_sid_for(name, tc.id)
             # 本班已有同名成员 → 不重复落占位
             if name in by_name or anon in existing:
                 continue
