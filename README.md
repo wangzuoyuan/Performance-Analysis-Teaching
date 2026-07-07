@@ -1,9 +1,10 @@
 # 成绩分析（教学版）
 
-![version](https://img.shields.io/badge/version-1.0.0-blue)
+![version](https://img.shields.io/badge/version-1.0.3-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Next.js](https://img.shields.io/badge/Next.js-14-black)
+[![CI](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/actions/workflows/ci.yml/badge.svg)](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/actions/workflows/ci.yml)
 
 > 任课老师的多教学班成绩与教学质量分析 Web 应用。
 > 一位老师同时任教**多个教学班**（高一＝行政班数字，高二/三可为走班班名如「物A1」「史B3」），
@@ -36,7 +37,7 @@
 - **学生画像页**：跨学年主三门/五门/+3/3+3 趋势、单科历史、历次明细、教学班内排名（标注口径）、学段履历。
 
 ### 作业 / 档案 / AI / 备份
-- **作业跟踪**：智能文本录入缺交/请假/迟到，看板（每日趋势/各科占比/排行/连续缺交预警）、自动导出 Excel、花名册排除开关、学期配置。
+- **作业跟踪**：智能文本录入缺交/请假/迟到，看板（每日趋势/各科占比/排行/连续缺交预警）、自动导出 Excel、花名册排除开关、学期配置。**仅按姓名添加的教学班成员也能录缺交并计入看板**（占位学号按教学班隔离，同名跨班互不串数据）。
 - **缺交 × 成绩相关性**：缺交次数与排名散点 + 各科皮尔逊系数排序。
 - **成长/谈话档案**：谈话/观察/家访/家长沟通/奖惩，跟进事项；AI 可读取辅助起草谈话提纲、家长沟通稿。
 - **本周关注**：合并连续缺交预警、本周缺交激增、最近考试临界/薄弱/偏科、谈话跟进待办。
@@ -148,13 +149,15 @@ OPENAI_MODEL=gpt-4o-mini
 ```bash
 cd backend && source .venv/bin/activate && pytest tests/
 ```
-覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `backup_weekly`，以及教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除）。
+覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser` / `homework_router` / `notes_router` / `backup_weekly`，教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除），以及作业看板的 **`test_homework_dashboard`**（范围口径 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）。
+
+**持续集成**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与所有 PR 上跑——后端 `pytest`、前端 `tsc --noEmit` + `next build`。
 
 > 注：`test_homework_router::test_toggle_excluded_roundtrip` 依赖已跑过 `homework/migrate.py`（把旧 `homework.db` 迁入），全新空库下会因花名册为空而跳过失败，属环境依赖，不影响功能。
 
 ## 版本
 
-当前版本 **v1.0.0**（首个正式发布）。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
+当前版本 **1.0.3**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
 
 ## 设计文档
 
