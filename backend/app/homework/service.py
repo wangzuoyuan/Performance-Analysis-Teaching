@@ -140,9 +140,9 @@ def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
     """作业范围：指定教学班＝该班成员；None＝我教的全部班成员并集。
     尚未配置任何教学班时回落到全花名册（旧版口径），避免看板/录入整体失明。"""
     if teaching_class_id is not None:
-        ids = members_of(db, int(teaching_class_id))
+        ids = members_of(db, int(teaching_class_id), include_anon=True)
     else:
-        ids = all_my_member_ids(db)
+        ids = all_my_member_ids(db, include_anon=True)
         if not ids:
             ids = {r[0] for r in db.query(ClassRoster.student_id).all()}
     if include_excluded or not ids:

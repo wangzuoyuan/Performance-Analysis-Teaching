@@ -18,8 +18,12 @@ from typing import Optional
 
 # ────────────────────────────── 教学班成员范围 ──────────────────────────────
 
-def members_of(db, teaching_class_id: int) -> set[str]:
-    """某教学班的成员学号集合（排除「仅姓名」占位 _anon:，它们没有成绩数据）。"""
+def members_of(db, teaching_class_id: int, include_anon: bool = False) -> set[str]:
+    """某教学班的成员学号集合。
+
+    默认排除「仅姓名」占位 _anon:（它们没有成绩数据，成绩分析用不到）；
+    作业模块传 include_anon=True，把仅姓名学生也纳入（缺交跟踪正是「先有名单、
+    后有成绩」的场景）。"""
     from app.db.models import TeachingClassMember
 
     rows = (
@@ -27,6 +31,8 @@ def members_of(db, teaching_class_id: int) -> set[str]:
         .filter(TeachingClassMember.teaching_class_id == teaching_class_id)
         .all()
     )
+    if include_anon:
+        return {r[0] for r in rows if r[0]}
     return {r[0] for r in rows if r[0] and not r[0].startswith("_anon:")}
 
 
@@ -93,9 +99,10 @@ def my_class_labels(db, grade: Optional[int] = None) -> dict[str, int]:
     return {tc.label: tc.id for tc in list_classes(db, grade)}
 
 
-def all_my_member_ids(db, grade: Optional[int] = None) -> set[str]:
+def all_my_member_ids(db, grade: Optional[int] = None, include_anon: bool = False) -> set[str]:
     """我教的所有班（可限定年级）的成员并集，供总览仪表盘 & 全局学生检索。
-    排除「仅姓名」占位 _anon:（它们没有成绩，不作为可检索学生）。"""
+    默认排除「仅姓名」占位 _anon:（无成绩，不作为可检索学生）；作业模块传
+    include_anon=True 把仅姓名学生也纳入缺交跟踪范围。"""
     from app.db.models import TeachingClass, TeachingClassMember
     from sqlalchemy import distinct
 
@@ -104,6 +111,8 @@ def all_my_member_ids(db, grade: Optional[int] = None) -> set[str]:
     )
     if grade is not None:
         q = q.filter(TeachingClass.grade == grade)
+    if include_anon:
+        return {r[0] for r in q.all() if r[0]}
     return {r[0] for r in q.all() if r[0] and not r[0].startswith("_anon:")}
 
 

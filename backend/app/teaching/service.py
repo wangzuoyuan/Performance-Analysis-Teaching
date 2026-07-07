@@ -31,6 +31,18 @@ def anon_sid_for(name: str) -> str:
     return f"{ANON_PREFIX}{(name or '').strip()}"
 
 
+def ensure_anon_roster(db, tc, anon_sid: str, name: str) -> None:
+    """给新建的「仅姓名」占位成员补一条花名册行（作业模块的学生主体）。
+
+    花名册是缺交/特殊记录的外键目标；仅姓名成员若不进花名册，作业看板会显示
+    「0 名有效学生」、录入缺交时也匹配不到。已存在则跳过（幂等）。"""
+    from app.db.models import ClassRoster
+
+    if db.query(ClassRoster.student_id).filter(ClassRoster.student_id == anon_sid).first():
+        return
+    db.add(ClassRoster(student_id=anon_sid, name=name, class_label=tc.label))
+
+
 def name_to_student_ids(db, name: str, grade: Optional[int] = None) -> list[str]:
     """按姓名反查学号（来源 SubjectScore.name，可选 ClassRoster.name）。返回去重学号列表。"""
     from app.db.models import ClassRoster, Exam, SubjectScore
@@ -41,10 +53,11 @@ def name_to_student_ids(db, name: str, grade: Optional[int] = None) -> list[str]
     if grade is not None:
         q = q.join(Exam, Exam.id == SubjectScore.exam_id).filter(Exam.grade == grade)
     ids.extend(r[0] for r in q.all())
-    # 花名册补充（作业模块可能已有该生但尚无成绩）
+    # 花名册补充（作业模块可能已有该生但尚无成绩）；跳过「仅姓名」占位学号，
+    # 它们只是某教学班内的姓名占位，不是全局的人标识，不能作为反查命中。
     rq = db.query(ClassRoster.student_id).filter(ClassRoster.name == name)
     for r in rq.all():
-        if r[0] not in ids:
+        if r[0] not in ids and not is_anon_sid(r[0]):
             ids.append(r[0])
     return ids
 
@@ -361,6 +374,7 @@ def resolve_import(
                     teaching_class_id=tc.id, student_id=anon, name=tok, source="manual"
                 )
             )
+            ensure_anon_roster(db, tc, anon, tok)
             existing.add(anon)
             by_name.setdefault(tok, []).append(anon)
             added += 1
@@ -422,6 +436,7 @@ def add_by_names_and_ids(
                     teaching_class_id=tc.id, student_id=anon, name=name, source="manual"
                 )
             )
+            ensure_anon_roster(db, tc, anon, name)
             existing.add(anon)
             by_name.setdefault(name, []).append(anon)
             added += 1
@@ -497,68 +512,84 @@ def reassign_member_id(db, tc, old_sid: str, new_sid: str, name: str | None = No
         target.name = student_name(db, new_sid)
 
     # 仅姓名占位（_anon:姓名）只在「本班·本姓名」范围内有效，不是全局人标识：
-    # 同名不同人会在多班各占一行，绝不能跨班级联改指。占位成员也没有花名册/
-    # 缺交/档案/别名数据，故到此即可提交。
-    if old_is_anon:
-        db.commit()
-        return {"old": old_sid, "new": new_sid, "name": name, "cascaded": cascaded}
-
-    # 以下级联仅对真实学号生效——学号是「人」的全局标识。
-    # 其它班同一学号的成员行：一并改（新学号已在那个班则合并删除）
-    other_rows = (
+    # 同名不同人会在多班各占一行，绝不能跨班/别名联动。但占位成员现在也进花名册、
+    # 也可能已录了缺交，需要把这些「本人数据」迁到真实学号——除非该占位学号仍被
+    # 其它班成员共用（同名多人），那样迁移会误伤他人，改为给新学号补一张空花名册。
+    anon_shared = old_is_anon and (
         db.query(TeachingClassMember)
         .filter(
-            TeachingClassMember.teaching_class_id != tc.id,
             TeachingClassMember.student_id == old_sid,
+            TeachingClassMember.id != target.id,
         )
-        .all()
+        .first()
+        is not None
     )
-    for row in other_rows:
-        cc = (
+    migrate_person_data = (not old_is_anon) or (not anon_shared)
+
+    if not old_is_anon:
+        # 其它班同一（真实）学号的成员行：一并改（新学号已在那个班则合并删除）
+        other_rows = (
             db.query(TeachingClassMember)
             .filter(
-                TeachingClassMember.teaching_class_id == row.teaching_class_id,
-                TeachingClassMember.student_id == new_sid,
+                TeachingClassMember.teaching_class_id != tc.id,
+                TeachingClassMember.student_id == old_sid,
             )
-            .first()
+            .all()
         )
-        if cc:
-            db.delete(row)
-        else:
-            row.student_id = new_sid
-        cascaded["members"] += 1
+        for row in other_rows:
+            cc = (
+                db.query(TeachingClassMember)
+                .filter(
+                    TeachingClassMember.teaching_class_id == row.teaching_class_id,
+                    TeachingClassMember.student_id == new_sid,
+                )
+                .first()
+            )
+            if cc:
+                db.delete(row)
+            else:
+                row.student_id = new_sid
+            cascaded["members"] += 1
 
-    # 花名册（PK=student_id，避免主键冲突：新学号已有花名册则删旧留新）
-    old_roster = db.query(ClassRoster).filter(ClassRoster.student_id == old_sid).first()
-    if old_roster:
-        if db.query(ClassRoster).filter(ClassRoster.student_id == new_sid).first():
-            db.delete(old_roster)
-        else:
-            old_roster.student_id = new_sid
-        cascaded["roster"] += 1
+    if migrate_person_data:
+        # 花名册（PK=student_id，避免主键冲突：新学号已有花名册则删旧留新）
+        old_roster = db.query(ClassRoster).filter(ClassRoster.student_id == old_sid).first()
+        if old_roster:
+            if db.query(ClassRoster).filter(ClassRoster.student_id == new_sid).first():
+                db.delete(old_roster)
+            else:
+                old_roster.student_id = new_sid
+            cascaded["roster"] += 1
 
-    # 缺交 / 特殊 / 档案：无学号唯一约束，直接批量改指
-    cascaded["homework"] = (
-        db.query(HomeworkRecord)
-        .filter(HomeworkRecord.student_id == old_sid)
-        .update({HomeworkRecord.student_id: new_sid}, synchronize_session=False)
-    )
-    cascaded["special"] = (
-        db.query(SpecialRecord)
-        .filter(SpecialRecord.student_id == old_sid)
-        .update({SpecialRecord.student_id: new_sid}, synchronize_session=False)
-    )
-    cascaded["notes"] = (
-        db.query(StudentNote)
-        .filter(StudentNote.student_id == old_sid)
-        .update({StudentNote.student_id: new_sid}, synchronize_session=False)
-    )
+        # 缺交 / 特殊 / 档案：无学号唯一约束，直接批量改指
+        cascaded["homework"] = (
+            db.query(HomeworkRecord)
+            .filter(HomeworkRecord.student_id == old_sid)
+            .update({HomeworkRecord.student_id: new_sid}, synchronize_session=False)
+        )
+        cascaded["special"] = (
+            db.query(SpecialRecord)
+            .filter(SpecialRecord.student_id == old_sid)
+            .update({SpecialRecord.student_id: new_sid}, synchronize_session=False)
+        )
+        cascaded["notes"] = (
+            db.query(StudentNote)
+            .filter(StudentNote.student_id == old_sid)
+            .update({StudentNote.student_id: new_sid}, synchronize_session=False)
+        )
 
-    # 身份别名（student_id 唯一）：新学号已有别名 → 视作两人，不自动合并，跳过
-    old_alias = db.query(StudentAlias).filter(StudentAlias.student_id == old_sid).first()
-    if old_alias and not db.query(StudentAlias).filter(StudentAlias.student_id == new_sid).first():
-        old_alias.student_id = new_sid
-        cascaded["alias"] += 1
+    if not old_is_anon:
+        # 身份别名（student_id 唯一）：新学号已有别名 → 视作两人，不自动合并，跳过
+        old_alias = db.query(StudentAlias).filter(StudentAlias.student_id == old_sid).first()
+        if old_alias and not db.query(StudentAlias).filter(StudentAlias.student_id == new_sid).first():
+            old_alias.student_id = new_sid
+            cascaded["alias"] += 1
+
+    # 占位学号被同名多人共用而未迁移花名册时，给新学号补一张花名册，保证可继续跟踪
+    if old_is_anon and not migrate_person_data:
+        if not db.query(ClassRoster).filter(ClassRoster.student_id == new_sid).first():
+            db.add(ClassRoster(student_id=new_sid, name=target.name, class_label=tc.label))
+            cascaded["roster"] += 1
 
     db.commit()
     return {"old": old_sid, "new": new_sid, "name": name, "cascaded": cascaded}

@@ -19,6 +19,7 @@ from sqlalchemy import text
 from app.db.models import (
     Base,
     ClassAverage,
+    ClassRoster,
     HomeworkSetting,
     SubjectScore,
     Teacher,
@@ -114,6 +115,37 @@ def _backfill_member_names(db) -> int:
     return updated
 
 
+def _backfill_anon_member_roster(db) -> int:
+    """给「仅姓名」占位成员（_anon:）补建花名册行（幂等，只补缺失的）。
+
+    花名册是作业模块的学生主体（HomeworkRecord.student_id 外键指向它），而仅姓名
+    成员此前只落在 teaching_class_member、没有花名册行，导致作业看板「0 名有效学生」、
+    录入缺交时「未匹配到当前教学班学生」。这里把它们补进花名册即可正常跟踪。"""
+    from app.teaching.service import ANON_PREFIX
+
+    existing = {r[0] for r in db.query(ClassRoster.student_id).all()}
+    # 同一 _anon 学号可能在多个教学班出现，取任一教学班标签作为 class_label
+    rows = (
+        db.query(TeachingClassMember.student_id, TeachingClassMember.name, TeachingClass.label)
+        .join(TeachingClass, TeachingClass.id == TeachingClassMember.teaching_class_id)
+        .filter(TeachingClassMember.student_id.like(f"{ANON_PREFIX}%"))
+        .all()
+    )
+    created = 0
+    seen = set()
+    for sid, name, label in rows:
+        if sid in existing or sid in seen:
+            continue
+        seen.add(sid)
+        db.add(ClassRoster(
+            student_id=sid,
+            name=(name or sid[len(ANON_PREFIX):]),
+            class_label=label,
+        ))
+        created += 1
+    return created
+
+
 def migrate_teaching(db=None) -> dict:
     """执行教学版迁移。db 为空时自建 session。返回各步骤计数，便于日志/排查。"""
     own = db is None
@@ -135,6 +167,7 @@ def migrate_teaching(db=None) -> dict:
         new_classes = _backfill_from_old_target_class(db)
         relabeled = _backfill_class_average_labels(db)
         named_members = _backfill_member_names(db)
+        anon_roster = _backfill_anon_member_roster(db)
 
         # 4) 版本标记
         marker = db.query(HomeworkSetting).filter(HomeworkSetting.key == "schema_version").first()
@@ -149,6 +182,7 @@ def migrate_teaching(db=None) -> dict:
             "new_teaching_classes": new_classes,
             "relabelled_class_averages": relabeled,
             "named_members": named_members,
+            "anon_member_roster": anon_roster,
             "schema_version": SCHEMA_VERSION,
         }
     except Exception:

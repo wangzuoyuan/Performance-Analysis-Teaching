@@ -200,3 +200,69 @@ def test_name_action_parser_supports_status_evaluation_and_special():
     assert excellent["evaluation"] == "优秀"
     forgot = parse_name_action("张三忘带英语作业", names)
     assert forgot["special_type"] == "忘带"
+
+
+def seed_name_only_class(db):
+    """一个只配了「仅姓名」占位成员的教学班（还没上传成绩、没建花名册）。"""
+    db.add_all([
+        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
+        TeachingClassMember(
+            teaching_class_id=1, student_id="_anon:方石", name="方石", source="manual"
+        ),
+        TeachingClassMember(
+            teaching_class_id=1, student_id="_anon:顾陈旗", name="顾陈旗", source="manual"
+        ),
+        HomeworkSemester(
+            id=1, name="测试学期", start_date="2026-03-01",
+            end_date="2026-07-01", is_current=1,
+        ),
+    ])
+    db.commit()
+
+
+def test_name_only_members_counted_as_valid_students():
+    """回归：仅姓名成员曾因 members_of 排除 _anon: 而使教学班「0 名有效学生」。
+
+    启动迁移会给仅姓名成员补花名册行，之后作业看板即把他们算作有效学生。"""
+    from app.db.migrate_teaching import _backfill_anon_member_roster
+
+    db = make_db()
+    seed_name_only_class(db)
+    created = _backfill_anon_member_roster(db)
+    db.commit()
+    assert created == 2
+    result = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=1)
+    assert result["scope"]["member_count"] == 2
+
+
+def test_smart_input_records_name_only_member(monkeypatch):
+    """回归：为仅姓名成员录缺交曾提示「未匹配到当前教学班学生」。
+
+    直连内存库跑通 hw_smart_input 端点：应匹配到姓名、补建花名册行、写入缺交，
+    并在看板 KPI 里可见。"""
+    import asyncio
+    from app.homework import router as hw_router
+
+    db = make_db()
+    seed_name_only_class(db)
+    monkeypatch.setattr(hw_router, "get_db", lambda: iter([db]))
+    monkeypatch.setattr(hw_router, "export_daily_report", lambda *a, **k: None)
+
+    payload = hw_router.SmartInputPayload(
+        raw_text="方石\n顾陈旗物理缺交",
+        teaching_class_id=1,
+        date="2026-03-05",
+        confirm=True,
+    )
+    resp = asyncio.get_event_loop().run_until_complete(
+        hw_router.hw_smart_input(payload)
+    )
+    assert resp["success"] is True
+    assert resp["added_count"] == 2
+
+    # 两名仅姓名学生都补建了花名册行，缺交记录进入看板口径
+    assert db.query(ClassRoster).filter(
+        ClassRoster.student_id == "_anon:方石"
+    ).count() == 1
+    result = dashboard(db, "2026-03-01", "2026-03-31", teaching_class_id=1)
+    assert result["kpi"]["total_misses"] == 2
