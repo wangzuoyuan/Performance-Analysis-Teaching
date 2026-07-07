@@ -3,7 +3,8 @@
 集中缺交看板/排行/预警/学生汇总/相关性等查询，供 homework/router.py 的
 REST 端点和 chat/tools.py 的对话工具共同复用，避免逻辑重复。口径与原
 Flask 应用一致：缺交有效记录 = remark 为空 且 subject != '全科'；默认排除
-excluded=1 的学生（指定具体学生查询时不排除）。
+excluded=1 的学生（指定具体学生查询时不排除）。数据库字段名 subject 为旧名，
+当前业务含义是“作业种类”。
 """
 
 from collections import defaultdict
@@ -19,6 +20,8 @@ from app.db.models import (
 )
 from app.analysis.scope import all_my_member_ids, members_of, student_class_map_multi
 from app.homework.parser import (
+    ACADEMIC_SUBJECT_HINTS,
+    DEFAULT_HOMEWORK_TYPE,
     NEGATIVE_EVALUATIONS,
     POSITIVE_EVALUATIONS,
     SUBJECT_GROUPS,
@@ -84,6 +87,8 @@ def excluded_names(db):
 
 
 def _subject_keywords(subject):
+    if subject == DEFAULT_HOMEWORK_TYPE:
+        return [DEFAULT_HOMEWORK_TYPE, *ACADEMIC_SUBJECT_HINTS]
     for canonical_name, keywords in SUBJECT_GROUPS:
         if canonical_name == subject:
             return keywords
@@ -242,9 +247,9 @@ def rankings(db, start, end, student=None, subject=None, limit=10,
 
 
 def warnings(db, start, end, teaching_class_id=None):
-    """同一学科「当前正在进行」的连续缺交预警。
+    """同一种作业「当前正在进行」的连续缺交预警。
 
-    时间轴 = 该学科全班有人缺交的去重日期 ∪ 该生自身有记录的日期；从最近
+    时间轴 = 该种作业全班有人缺交的去重日期 ∪ 该生自身有记录的日期；从最近
     一次向前回溯，统计某学生连续缺交了最近几次（必须含最后一次，否则视为
     已结束）。本人一条「已交」会终结自己的连击，但其他学生的「已交」记录
     不影响本人。连续 2 次 → warning（黄），≥3 次 → serious（红）。
@@ -661,7 +666,7 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
 
 
 def student_summary(db, student_id=None, name=None):
-    """单个学生本学期作业概况：缺交总数、按科目分布、迟到/请假次数、
+    """单个学生本学期作业概况：缺交总数、按作业种类分布、迟到/请假次数、
     当前连续缺交预警。姓名多义时返回候选。"""
     roster_q = db.query(ClassRoster)
     if student_id:

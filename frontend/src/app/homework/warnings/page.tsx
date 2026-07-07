@@ -68,7 +68,7 @@ export default function WarningsPage() {
       .sort((a, b) => b.max - a.max)
   }, [all])
 
-  // 按学科分组
+  // 按作业种类分组
   const bySubject = useMemo(() => {
     const map = new Map<string, WarnItem[]>()
     for (const w of all) {
@@ -106,7 +106,7 @@ export default function WarningsPage() {
       </div>
 
       <p className="text-xs text-slate-400">
-        口径：某学科从最近一次收交向前回溯，连续缺交 2 次为黄、≥3 次为红；已排除「不计入统计」学生。
+        口径：某类作业从最近一次收交向前回溯，连续缺交 2 次为黄、≥3 次为红；已排除「不计入统计」学生。
       </p>
 
       {all.length === 0 ? (
@@ -119,7 +119,7 @@ export default function WarningsPage() {
         <Tabs defaultValue="student">
           <TabsList>
             <TabsTrigger value="student">按学生</TabsTrigger>
-            <TabsTrigger value="subject">按学科</TabsTrigger>
+            <TabsTrigger value="subject">按作业种类</TabsTrigger>
           </TabsList>
 
           {/* 按学生 */}
@@ -137,7 +137,7 @@ export default function WarningsPage() {
                         g.name
                       )}
                       <span className="ml-2 text-xs font-normal text-slate-400">
-                        {g.items.length} 科预警
+                        {g.items.length} 类预警
                       </span>
                     </CardTitle>
                   </CardHeader>
@@ -155,7 +155,7 @@ export default function WarningsPage() {
             </div>
           </TabsContent>
 
-          {/* 按学科 */}
+          {/* 按作业种类 */}
           <TabsContent value="subject">
             <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
               {bySubject.map((g) => (

@@ -272,7 +272,7 @@ export default function HomeworkPage() {
                   onClick={() => setEntryMode(mode)}
                   className={`rounded-full px-2.5 py-1 text-xs ${entryMode === mode ? 'bg-brand-50 text-brand-700' : 'text-slate-500'}`}
                 >
-                  {{ smart: '姓名 + 动作', by_student: '学生：科目', by_subject: '科目：学生' }[mode]}
+                  {{ smart: '姓名 + 动作', by_student: '学生：作业种类', by_subject: '作业种类：学生' }[mode]}
                 </button>
               ))}
             </div>
@@ -286,10 +286,10 @@ export default function HomeworkPage() {
                 current === 'all'
                   ? '请选择一个具体教学班后录入'
                   : entryMode === 'smart'
-                    ? '每行一条，例如：\n王小明数学缺交订正\n李晓华物理优秀\n陈同学忘带英语作业'
+                    ? '每行一条，可混合写：\n张三校本优秀\n订正缺交：李四、王五\n校本差：吴六、赵七'
                     : entryMode === 'by_student'
-                      ? '王小明：数学、英语粉书'
-                      : '数学：王小明、李晓华'
+                      ? '王小明：校本作业、试卷订正'
+                      : '周末作业：王小明、李晓华'
               }
             />
           </div>
@@ -501,7 +501,7 @@ export default function HomeworkPage() {
 
       <div className="grid gap-4 lg:grid-cols-2">
         <Card className="overflow-hidden">
-          <CardHeader><CardTitle className="text-base">各科缺交占比</CardTitle></CardHeader>
+          <CardHeader><CardTitle className="text-base">各类作业缺交占比</CardTitle></CardHeader>
           <CardContent className="h-64">
             {(data?.subjects.length ?? 0) === 0 ? <Empty /> : (
               <>
@@ -521,7 +521,7 @@ export default function HomeworkPage() {
                     <Tooltip />
                   </PieChart>
                 </ResponsiveContainer>
-                <p className="text-center text-xs text-slate-400">点某学科可查看该科缺交明细</p>
+                <p className="text-center text-xs text-slate-400">点某类作业可查看该类缺交明细</p>
               </>
             )}
           </CardContent>

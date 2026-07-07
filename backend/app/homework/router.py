@@ -27,6 +27,7 @@ from app.homework.parser import (
     parse_homework_item,
     split_colon,
     split_names,
+    parse_action,
     parse_name_action,
 )
 
@@ -176,7 +177,7 @@ async def weekly_focus(class_num: Optional[int] = None):
 class RecordsPayload(BaseModel):
     raw_text: str
     date: Optional[str] = None
-    mode: str = "by_student"  # by_student | by_subject
+    mode: str = "by_student"  # by_student | by_subject（旧名，含义为按作业种类）
     teaching_class_id: Optional[int] = None
 
 
@@ -220,7 +221,7 @@ async def hw_add_records(payload: RecordsPayload):
             left, right = parts
 
             if payload.mode == "by_subject":
-                # 学科/情况：学生1、学生2
+                # 作业种类/情况：学生1、学生2
                 names = split_names(right)
                 if not is_subject_item(left):
                     for name in names:
@@ -233,7 +234,7 @@ async def hw_add_records(payload: RecordsPayload):
                 else:
                     parsed = parse_homework_item(left)
                     if not parsed:
-                        errors.append(f"无法识别科目: {left}")
+                        errors.append(f"无法识别作业种类: {left}")
                         continue
                     subj, content, remark = parsed
                     for name in names:
@@ -246,7 +247,7 @@ async def hw_add_records(payload: RecordsPayload):
                                               submission_status="缺交"))
                         added += 1
             else:
-                # 学生：科目1、科目2 / 情况
+                # 学生：作业种类1、作业种类2 / 情况
                 name = left
                 sid, err = _resolve_student(db, name, payload.teaching_class_id)
                 if not sid:
@@ -324,10 +325,31 @@ async def hw_smart_input(payload: SmartInputPayload):
                 None,
             )
             parse_text = stripped[len(explicit):].strip() if explicit else stripped
-            item = parse_name_action(parse_text, by_name.keys())
-            if explicit and not item.get("error"):
-                item["explicit_student_id"] = explicit
-            parsed.append(item)
+            parts = split_colon(parse_text)
+            if parts:
+                left, right = parts
+                if left in by_name:
+                    # 学生：动作1、动作2
+                    for action in split_names(right):
+                        item = {"raw": f"{left}：{action}", "name": left, **parse_action(action)}
+                        if explicit:
+                            item["explicit_student_id"] = explicit
+                        parsed.append(item)
+                else:
+                    # 动作/作业种类：学生1、学生2
+                    for name in split_names(right):
+                        if name not in by_name:
+                            parsed.append({
+                                "raw": f"{left}：{name}",
+                                "error": f"未匹配到当前教学班学生: {name}",
+                            })
+                            continue
+                        parsed.append({"raw": f"{left}：{name}", "name": name, **parse_action(left)})
+            else:
+                item = parse_name_action(parse_text, by_name.keys())
+                if explicit and not item.get("error"):
+                    item["explicit_student_id"] = explicit
+                parsed.append(item)
         errors = []
         preview = []
         for item in parsed:
@@ -506,7 +528,8 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
             rec_q = rec_q.filter(ClassRoster.name.like(f"%{student}%"))
             sp_q = sp_q.filter(ClassRoster.name.like(f"%{student}%"))
 
-        # 按学科过滤：只看该科缺交记录，不含无学科的特殊记录
+        # 按作业种类过滤：只看该类缺交记录，不含无种类的特殊记录。
+        # subject 是旧查询参数名，保留以兼容现有链接和前端调用。
         include_specials = True
         if subject:
             include_specials = False
