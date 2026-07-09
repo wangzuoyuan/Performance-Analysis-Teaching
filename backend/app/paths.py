@@ -14,3 +14,15 @@ DATA_DIR = os.environ.get(
 BACKUP_DIR = os.environ.get(
     "EXAM_TRACKER_BACKUP_DIR", os.path.expanduser("~/.exam-tracker-backups")
 )
+RAW_DIR = os.path.join(DATA_DIR, "raw")
+
+
+def ensure_data_dirs(include_backup: bool = False) -> None:
+    """Ensure application-owned directories exist before file or SQLite access."""
+    os.makedirs(DATA_DIR, exist_ok=True)
+    os.makedirs(RAW_DIR, exist_ok=True)
+    if include_backup:
+        os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+ensure_data_dirs()

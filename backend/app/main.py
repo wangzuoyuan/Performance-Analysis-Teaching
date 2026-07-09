@@ -40,9 +40,8 @@ async def require_login(request: Request, call_next):
         return _JSONResponse({"detail": "需要登录"}, status_code=401)
     return await call_next(request)
 
-from app.paths import DATA_DIR as EXAM_TRACKER_DIR
-os.makedirs(EXAM_TRACKER_DIR, exist_ok=True)
-os.makedirs(f"{EXAM_TRACKER_DIR}/raw", exist_ok=True)
+from app.paths import ensure_data_dirs
+ensure_data_dirs()
 
 @app.get("/api/health")
 def health():
