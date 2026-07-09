@@ -15,14 +15,14 @@ from pydantic import BaseModel
 
 router = APIRouter(tags=["backup"])
 
-from app.paths import DATA_DIR, BACKUP_DIR
+from app.paths import DATA_DIR, BACKUP_DIR, ensure_data_dirs
 
 DB_PATH = os.path.join(DATA_DIR, "db.sqlite")
 EXPORT_DIR = os.path.join(DATA_DIR, "homework_exports")
 
 
 def _ensure_dir():
-    os.makedirs(BACKUP_DIR, exist_ok=True)
+    ensure_data_dirs(include_backup=True)
 
 
 def create_backup(prefix: str = "backup") -> str:
