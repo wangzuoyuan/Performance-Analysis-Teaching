@@ -700,3 +700,324 @@ class TestFrontendSourceGuard:
         source = self._read("[id]/page.tsx")
         assert "useClassScope" in source or "ClassScopeProvider" in source, \
             "详情页应使用 useClassScope"
+
+
+# ════════════════════════════════════════════════════════════════
+#  审查修复测试：per-class 排名、选修 grade_score、同分 competition、
+#  grade 筛选保留空分成员、其他学科不污染 grades
+# ════════════════════════════════════════════════════════════════
+
+
+class TestReviewerFixesScopeRank:
+    """审查 REJECT 修复：scope_rank 按教学班独立排名、选修用 grade_score、
+    同分 competition ranking、grade 筛选保留空分成员、其他学科不污染 grades。"""
+
+    _SETUP_PHYSICS_TEACHER = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore,
+        )
+        t = Teacher(subject="物理", name="物理老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="A班", subject="物理", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in ["s1", "s2"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="物理",
+            raw_score=100, grade_score=40, grade_percentile=0.5,
+            name="学生1", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="物理",
+            raw_score=50, grade_score=70, grade_percentile=0.3,
+            name="学生2", class_num=1))
+        db.commit()
+        db.close()
+    """)
+
+    _SETUP_SAME_SCORE = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore,
+        )
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="A班", subject="数学", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in ["s1", "s2", "s3"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="数学",
+            raw_score=80, name="学生1", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="数学",
+            raw_score=80, name="学生2", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="s3", subject="数学",
+            raw_score=85, name="学生3", class_num=1))
+        db.commit()
+        db.close()
+    """)
+
+    def test_per_class_rank_in_all_mode(self, tmp_path):
+        """全部模式下 scope_rank 按各自教学班独立计算。
+        A班(s1=81,s2=82,s3=83) B班(s4=84,s5=85)。
+        s1 在 A班内第3；s4 在 B班内第2。不混排为全年级。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            s1 = [s for s in students if s["student_id"] == "s1"][0]
+            s4 = [s for s in students if s["student_id"] == "s4"][0]
+            result = {
+                "status": "ok",
+                "s1_rank": s1.get("scope_rank"),
+                "s4_rank": s4.get("scope_rank"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["s1_rank"] == 3, \
+            f"s1 在 A班(81,82,83) 应为 3, 得到 {data['s1_rank']}"
+        assert data["s4_rank"] == 2, \
+            f"s4 在 B班(84,85) 应为 2, 得到 {data['s4_rank']}"
+
+    def test_elective_uses_grade_score_for_rank(self, tmp_path):
+        """物理（高二选考）scope_rank 用 grade_score 排名。
+        s1 raw=100/grade=40, s2 raw=50/grade=70。
+        按 grade_score：s2(70)>s1(40) → s2=1, s1=2。
+        当前 raw_score 错误逻辑会得到 s1=1, s2=2。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            s1 = [s for s in students if s["student_id"] == "s1"][0]
+            s2 = [s for s in students if s["student_id"] == "s2"][0]
+            result = {
+                "status": "ok",
+                "s1_rank": s1.get("scope_rank"),
+                "s2_rank": s2.get("scope_rank"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_PHYSICS_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["s1_rank"] == 2, \
+            f"物理 s1 grade=40 应排第2, 得到 {data['s1_rank']}"
+        assert data["s2_rank"] == 1, \
+            f"物理 s2 grade=70 应排第1, 得到 {data['s2_rank']}"
+
+    def test_grade_score_only_still_ranks(self, tmp_path):
+        """raw_score=null 但 grade_score 有效时仍应有排名（选修学科）。
+        s1 raw=null/grade=40, s2 raw=50/grade=70 → s1=2, s2=1。"""
+        setup = self._SETUP_PHYSICS_TEACHER + textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import SubjectScore, Exam
+            exam = db.query(Exam).filter(Exam.name == "期中").first()
+            s1_row = db.query(SubjectScore).filter(
+                SubjectScore.exam_id == exam.id,
+                SubjectScore.student_id == "s1",
+                SubjectScore.subject == "物理",
+            ).first()
+            s1_row.raw_score = None
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            s1 = [s for s in students if s["student_id"] == "s1"][0]
+            s2 = [s for s in students if s["student_id"] == "s2"][0]
+            result = {
+                "status": "ok",
+                "s1_rank": s1.get("scope_rank"),
+                "s2_rank": s2.get("scope_rank"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["s1_rank"] == 2, \
+            f"raw=null/grade=40 应排第2, 得到 {data['s1_rank']}"
+        assert data["s2_rank"] == 1, \
+            f"grade=70 应排第1, 得到 {data['s2_rank']}"
+
+    def test_competition_ranking_same_score(self, tmp_path):
+        """同分应同名次（competition ranking）。
+        s3=85(第1), s1=80, s2=80（同为第2）。enumerate 会给出 1,2,3。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            by_id = {s["student_id"]: s for s in students}
+            result = {
+                "status": "ok",
+                "s1_rank": by_id.get("s1", {}).get("scope_rank"),
+                "s2_rank": by_id.get("s2", {}).get("scope_rank"),
+                "s3_rank": by_id.get("s3", {}).get("scope_rank"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_SAME_SCORE, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["s3_rank"] == 1, f"s3=85 应第1, 得到 {data['s3_rank']}"
+        assert data["s1_rank"] == 2, f"s1=80 应第2, 得到 {data['s1_rank']}"
+        assert data["s2_rank"] == 2, f"s2=80 同分应第2, 得到 {data['s2_rank']}"
+
+    def test_grade_filter_preserves_members_without_scores(self, tmp_path):
+        """grade 过滤按教学班年级保留成员，不按是否有当前学科成绩删除。
+        nomath 是 A班(grade=2)合法成员但无数学成绩。"""
+        setup = _SETUP_MATH_TEACHER + textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import TeachingClass, TeachingClassMember
+            a_tc = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            db.add(TeachingClassMember(teaching_class_id=a_tc.id, student_id="nomath", source="manual"))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            a = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            a_id = a.id
+            db.close()
+            r = client.get(f"/api/students?teaching_class_id={a_id}&grade=2")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            nomath = [s for s in students if s["student_id"] == "nomath"]
+            result = {
+                "status": "ok",
+                "has_nomath": len(nomath) > 0,
+                "total_count": len(students),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["has_nomath"], \
+            f"nomath 是 A班合法成员应在花名册, 得到 {data}"
+
+    def test_other_subject_does_not_contaminate_grades(self, tmp_path):
+        """其他学科成绩不污染当前学科的 grades 元数据。
+        s1 数学只在 grade 2，但物理在 grade 1 有成绩。
+        作为数学教师查看时 grades 不应包含 grade 1。"""
+        setup = _SETUP_MATH_TEACHER + textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import Exam, SubjectScore
+            exam_g1 = Exam(name="高一物理", grade=1, semester="下", exam_type="期末", exam_date="2025-06")
+            db.add(exam_g1)
+            db.flush()
+            db.add(SubjectScore(exam_id=exam_g1.id, student_id="s1", subject="物理",
+                raw_score=60, name="学生1", class_num=1, xueji=252001))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            s1 = [s for s in students if s["student_id"] == "s1"][0]
+            result = {"status": "ok", "grades": s1.get("grades")}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert 1 not in data["grades"], \
+            f"grade 1 物理成绩不应出现在数学 grades 中, 得到 {data['grades']}"
+
+
+class TestStudentProfileScopeRankFix:
+    """get_student scope_rank 修复：选修学科用 grade_score。"""
+
+    _SETUP_PHYSICS = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore,
+        )
+        t = Teacher(subject="物理", name="物理老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="A班", subject="物理", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in ["s1", "s2"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="物理",
+            raw_score=100, grade_score=40, grade_percentile=0.5,
+            name="学生1", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="物理",
+            raw_score=50, grade_score=70, grade_percentile=0.3,
+            name="学生2", class_num=1))
+        db.commit()
+        db.close()
+    """)
+
+    def test_profile_scope_rank_uses_grade_score_for_elective(self, tmp_path):
+        """物理画像 scope_rank 用 grade_score 排名。
+        s1 raw=100/grade=40, s2 raw=50/grade=70 → s1=2, s2=1。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students/s1")
+            assert r.status_code == 200, r.text
+            trend = r.json().get("score_trend", [])
+            qizhong = [t for t in trend if t["exam_name"] == "期中"][0]
+            result = {"status": "ok", "scope_rank": qizhong.get("scope_rank")}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_PHYSICS, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["scope_rank"] == 2, \
+            f"物理 s1 grade=40 应排第2, 得到 {data['scope_rank']}"
+
+    def test_profile_scope_rank_competition_tie(self, tmp_path):
+        """物理画像同分 competition ranking。
+        s1 raw=100/grade=40, s2 raw=100/grade=40 → s1=1, s2=1。"""
+        setup = self._SETUP_PHYSICS + textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import SubjectScore, Exam
+            exam = db.query(Exam).filter(Exam.name == "期中").first()
+            s2_row = db.query(SubjectScore).filter(
+                SubjectScore.exam_id == exam.id,
+                SubjectScore.student_id == "s2",
+                SubjectScore.subject == "物理",
+            ).first()
+            s2_row.raw_score = 100
+            s2_row.grade_score = 40
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students/s1")
+            assert r.status_code == 200, r.text
+            trend = r.json().get("score_trend", [])
+            qizhong = [t for t in trend if t["exam_name"] == "期中"][0]
+            result = {"status": "ok", "scope_rank": qizhong.get("scope_rank")}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["scope_rank"] == 1, \
+            f"物理 s1 grade=40 同 s2 应并列第1, 得到 {data['scope_rank']}"

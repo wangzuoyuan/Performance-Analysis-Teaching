@@ -13,6 +13,43 @@ class BandConfigPayload(BaseModel):
     weak_min: int
 
 
+# 选考学科：高二/高三 物化生政史地
+_ELECTIVE_SUBJECTS = frozenset(["物理", "化学", "生物", "政治", "历史", "地理"])
+
+
+def _rank_key_for_subject(subject: str, exam_grade: int):
+    """返回 (rank_value_extractor, lower_is_better) 用于 scope_rank 计算。
+
+    - 高二/高三选考学科：用 grade_score（越高越好）；raw_score 为空时仍可排名。
+    - 其他学科（语数英、高一单科）：用 raw_score（越高越好）。
+    """
+    if exam_grade in (2, 3) and subject in _ELECTIVE_SUBJECTS:
+        return (lambda s: s.grade_score, False)
+    return (lambda s: s.raw_score, False)
+
+
+def _competition_rank(scores: list, extract_value, lower_is_better: bool) -> dict:
+    """Competition ranking（同分同名次）：按 extract_value 排名。
+
+    返回 {student_id: rank}。value 为 None 的不参与排名。
+    """
+    valid = [(s.student_id, extract_value(s)) for s in scores if extract_value(s) is not None]
+    if not valid:
+        return {}
+    valid.sort(key=lambda x: x[1], reverse=not lower_is_better)
+    rank_map: dict[str, int] = {}
+    prev_val = None
+    prev_rank = 0
+    for idx, (sid, val) in enumerate(valid, 1):
+        if prev_val is not None and val == prev_val:
+            rank_map[sid] = prev_rank
+        else:
+            rank_map[sid] = idx
+            prev_rank = idx
+            prev_val = val
+    return rank_map
+
+
 @router.get("/rank-metrics")
 async def get_rank_metrics(grade: int, mode: str = "frequency"):
     """返回指定年级在排名区间筛选/排名频次统计中可选的指标。"""
@@ -757,29 +794,21 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
                 rank_basis_by_exam[s.exam_id] = "none"
                 continue
 
-            # 当前学科该考试 peer_ids 中的有效分数（raw_score 非空）
-            peer_scores = {
-                row[0]: row[1]
-                for row in (
-                    db.query(SubjectScore.student_id, SubjectScore.raw_score)
-                    .filter(
-                        SubjectScore.exam_id == s.exam_id,
-                        SubjectScore.subject == subject,
-                        SubjectScore.student_id.in_(peer_ids),
-                        SubjectScore.raw_score.isnot(None),
-                    )
-                    .all()
+            # 当前学科该考试 peer_ids 中的有效分数行（raw_score 或 grade_score 至少一个非空）
+            peer_score_rows = (
+                db.query(SubjectScore)
+                .filter(
+                    SubjectScore.exam_id == s.exam_id,
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(peer_ids),
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None),
                 )
-            }
-            my_score = s.raw_score
-            if my_score is None or s.student_id not in peer_scores:
-                scope_rank_by_exam[s.exam_id] = None
-                rank_basis_by_exam[s.exam_id] = "teaching"
-                continue
-            # 排名：比我高的 + 1
-            scope_rank_by_exam[s.exam_id] = (
-                sum(1 for v in peer_scores.values() if v > my_score) + 1
+                .all()
             )
+            extract_value, lower_is_better = _rank_key_for_subject(subject, grade)
+            rank_map = _competition_rank(peer_score_rows, extract_value, lower_is_better)
+            scope_rank_by_exam[s.exam_id] = rank_map.get(s.student_id)
             rank_basis_by_exam[s.exam_id] = "teaching"
 
         # 头部展示：当前（最新）年级的教学班标签
@@ -1072,11 +1101,18 @@ async def list_students(
 
         subject = ctx.subject
         scope_ids = set(ctx.member_ids)
+        # 教学班成员映射：student_id → (label, teaching_class_id, grade)
+        # 用于 grade 过滤和 per-class 排名
+        from app.analysis.scope import student_class_map_multi
+        member_class_map = student_class_map_multi(db, grade)
         if grade is not None:
-            # 限定年级：只保留该年级教学班的成员
+            # 限定年级：只保留该年级教学班的成员（按教学班 grade 元数据，不按是否有成绩）
             scope_ids = {
                 sid for sid in scope_ids
-                if _student_has_grade(db, sid, grade, subject)
+                if any(
+                    info["grade"] == grade
+                    for info in member_class_map.get(sid, [])
+                )
             }
 
         if not scope_ids:
@@ -1139,13 +1175,16 @@ async def list_students(
                 .first()
             )
 
-        # 每组取最新年级学号作代表
+        # 每组取最新年级学号作代表（只查当前学科，禁止其他学科污染 grades）
         sid_grade = {
             row[0]: row[1]
             for row in (
                 db.query(SubjectScore.student_id, Exam.grade)
                 .join(Exam, Exam.id == SubjectScore.exam_id)
-                .filter(SubjectScore.student_id.in_(scope_ids))
+                .filter(
+                    SubjectScore.student_id.in_(scope_ids),
+                    SubjectScore.subject == subject,
+                )
                 .distinct().all()
             )
         }
@@ -1163,18 +1202,40 @@ async def list_students(
             ).all():
                 latest_scores[s.student_id] = s
 
-        # scope_rank 基数：当前教学班范围内、最新考试当前学科有效分数
+        # scope_rank：按每个学生所属教学班独立计算（不混排全年级）
+        # 选修学科（高二/三物化生政史地）用 grade_score，其他用 raw_score
         scope_rank_map: dict[str, int] = {}
         if latest_exam:
-            scores_for_rank = [
-                s for s in latest_scores.values()
-                if s.student_id in scope_ids
-            ]
-            # 用 raw_score 排名（单科趋势的基准之一）
-            valid = [s for s in scores_for_rank if s.raw_score is not None]
-            valid.sort(key=lambda s: s.raw_score, reverse=True)
-            for rank, s in enumerate(valid, 1):
-                scope_rank_map[s.student_id] = rank
+            exam_grade_val = latest_exam.grade
+            # 收集每个学生对应的 teaching_class_id（取第一个匹配 scope 的）
+            sid_to_tc: dict[str, int] = {}
+            for sid in scope_ids:
+                infos = member_class_map.get(sid, [])
+                # 优先匹配请求年级的教学班
+                matched = None
+                for info in infos:
+                    if grade is None or info["grade"] == grade:
+                        matched = info["teaching_class_id"]
+                        break
+                if matched is None and infos:
+                    matched = infos[0]["teaching_class_id"]
+                if matched is not None:
+                    sid_to_tc[sid] = matched
+
+            # 按 teaching_class_id 分组，各组内独立排名
+            tc_to_member_ids: dict[int, set[str]] = {}
+            for sid, tc_id in sid_to_tc.items():
+                tc_to_member_ids.setdefault(tc_id, set()).add(sid)
+
+            extract_value, lower_is_better = _rank_key_for_subject(subject, exam_grade_val)
+            for tc_id, member_ids in tc_to_member_ids.items():
+                # 最新考试当前学科该教学班成员有效分数
+                tc_scores = [
+                    latest_scores[sid] for sid in member_ids
+                    if sid in latest_scores
+                ]
+                rank_map = _competition_rank(tc_scores, extract_value, lower_is_better)
+                scope_rank_map.update(rank_map)
 
         students = []
         for ids in groups.values():
@@ -1201,7 +1262,7 @@ async def list_students(
                 "raw_score": s.raw_score if s else None,
                 "grade_score": s.grade_score if s else None,
                 "grade_percentile": s.grade_percentile if s else None,
-                "scope_rank": scope_rank_map.get(rep) if s else None,
+                "scope_rank": scope_rank_map.get(s.student_id) if s else None,
             })
         # 排序：有 scope_rank 的优先（越小越好），无成绩的排末尾
         students.sort(
@@ -1221,22 +1282,6 @@ async def list_students(
         }
     finally:
         db.close()
-
-
-def _student_has_grade(db, student_id: str, grade: int, subject: str) -> bool:
-    """该学号在指定年级是否有过当前学科成绩记录。"""
-    from app.db.models import Exam, SubjectScore
-
-    return bool(
-        db.query(SubjectScore.id)
-        .join(Exam, Exam.id == SubjectScore.exam_id)
-        .filter(
-            SubjectScore.student_id == student_id,
-            SubjectScore.subject == subject,
-            Exam.grade == grade,
-        )
-        .first()
-    )
 
 
 @router.get("/dashboard/overview")
