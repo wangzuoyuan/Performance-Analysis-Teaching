@@ -1007,7 +1007,26 @@ class TestOverlappingMembershipAPI:
 
 class TestStudentClassLabelInDetail:
     """/api/exams/{id} 每个学生行直接返回 class_label（教学范围标签），
-    前端无需再调用 /api/students?grade 建立映射。"""
+    前端无需再调用学生汇总接口建立映射。"""
+
+    def test_frontend_detail_has_no_student_summary_sidechannel(self):
+        """考试详情源码不得重新引入会返回跨学科总分的学生汇总旁路。"""
+        from pathlib import Path
+
+        detail_page = (
+            Path(__file__).resolve().parents[2]
+            / "frontend" / "src" / "app" / "exam" / "[id]" / "page.tsx"
+        )
+        source = detail_page.read_text(encoding="utf-8")
+        forbidden = (
+            "/api/students?grade",
+            "latest_total_score",
+            "latest_xueji_rank",
+            "StudentListItem",
+            "labelByStudentId",
+        )
+        leaked = [token for token in forbidden if token in source]
+        assert not leaked, f"考试详情仍包含学生汇总数据旁路: {leaked}"
 
     def test_student_rows_include_class_label(self, tmp_path):
         """全部模式：A班学生 class_label='A班'，B班学生 class_label='B班'。"""

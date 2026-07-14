@@ -226,7 +226,7 @@ export default function ExamDetailPage() {
 
   function studentBadge(row: StudentRow): string | null {
     // 后端 get_exam 已在每个学生行直接返回 class_label（教学范围标签），
-    // 不再需要额外调用 /api/students?grade 建立映射。
+    // 不再需要额外调用学生汇总接口建立映射。
     if (row.class_label) return formatClassChip(row.class_label)
     if (current !== 'all' && currentClass) return formatClassChip(currentClass.label)
     if (row.class_num != null) return `${row.class_num}班`
