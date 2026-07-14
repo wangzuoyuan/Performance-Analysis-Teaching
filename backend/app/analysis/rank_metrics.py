@@ -1,13 +1,17 @@
+"""单科排名指标层（阶段4单科教学化重构）。
+
+本模块已完全单科教学化：
+- 不再查询/引用总分表
+- rank_metric_options 只返回当前任教学科的唯一选项
+
+rank_range_filter / rank_frequency_stats 逻辑已内联到 router.py 端点中。
+"""
 from __future__ import annotations
 
-import math
-from collections import Counter, defaultdict
 from typing import Any, Optional
 
+# ── 频次区间常量（供 router.py / chat/tools.py 等导入）──
 
-BASE_SUBJECTS = ["语文", "数学", "英语"]
-ELECTIVE_SUBJECTS = ["物理", "化学", "生物", "政治", "历史", "地理"]
-ALL_SUBJECTS = BASE_SUBJECTS + ELECTIVE_SUBJECTS
 PERCENTILE_BINS = [
     ("p0_20", "前20%", 0, 0.2),
     ("p20_40", "20%-40%", 0.2, 0.4),
@@ -21,43 +25,6 @@ GRADE_SCORE_BINS = [
     (f"g{score}", f"{score}分", score, score in GRADE_SCORE_SEPARATOR_AFTER)
     for score in GRADE_SCORE_VALUES
 ]
-
-
-def rank_metric_options(grade: int, mode: str = "frequency") -> list[dict[str, str]]:
-    options: list[dict[str, str]] = []
-    if grade == 1:
-        options.extend(
-            {"value": f"subject:{subject}", "label": subject, "kind": "subject_percentile"}
-            for subject in ALL_SUBJECTS
-        )
-        options.extend(
-            {"value": f"total:{total_type}", "label": f"{total_type}总分", "kind": "total_rank"}
-            for total_type in ["主三门", "五门"]
-        )
-        return options
-
-    options.extend(
-        {"value": f"subject:{subject}", "label": subject, "kind": "subject_percentile"}
-        for subject in BASE_SUBJECTS
-    )
-    if mode == "frequency":
-        options.extend(
-            {"value": f"subject_grade:{subject}", "label": f"{subject}等级分", "kind": "subject_grade_score"}
-            for subject in ELECTIVE_SUBJECTS
-        )
-    options.extend(
-        {"value": f"total:{total_type}", "label": f"{total_type}总分", "kind": "total_rank"}
-        for total_type in ["主三门", "3+3"]
-    )
-    return options
-
-
-def _metric_meta(grade: int, metric: str, mode: str) -> dict[str, str]:
-    for option in rank_metric_options(grade, mode):
-        if option["value"] == metric:
-            source, key = metric.split(":", 1)
-            return {**option, "source": source, "key": key}
-    raise ValueError("该年级不支持此排名指标")
 
 
 def _normalize_percentile(value: Optional[float]) -> Optional[float]:
@@ -108,183 +75,84 @@ def _parse_exam_ids(exam_ids: Optional[str | list[int]]) -> list[int]:
     return [int(part) for part in str(exam_ids).split(",") if part.strip()]
 
 
-def _profiles_for_exams(db, exam_ids: list[int]) -> dict[tuple[int, str], dict[str, Any]]:
-    from app.db.models import SubjectScore
-
-    rows = db.query(SubjectScore).filter(SubjectScore.exam_id.in_(exam_ids)).all()
-    profiles: dict[tuple[int, str], dict[str, Any]] = {}
-    class_counters: dict[tuple[int, str], Counter] = defaultdict(Counter)
-    for row in rows:
-        key = (row.exam_id, row.student_id)
-        profile = profiles.setdefault(
-            key,
-            {"student_id": row.student_id, "name": row.name or row.student_id, "class_num": row.class_num},
-        )
-        if row.name:
-            profile["name"] = row.name
-        if row.class_num is not None:
-            class_counters[key][row.class_num] += 1
-    for key, counter in class_counters.items():
-        if counter:
-            profiles[key]["class_num"] = counter.most_common(1)[0][0]
-    return profiles
-
-
-def _ranked_class_scores(
-    rows: list[Any],
-    value_attr: str,
-    profiles: dict[tuple[int, str], dict[str, Any]],
-    allowed: Optional[set[str]] = None,
-) -> dict[tuple[int, str], int]:
-    grouped: dict[tuple[int, Optional[int]], list[tuple[str, float]]] = defaultdict(list)
-    for row in rows:
-        value = getattr(row, value_attr)
-        if value is None:
-            continue
-        sid = row.student_id
-        if allowed is not None and sid not in allowed:
-            continue
-        profile = profiles.get((row.exam_id, sid), {})
-        if allowed is not None:
-            group_key: tuple[int, Optional[int]] = (row.exam_id, None)
-        else:
-            class_num = profile.get("class_num")
-            if class_num is None:
-                continue
-            group_key = (row.exam_id, int(class_num))
-        grouped[group_key].append((sid, float(value)))
-
-    ranks: dict[tuple[int, str], int] = {}
-    for (exam_id, _class_num), items in grouped.items():
-        values = [value for _, value in items]
-        for student_id, value in items:
-            ranks[(exam_id, student_id)] = sum(1 for peer in values if peer > value) + 1
-    return ranks
-
-
-def _cohort_sizes(db, exam_ids: list[int]) -> dict[int, int]:
-    from app.db.models import TotalScore
-
-    result: dict[int, int] = {}
-    rows = (
-        db.query(TotalScore)
-        .filter(TotalScore.exam_id.in_(exam_ids), TotalScore.total_type == "主三门")
-        .all()
-    )
-    grouped: dict[int, list[int]] = defaultdict(list)
-    for row in rows:
-        rank = row.xueji_rank or row.grade_rank
-        if rank is not None:
-            grouped[row.exam_id].append(rank)
-    for exam_id, ranks in grouped.items():
-        if ranks:
-            result[exam_id] = max(ranks)
-    return result
-
-
-def _percentile_to_rank(percentile: Optional[float], cohort_size: Optional[int]) -> Optional[int]:
-    pct = _normalize_percentile(percentile)
-    if pct is None or not cohort_size:
-        return None
-    return max(1, int(math.ceil(pct * cohort_size)))
+# ── 兼容层：chat/tools.py 仍调用旧签名，内部委托单科逻辑 ──
 
 
 def rank_range_filter(
+    *,
     exam_id: int,
     metric: str,
-    rank_min: int,
-    rank_max: int,
+    rank_min: int = 1,
+    rank_max: int = 100,
     teaching_class_id: Optional[int] = None,
     class_num: Optional[int] = None,
 ) -> dict[str, Any]:
-    from app.db.models import Exam, SessionLocal, SubjectScore, TotalScore
-    from app.analysis.scope import resolve_scope_compat
+    """兼容入口：chat/tools.py 调用。委托 router 端点逻辑（单学科化）。"""
+    from app.db.models import SessionLocal
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+    )
+    from app.db.models import Exam, SubjectScore
+    from app.analysis.scope import student_class_map
 
     db = SessionLocal()
     try:
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        subject = ctx.subject
+        member_ids = ctx.member_ids
+
         exam = db.query(Exam).filter(Exam.id == exam_id).first()
         if not exam:
             raise ValueError("考试不存在")
-        meta = _metric_meta(exam.grade, metric, "range")
+
         rank_min = max(1, int(rank_min))
         rank_max = int(rank_max)
-        if rank_max < rank_min:
-            raise ValueError("排名区间上界不能小于下界")
+        rank_map = compute_subject_rank(db, subject, exam_id, member_ids, exam_grade=exam.grade)
+        label_map = student_class_map(db, exam.grade)
 
-        allowed = resolve_scope_compat(
-            db, teaching_class_id=teaching_class_id, class_num=class_num, exam_id=exam_id, grade=exam.grade
+        subject_rows = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == exam_id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(member_ids),
+                SubjectScore.raw_score.isnot(None) | SubjectScore.grade_score.isnot(None),
+            )
+            .all()
         )
-        profiles = _profiles_for_exams(db, [exam_id])
-        rows: list[dict[str, Any]] = []
-
-        if meta["kind"] == "total_rank":
-            total_rows = (
-                db.query(TotalScore)
-                .filter(TotalScore.exam_id == exam_id, TotalScore.total_type == meta["key"])
-                .all()
-            )
-            class_ranks = _ranked_class_scores(total_rows, "total_score", profiles, allowed=allowed)
-            for row in total_rows:
-                if allowed is not None and row.student_id not in allowed:
-                    continue
-                profile = profiles.get((row.exam_id, row.student_id), {})
-                year_rank = row.xueji_rank or row.grade_rank
-                if year_rank is None or not (rank_min <= year_rank <= rank_max):
-                    continue
-                rows.append(
-                    {
-                        "student_id": row.student_id,
-                        "name": profile.get("name") or row.student_id,
-                        "class_num": profile.get("class_num"),
-                        "score": row.total_score,
-                        "class_rank": class_ranks.get((row.exam_id, row.student_id)),
-                        "year_rank": year_rank,
-                    }
-                )
-        else:
-            subject_rows = (
-                db.query(SubjectScore)
-                .filter(SubjectScore.exam_id == exam_id, SubjectScore.subject == meta["key"])
-                .all()
-            )
-            class_ranks = _ranked_class_scores(subject_rows, "raw_score", profiles, allowed=allowed)
-            cohort_size = _cohort_sizes(db, [exam_id]).get(exam_id) or len(subject_rows)
-            for row in subject_rows:
-                if allowed is not None and row.student_id not in allowed:
-                    continue
-                profile = profiles.get((row.exam_id, row.student_id), {})
-                year_rank = _percentile_to_rank(row.grade_percentile, cohort_size)
-                if year_rank is None or not (rank_min <= year_rank <= rank_max):
-                    continue
-                rows.append(
-                    {
-                        "student_id": row.student_id,
-                        "name": profile.get("name") or row.name or row.student_id,
-                        "class_num": profile.get("class_num"),
-                        "score": row.raw_score,
-                        "class_rank": class_ranks.get((row.exam_id, row.student_id)),
-                        "year_rank": year_rank,
-                    }
-                )
-
-        rows.sort(key=lambda row: (row["year_rank"] is None, row["year_rank"] or 10**9, row["student_id"]))
+        rows = []
+        for r in subject_rows:
+            sr = rank_map.get(r.student_id)
+            if sr is None or not (rank_min <= sr <= rank_max):
+                continue
+            label, _ = label_map.get(r.student_id, (None, None))
+            rows.append({
+                "student_id": r.student_id,
+                "name": r.name or r.student_id,
+                "class_label": label,
+                "raw_score": r.raw_score,
+                "grade_score": r.grade_score,
+                "grade_percentile": r.grade_percentile,
+                "subject_rank": sr,
+            })
+        rows.sort(key=lambda x: (x["subject_rank"], x["student_id"]))
         return {
+            "teaching_subject": subject,
+            "metric_basis": "subject_rank",
             "exam": {"id": exam.id, "name": exam.name, "grade": exam.grade, "exam_date": exam.exam_date},
             "metric": metric,
-            "metric_label": meta["label"],
-            "metric_kind": meta["kind"],
             "rank_min": rank_min,
             "rank_max": rank_max,
             "teaching_class_id": teaching_class_id,
-            "class_num": class_num,
             "rows": rows,
-            "metric_note": "总分按已有学籍/年级排名筛选；单科按年级百分位换算年级排名后筛选。",
         }
     finally:
         db.close()
 
 
 def rank_frequency_stats(
+    *,
     grade: int,
     metric: str,
     exam_ids: Optional[str | list[int]] = None,
@@ -292,139 +160,99 @@ def rank_frequency_stats(
     class_num: Optional[int] = None,
     recent_count: int = 5,
 ) -> dict[str, Any]:
-    from app.db.models import Exam, SessionLocal, SubjectScore, TotalScore
-    from app.analysis.scope import resolve_scope_compat
+    """兼容入口：chat/tools.py 调用。委托单学科频次统计。"""
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+        normalize_percentile,
+        valid_exam_ids_for_subject,
+        _ELECTIVE_SUBJECTS,
+    )
+    from app.analysis.scope import student_class_map
 
     db = SessionLocal()
     try:
-        meta = _metric_meta(grade, metric, "frequency")
-        allowed = resolve_scope_compat(
-            db, teaching_class_id=teaching_class_id, class_num=class_num, grade=grade
-        )
-        parsed_exam_ids = _parse_exam_ids(exam_ids)
-        if parsed_exam_ids:
-            exams = (
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=grade)
+        subject = ctx.subject
+        member_ids = ctx.member_ids
+
+        is_grade_score_mode = metric.startswith("subject_grade:")
+
+        valid_ids = valid_exam_ids_for_subject(db, subject, member_ids, grade=grade)
+        parsed = _parse_exam_ids(exam_ids)
+        if parsed:
+            selected_ids = sorted(set(parsed) & valid_ids)
+        else:
+            all_valid = (
                 db.query(Exam)
-                .filter(Exam.grade == grade, Exam.id.in_(parsed_exam_ids))
+                .filter(Exam.id.in_(valid_ids), Exam.grade == grade)
                 .order_by(Exam.exam_date, Exam.id)
                 .all()
             )
+            n = max(1, min(int(recent_count or 5), 12))
+            selected_ids = [e.id for e in all_valid[-n:]]
+
+        exams = (
+            db.query(Exam).filter(Exam.id.in_(selected_ids)).order_by(Exam.exam_date, Exam.id).all()
+        ) if selected_ids else []
+
+        label_map = student_class_map(db, grade)
+
+        if is_grade_score_mode:
+            bins = [{"key": b[0], "label": b[1], "separator_after": b[3]} for b in GRADE_SCORE_BINS]
         else:
-            all_exams = db.query(Exam).filter(Exam.grade == grade).order_by(Exam.exam_date, Exam.id).all()
-            exams = all_exams[-max(1, min(int(recent_count or 5), 12)) :]
-        selected_ids = [exam.id for exam in exams]
-        profiles = _profiles_for_exams(db, selected_ids)
+            bins = [{"key": b[0], "label": b[1]} for b in PERCENTILE_BINS]
+
         student_rows: dict[str, dict[str, Any]] = {}
-        rank_bin_keys: set[str] = set()
-
-        if meta["kind"] == "total_rank":
-            source_rows = (
-                db.query(TotalScore)
-                .filter(TotalScore.exam_id.in_(selected_ids), TotalScore.total_type == meta["key"])
-                .all()
-            )
-            for row in source_rows:
-                profile = profiles.get((row.exam_id, row.student_id), {})
-                if allowed is not None and row.student_id not in allowed:
-                    continue
-                rank = row.xueji_rank or row.grade_rank
-                bin_key = _rank_bin(rank)
-                if not bin_key:
-                    continue
-                rank_bin_keys.add(bin_key)
-                entry = student_rows.setdefault(
-                    row.student_id,
-                    {
-                        "student_id": row.student_id,
-                        "name": profile.get("name") or row.student_id,
-                        "class_num": profile.get("class_num"),
-                        "total_count": 0,
-                    },
-                )
-                entry[bin_key] = entry.get(bin_key, 0) + 1
-                entry["total_count"] += 1
-            sorted_rank_bins = sorted(
-                rank_bin_keys,
-                key=lambda key: int(key.split("_")[0].removeprefix("r")),
-            )
-            bins = [{"key": key, "label": _rank_bin_label(key)} for key in sorted_rank_bins]
-        elif meta["kind"] == "subject_grade_score":
-            source_rows = (
+        for exam in exams:
+            rows = (
                 db.query(SubjectScore)
-                .filter(SubjectScore.exam_id.in_(selected_ids), SubjectScore.subject == meta["key"])
+                .filter(
+                    SubjectScore.exam_id == exam.id,
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(member_ids),
+                    SubjectScore.raw_score.isnot(None) | SubjectScore.grade_score.isnot(None),
+                )
                 .all()
             )
-            bins = [
-                {"key": key, "label": label, "separator_after": separator_after}
-                for key, label, _score, separator_after in GRADE_SCORE_BINS
-            ]
-            for row in source_rows:
-                profile = profiles.get((row.exam_id, row.student_id), {})
-                if allowed is not None and row.student_id not in allowed:
-                    continue
-                bin_key = _grade_score_bin(row.grade_score)
-                if not bin_key:
-                    continue
+            for r in rows:
+                sid = r.student_id
+                label, _ = label_map.get(sid, (None, None))
                 entry = student_rows.setdefault(
-                    row.student_id,
-                    {
-                        "student_id": row.student_id,
-                        "name": profile.get("name") or row.name or row.student_id,
-                        "class_num": profile.get("class_num"),
-                        "total_count": 0,
-                    },
+                    sid,
+                    {"student_id": sid, "name": r.name or sid, "class_label": label, "total_count": 0},
                 )
-                entry[bin_key] = entry.get(bin_key, 0) + 1
-                entry["total_count"] += 1
-        else:
-            source_rows = (
-                db.query(SubjectScore)
-                .filter(SubjectScore.exam_id.in_(selected_ids), SubjectScore.subject == meta["key"])
-                .all()
-            )
-            bins = [{"key": key, "label": label} for key, label, _, _ in PERCENTILE_BINS]
-            for row in source_rows:
-                profile = profiles.get((row.exam_id, row.student_id), {})
-                if allowed is not None and row.student_id not in allowed:
-                    continue
-                bin_key = _percentile_bin(row.grade_percentile)
-                if not bin_key:
-                    continue
-                entry = student_rows.setdefault(
-                    row.student_id,
-                    {
-                        "student_id": row.student_id,
-                        "name": profile.get("name") or row.name or row.student_id,
-                        "class_num": profile.get("class_num"),
-                        "total_count": 0,
-                    },
-                )
-                entry[bin_key] = entry.get(bin_key, 0) + 1
-                entry["total_count"] += 1
+                if r.name:
+                    entry["name"] = r.name
+                if is_grade_score_mode:
+                    bin_key = _grade_score_bin(r.grade_score)
+                else:
+                    pct = normalize_percentile(r.grade_percentile)
+                    bin_key = _percentile_bin(pct) if pct is not None else None
+                if bin_key:
+                    entry[bin_key] = entry.get(bin_key, 0) + 1
+                    entry["total_count"] += 1
 
-        rows = []
+        rows_out = []
         for entry in student_rows.values():
             for bin_info in bins:
                 entry.setdefault(bin_info["key"], 0)
-            rows.append(entry)
-        rows.sort(
+            rows_out.append(entry)
+        rows_out.sort(
             key=lambda row: (
-                -sum((index + 1) * row.get(bin_info["key"], 0) for index, bin_info in enumerate(bins)),
+                -sum((i + 1) * row.get(b["key"], 0) for i, b in enumerate(bins)),
                 row["student_id"],
             )
         )
-
         return {
+            "teaching_subject": subject,
             "grade": grade,
             "metric": metric,
-            "metric_label": meta["label"],
-            "metric_kind": meta["kind"],
             "teaching_class_id": teaching_class_id,
-            "class_num": class_num,
-            "exams": [{"id": exam.id, "name": exam.name, "exam_date": exam.exam_date} for exam in exams],
+            "exams": [{"id": e.id, "name": e.name, "exam_date": e.exam_date} for e in exams],
             "bins": bins,
-            "rows": rows,
-            "metric_note": "单科按年级百分位五等分；+3选科按70/67/64/61/58/55/52/49/46/43/40精确等级分统计；总分按40名一档统计。",
+            "rows": rows_out,
         }
     finally:
         db.close()

@@ -17,6 +17,43 @@ class BandConfigPayload(BaseModel):
 _ELECTIVE_SUBJECTS = frozenset(["物理", "化学", "生物", "政治", "历史", "地理"])
 
 
+def _validate_metric_matches_subject(metric: str, subject: str):
+    """校验 metric 参数是否与当前任教科目一致。不一致则 raise ValueError → 400。"""
+    if metric.startswith("total:"):
+        raise ValueError("单学科化后不再支持总分指标，请使用 subject:<学科> 或 subject_grade:<学科>")
+    if metric.startswith("subject:"):
+        m_subject = metric.split(":", 1)[1]
+        if m_subject != subject:
+            raise ValueError(f"指标学科「{m_subject}」与教师任教科目「{subject}」不一致")
+    elif metric.startswith("subject_grade:"):
+        m_subject = metric.split(":", 1)[1]
+        if m_subject != subject:
+            raise ValueError(f"指标学科「{m_subject}」与教师任教科目「{subject}」不一致")
+    else:
+        raise ValueError(f"不支持的指标格式：{metric}")
+
+
+def _percentile_bin_from_rank(rank: int, cohort_size: int) -> Optional[str]:
+    """从 subject_rank 换算百分位 bin（cohort_size 为该场有效人数）。"""
+    from app.analysis.rank_metrics import PERCENTILE_BINS
+    if cohort_size <= 0 or rank <= 0:
+        return None
+    pct = rank / cohort_size  # rank 1 → pct 最小
+    for key, _, lower, upper in PERCENTILE_BINS:
+        if pct <= upper and (pct > lower or lower == 0):
+            return key
+    return PERCENTILE_BINS[-1][0]
+
+
+def _percentile_bin(pct: float) -> Optional[str]:
+    """从规范化百分位（0..1）返回 bin key。"""
+    from app.analysis.rank_metrics import PERCENTILE_BINS
+    for key, _, lower, upper in PERCENTILE_BINS:
+        if pct <= upper and (pct > lower or lower == 0):
+            return key
+    return PERCENTILE_BINS[-1][0]
+
+
 def _rank_key_for_subject(subject: str, exam_grade: int):
     """返回 (rank_value_extractor, lower_is_better) 用于 scope_rank 计算。
 
@@ -52,12 +89,54 @@ def _competition_rank(scores: list, extract_value, lower_is_better: bool) -> dic
 
 @router.get("/rank-metrics")
 async def get_rank_metrics(grade: int, mode: str = "frequency"):
-    """返回指定年级在排名区间筛选/排名频次统计中可选的指标。"""
-    from app.analysis.rank_metrics import rank_metric_options
+    """返回当前任教学科在排名区间筛选/排名频次统计中可选的指标（单学科化）。
+
+    只返回当前任教学科唯一选项和 teaching_subject，不再列出 ALL_SUBJECTS 或
+    total:* 。高二/三选考 frequency 基础为 exact grade_score；其他为
+    subject_percentile/subject_rank。mode 非法 400。
+    """
+    from app.db.models import SessionLocal
+    from app.teaching.subject import (
+        resolve_teaching_subject,
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
 
     if mode not in {"range", "frequency"}:
         raise HTTPException(400, "mode 只能是 range 或 frequency")
-    return {"grade": grade, "mode": mode, "metrics": rank_metric_options(grade, mode)}
+
+    db = SessionLocal()
+    try:
+        try:
+            subject = resolve_teaching_subject(db)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+
+        _ELECTIVE = ["物理", "化学", "生物", "政治", "历史", "地理"]
+        is_elective = subject in _ELECTIVE
+        is_high_grade = grade in (2, 3)
+
+        metrics = []
+        if mode == "frequency" and is_elective and is_high_grade:
+            metrics.append({
+                "value": f"subject_grade:{subject}",
+                "label": f"{subject}等级分",
+                "kind": "subject_grade_score",
+            })
+        else:
+            metrics.append({
+                "value": f"subject:{subject}",
+                "label": subject,
+                "kind": "subject_percentile",
+            })
+        return {
+            "grade": grade,
+            "mode": mode,
+            "teaching_subject": subject,
+            "metrics": metrics,
+        }
+    finally:
+        db.close()
 
 
 @router.get("/rank-range")
@@ -69,20 +148,101 @@ async def get_rank_range(
     teaching_class_id: Optional[int] = None,
     class_num: Optional[int] = None,
 ):
-    """按单次考试、指标和年级排名区间筛选学生。"""
-    from app.analysis.rank_metrics import rank_range_filter
+    """按单次考试、当前学科 subject_rank 筛选学生（单学科化）。
 
+    仅按当前学科 subject_rank 筛选；输出 teaching_subject、metric_basis、exam、
+    合法范围 rows。每行仅含单科字段，禁止 total/year-total 字段。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+    )
+    from app.analysis.scope import student_class_map
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
+
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
+
+    db = SessionLocal()
     try:
-        return rank_range_filter(
-            exam_id=exam_id,
-            metric=metric,
-            rank_min=rank_min,
-            rank_max=rank_max,
-            teaching_class_id=teaching_class_id,
-            class_num=class_num,
+        try:
+            ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+
+        subject = ctx.subject
+        member_ids = ctx.member_ids
+
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(404, "考试不存在")
+
+        # 校验 metric 必须与当前学科一致
+        try:
+            _validate_metric_matches_subject(metric, subject)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+        rank_min = max(1, int(rank_min))
+        rank_max = int(rank_max)
+        if rank_max < rank_min:
+            raise HTTPException(400, "排名区间上界不能小于下界")
+
+        rank_map = compute_subject_rank(
+            db, subject, exam_id, member_ids, exam_grade=exam.grade,
         )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
+        label_map = student_class_map(db, exam.grade)
+
+        rows = []
+        subject_rows = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == exam_id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(member_ids),
+                SubjectScore.raw_score.isnot(None)
+                | SubjectScore.grade_score.isnot(None),
+            )
+            .all()
+        )
+        for r in subject_rows:
+            sr = rank_map.get(r.student_id)
+            if sr is None or not (rank_min <= sr <= rank_max):
+                continue
+            label, _ = label_map.get(r.student_id, (None, None))
+            rows.append({
+                "student_id": r.student_id,
+                "name": r.name or r.student_id,
+                "class_label": label,
+                "raw_score": r.raw_score,
+                "grade_score": r.grade_score,
+                "grade_percentile": r.grade_percentile,
+                "subject_rank": sr,
+            })
+        rows.sort(key=lambda x: (x["subject_rank"], x["student_id"]))
+        return {
+            "teaching_subject": subject,
+            "metric_basis": "subject_rank",
+            "exam": {"id": exam.id, "name": exam.name, "grade": exam.grade, "exam_date": exam.exam_date},
+            "metric": metric,
+            "rank_min": rank_min,
+            "rank_max": rank_max,
+            "teaching_class_id": teaching_class_id,
+            "rows": rows,
+        }
+    finally:
+        db.close()
 
 
 @router.get("/rank-frequency")
@@ -94,20 +254,170 @@ async def get_rank_frequency(
     class_num: Optional[int] = None,
     recent_count: int = 5,
 ):
-    """按多场考试统计学生落入各排名/百分位/等级分区间的频次。"""
-    from app.analysis.rank_metrics import rank_frequency_stats
+    """按多场考试统计学生落入各排名/百分位/等级分区间的频次（单学科化）。
 
+    只选当前学科在合法范围内确有真实分数的考试。高二/三选考按精确等级分
+    70/67/.../40 频次；其他按当前学科百分位或 subject_rank 区间。
+    仅返回 member scope 学生；其他学科/空分残留考试不能进入 selected_exams 或计数。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+        normalize_percentile,
+        valid_exam_ids_for_subject,
+        _ELECTIVE_SUBJECTS,
+    )
+    from app.analysis.rank_metrics import (
+        PERCENTILE_BINS, GRADE_SCORE_VALUES, GRADE_SCORE_BINS,
+        _grade_score_bin, _parse_exam_ids,
+    )
+    from app.analysis.scope import student_class_map
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
+
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
+
+    db = SessionLocal()
     try:
-        return rank_frequency_stats(
-            grade=grade,
-            metric=metric,
-            exam_ids=exam_ids,
-            teaching_class_id=teaching_class_id,
-            class_num=class_num,
-            recent_count=recent_count,
+        try:
+            ctx = resolve_single_subject_context(
+                db, teaching_class_id=teaching_class_id, grade=grade,
+            )
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+
+        subject = ctx.subject
+        member_ids = ctx.member_ids
+
+        try:
+            _validate_metric_matches_subject(metric, subject)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc))
+
+        is_grade_score_mode = metric.startswith("subject_grade:")
+
+        # 只选当前学科有真实分数的考试
+        valid_ids = valid_exam_ids_for_subject(db, subject, member_ids, grade=grade)
+
+        parsed = _parse_exam_ids(exam_ids)
+        if parsed:
+            selected_ids = sorted(set(parsed) & valid_ids)
+        else:
+            # 按 recent_count 取最近 N 场
+            all_valid = (
+                db.query(Exam)
+                .filter(Exam.id.in_(valid_ids), Exam.grade == grade)
+                .order_by(Exam.exam_date, Exam.id)
+                .all()
+            )
+            n = max(1, min(int(recent_count or 5), 12))
+            selected_ids = [e.id for e in all_valid[-n:]]
+
+        exams = (
+            db.query(Exam)
+            .filter(Exam.id.in_(selected_ids))
+            .order_by(Exam.exam_date, Exam.id)
+            .all()
+        ) if selected_ids else []
+
+        label_map = student_class_map(db, grade)
+
+        # 构建 bins
+        if is_grade_score_mode:
+            bins = [
+                {"key": b[0], "label": b[1], "separator_after": b[3]}
+                for b in GRADE_SCORE_BINS
+            ]
+        else:
+            bins = [
+                {"key": b[0], "label": b[1]}
+                for b in PERCENTILE_BINS
+            ]
+
+        # 逐考试统计
+        student_rows: dict[str, dict[str, Any]] = {}
+        for exam in exams:
+            rank_map = compute_subject_rank(
+                db, subject, exam.id, member_ids, exam_grade=exam.grade,
+            )
+            rows = (
+                db.query(SubjectScore)
+                .filter(
+                    SubjectScore.exam_id == exam.id,
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(member_ids),
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None),
+                )
+                .all()
+            )
+            for r in rows:
+                sid = r.student_id
+                label, _ = label_map.get(sid, (None, None))
+                entry = student_rows.setdefault(
+                    sid,
+                    {
+                        "student_id": sid,
+                        "name": r.name or sid,
+                        "class_label": label,
+                        "total_count": 0,
+                    },
+                )
+                if r.name:
+                    entry["name"] = r.name
+
+                if is_grade_score_mode:
+                    bin_key = _grade_score_bin(r.grade_score)
+                else:
+                    pct = normalize_percentile(r.grade_percentile)
+                    if pct is None:
+                        # 用 subject_rank 作为 fallback bin
+                        sr = rank_map.get(sid)
+                        if sr is not None and sr > 0:
+                            bin_key = _percentile_bin_from_rank(sr, len(rank_map))
+                        else:
+                            bin_key = None
+                    else:
+                        bin_key = _percentile_bin(pct)
+
+                if bin_key:
+                    entry[bin_key] = entry.get(bin_key, 0) + 1
+                    entry["total_count"] += 1
+
+        rows_out = []
+        for entry in student_rows.values():
+            for bin_info in bins:
+                entry.setdefault(bin_info["key"], 0)
+            rows_out.append(entry)
+        rows_out.sort(
+            key=lambda row: (
+                -sum((i + 1) * row.get(b["key"], 0) for i, b in enumerate(bins)),
+                row["student_id"],
+            )
         )
-    except ValueError as exc:
-        raise HTTPException(400, str(exc))
+        return {
+            "teaching_subject": subject,
+            "grade": grade,
+            "metric": metric,
+            "metric_kind": "subject_grade_score" if is_grade_score_mode else "subject_percentile",
+            "teaching_class_id": teaching_class_id,
+            "exams": [{"id": e.id, "name": e.name, "exam_date": e.exam_date} for e in exams],
+            "bins": bins,
+            "rows": rows_out,
+        }
+    finally:
+        db.close()
 
 
 @router.get("/analysis-config")
@@ -157,46 +467,69 @@ async def get_band_trend(
     teaching_class_id: Optional[int] = None,
     class_num: Optional[int] = None,
 ):
-    """某年级历次考试的三段（高分/临界/薄弱）人数趋势。
-    teaching_class_id 为空时统计全年级；按当前 band_config 分段，改阈值后趋势同步变化。"""
-    from app.db.models import SessionLocal, Exam, TotalScore
+    """某年级历次考试的三段（高分/临界/薄弱）人数趋势（单学科化）。
+
+    仅统计当前学科确有真实分数的考试和合法成员，按每场 subject_rank + band config
+    统计 high_score/critical/weak。全部模式仅为所教班成员并集。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
     from app.analysis.config import get_band_config
-    from app.analysis.scope import resolve_scope_compat, list_classes
+    from app.analysis.scope import list_classes
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
+
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
 
     db = SessionLocal()
     try:
+        try:
+            ctx = resolve_single_subject_context(
+                db, teaching_class_id=teaching_class_id, grade=grade,
+            )
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+
+        subject = ctx.subject
+        member_ids = ctx.member_ids
         cfg = get_band_config(db)
+
+        # 只选当前学科有真实分数的考试
+        valid_ids = valid_exam_ids_for_subject(db, subject, member_ids, grade=grade)
         exams = (
             db.query(Exam)
-            .filter(Exam.grade == grade)
-            .order_by(Exam.grade, Exam.exam_date, Exam.id)
+            .filter(Exam.id.in_(valid_ids), Exam.grade == grade)
+            .order_by(Exam.exam_date, Exam.id)
             .all()
         )
 
         series = []
         for exam in exams:
-            allowed = resolve_scope_compat(
-                db, teaching_class_id=teaching_class_id, class_num=class_num, exam_id=exam.id, grade=grade
-            )
-            totals = (
-                db.query(TotalScore)
-                .filter(TotalScore.exam_id == exam.id, TotalScore.total_type == "主三门")
-                .all()
+            rank_map = compute_subject_rank(
+                db, subject, exam.id, member_ids, exam_grade=exam.grade,
             )
             high = crit = weak = 0
-            for t in totals:
-                if allowed is not None and t.student_id not in allowed:
-                    continue
-                rank = t.xueji_rank or t.grade_rank
-                if rank is None:
-                    continue
+            for sid, rank in rank_map.items():
                 if 1 <= rank <= cfg["high_score_max"]:
                     high += 1
                 if cfg["critical_min"] <= rank <= cfg["critical_max"]:
                     crit += 1
                 if rank >= cfg["weak_min"]:
                     weak += 1
-
             series.append({
                 "exam_id": exam.id,
                 "exam_name": exam.name,
@@ -206,17 +539,17 @@ async def get_band_trend(
                 "weak": weak,
             })
 
-        # available_classes：我的教学班（该年级）+ 全年级选项
+        # available_classes：我的教学班（该年级）
         my_classes = [
             {"label": tc.label, "teaching_class_id": tc.id, "mine": True, "kind": tc.kind}
             for tc in list_classes(db, grade)
         ]
         return {
+            "teaching_subject": subject,
             "series": series,
             "band_config": cfg,
             "grade": grade,
             "teaching_class_id": teaching_class_id,
-            "class_num": class_num,
             "available_classes": my_classes,
         }
     finally:
@@ -599,78 +932,92 @@ def _rank_value_for_student(s: dict):
 
 @router.get("/focus-list/{exam_id}")
 async def get_focus_list(exam_id: int, teaching_class_id: Optional[int] = None, class_num: Optional[int] = None):
-    """获取重点关注名单。teaching_class_id 限定教学班成员集合，空=全年级。
-    每项附带 class_label（学生所属教学班标签）。"""
-    from app.db.models import SessionLocal, Exam, TotalScore, SubjectScore
-    from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF, get_band_config
-    from app.analysis.scope import resolve_scope_compat, student_class_map
+    """获取重点关注名单（单学科化）。
+
+    只查询当前学科；根据 subject_rank + get_band_config 生成「临界段/薄弱段」问题，
+    不再做与主三门比较的「严重偏科」。响应顶层 teaching_subject，每行仅含单科
+    成绩、subject_rank、class_label、issues；删除学籍排名和总分字段、其他学科。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.config import get_band_config
+    from app.analysis.scope import student_class_map
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+        band_classify,
+    )
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
+
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
 
     db = SessionLocal()
-    band_cfg = get_band_config(db)
-    exam = db.query(Exam).filter(Exam.id == exam_id).first()
-    grade = exam.grade if exam else None
-    allowed = resolve_scope_compat(
-        db, teaching_class_id=teaching_class_id, class_num=class_num, exam_id=exam_id, grade=grade
-    )
-    label_map = student_class_map(db, grade) if grade is not None else {}
+    try:
+        try:
+            ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
-    query = db.query(TotalScore).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门"
-    )
-    if allowed is not None:
-        query = query.filter(TotalScore.student_id.in_(allowed))
+        subject = ctx.subject
+        member_ids = ctx.member_ids
 
-    all_totals = query.all()
-    focus_list = []
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(404, "考试不存在")
 
-    for t in all_totals:
-        student_id = t.student_id
-        rank = t.xueji_rank or t.grade_rank or 9999
+        band_cfg = get_band_config(db)
+        rank_map = compute_subject_rank(
+            db, subject, exam_id, member_ids, exam_grade=exam.grade,
+        )
+        label_map = student_class_map(db, exam.grade)
 
-        subject_scores = db.query(SubjectScore).filter(
-            SubjectScore.exam_id == exam_id,
-            SubjectScore.student_id == student_id
-        ).all()
+        subject_rows = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == exam_id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(member_ids),
+                SubjectScore.raw_score.isnot(None)
+                | SubjectScore.grade_score.isnot(None),
+            )
+            .all()
+        )
 
-        name = student_id
-        class_num_value = None
-        for s in subject_scores:
-            if s.name:
-                name = s.name
-            if class_num_value is None and s.class_num is not None:
-                class_num_value = s.class_num
-            if name != student_id and class_num_value is not None:
-                break
-
-        issues = []
-        if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
-            issues.append("临界段")
-        if rank >= band_cfg["weak_min"]:
-            issues.append("薄弱段")
-        if t.grade_percentile is not None:
-            main_pct = t.grade_percentile
-            for ss in subject_scores:
-                if ss.grade_percentile is not None:
-                    diff = ss.grade_percentile - main_pct
-                    if diff >= SUBJECT_WEAKNESS_PCT_DIFF:
-                        issues.append(f"严重偏科({ss.subject})")
-
-        if issues:
-            label, _tc_id = label_map.get(student_id, (None, None))
+        focus_list = []
+        for r in subject_rows:
+            sid = r.student_id
+            sr = rank_map.get(sid)
+            issues = band_classify(sr, band_cfg)
+            if not issues:
+                continue
+            label, _ = label_map.get(sid, (None, None))
             focus_list.append({
-                "student_id": student_id,
-                "name": name,
-                "class_num": class_num_value,
+                "student_id": sid,
+                "name": r.name or sid,
                 "class_label": label,
-                "xueji_rank": rank,
-                "total_score": t.total_score,
+                "raw_score": r.raw_score,
+                "grade_score": r.grade_score,
+                "subject_rank": sr,
                 "issues": issues,
             })
 
-    focus_list.sort(key=lambda x: x["xueji_rank"])
-    db.close()
-    return {"focus_list": focus_list[:50]}
+        focus_list.sort(key=lambda x: (x["subject_rank"] or 10**9, x["student_id"]))
+        return {
+            "teaching_subject": subject,
+            "focus_list": focus_list[:50],
+        }
+    finally:
+        db.close()
 
 @router.get("/students/{student_id}")
 async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
@@ -1026,57 +1373,90 @@ async def compare_classes(exam_id: Optional[int] = None):
 
 @router.get("/subject-weakness/{exam_id}")
 async def subject_weakness(exam_id: int, teaching_class_id: Optional[int] = None, class_num: Optional[int] = None):
-    """单科薄弱名单。teaching_class_id 限定教学班成员集合，空=全年级。"""
-    from app.db.models import SessionLocal, SubjectScore, TotalScore
-    from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF
-    from app.analysis.scope import resolve_scope_compat
+    """当前任教学科薄弱名单（单学科化重定义）。
+
+    保留路径兼容，但重定义为「当前任教学科薄弱名单」，复用 focus/band 逻辑中的
+    weak 学生。返回 teaching_subject 与 subject_weakness，不含 main percentile diff、
+    其他 subject 或总分表。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.config import get_band_config
+    from app.analysis.scope import student_class_map
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank,
+    )
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
+
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
 
     db = SessionLocal()
+    try:
+        try:
+            ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
-    main_totals = db.query(TotalScore).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门"
-    ).all()
-    main_pct_map = {t.student_id: t.grade_percentile for t in main_totals if t.grade_percentile is not None}
+        subject = ctx.subject
+        member_ids = ctx.member_ids
 
-    allowed = resolve_scope_compat(
-        db, teaching_class_id=teaching_class_id, class_num=class_num, exam_id=exam_id
-    )
-    query = db.query(SubjectScore).filter(SubjectScore.exam_id == exam_id)
-    if allowed is not None:
-        query = query.filter(SubjectScore.student_id.in_(allowed))
-    all_subjects = query.all()
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(404, "考试不存在")
 
-    student_subjects = {}
-    for s in all_subjects:
-        student_subjects.setdefault(s.student_id, []).append(s)
+        band_cfg = get_band_config(db)
+        rank_map = compute_subject_rank(
+            db, subject, exam_id, member_ids, exam_grade=exam.grade,
+        )
+        label_map = student_class_map(db, exam.grade)
 
-    weakness_list = []
-    for student_id, subjects in student_subjects.items():
-        main_pct = main_pct_map.get(student_id)
-        if main_pct is None:
-            continue
-        for s in subjects:
-            if s.grade_percentile is not None:
-                diff = s.grade_percentile - main_pct
-                if diff >= SUBJECT_WEAKNESS_PCT_DIFF:
-                    name = student_id
-                    for sub in subjects:
-                        if sub.name:
-                            name = sub.name
-                            break
-                    weakness_list.append({
-                        "student_id": student_id,
-                        "name": name,
-                        "subject": s.subject,
-                        "raw_score": s.raw_score,
-                        "grade_percentile": s.grade_percentile,
-                        "diff": round(diff, 3),
-                    })
+        subject_rows = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == exam_id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(member_ids),
+                SubjectScore.raw_score.isnot(None)
+                | SubjectScore.grade_score.isnot(None),
+            )
+            .all()
+        )
 
-    weakness_list.sort(key=lambda x: x["grade_percentile"])
-    db.close()
-    return {"subject_weakness": weakness_list[:50]}
+        weakness_list = []
+        for r in subject_rows:
+            sid = r.student_id
+            sr = rank_map.get(sid)
+            if sr is None or sr < band_cfg["weak_min"]:
+                continue
+            label, _ = label_map.get(sid, (None, None))
+            weakness_list.append({
+                "student_id": sid,
+                "name": r.name or sid,
+                "class_label": label,
+                "raw_score": r.raw_score,
+                "grade_score": r.grade_score,
+                "grade_percentile": r.grade_percentile,
+                "subject_rank": sr,
+            })
+
+        weakness_list.sort(key=lambda x: (x["subject_rank"] or 10**9, x["student_id"]))
+        return {
+            "teaching_subject": subject,
+            "subject_weakness": weakness_list[:50],
+        }
+    finally:
+        db.close()
 
 
 @router.get("/students")

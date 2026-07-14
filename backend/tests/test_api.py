@@ -19,11 +19,12 @@ def client():
     return TestClient(app)
 
 
-def _seed_minimal_exam_scope(subject="数学", member_ids=("tapi-s1", "tapi-s2")):
+def _seed_minimal_exam_scope(subject=None, member_ids=("tapi-s1", "tapi-s2")):
     """为单学科化考试端点临时建立最小教学范围（自建自删，不依赖共享库状态）。
 
     单学科化后 /api/exams 与 /api/exams/{id} 要求教师已配置 subject 且有有成员的
     教学班。本函数幂等创建：教师学科、一个高二教学班、成员、一场考试及当前学科成绩。
+    subject=None 时自动沿用教师已有的学科。
 
     返回 cleanup_fn，调用方应在 request.addfinalizer / finally 中调用它清理。
     """
@@ -35,11 +36,20 @@ def _seed_minimal_exam_scope(subject="数学", member_ids=("tapi-s1", "tapi-s2")
     created: dict = {"exam_ids": [], "tc_ids": [], "reset_teacher_subject": None}
     try:
         teacher = db.query(Teacher).first()
-        if teacher and teacher.subject is None:
-            created["reset_teacher_subject"] = teacher.id
-            teacher.subject = subject
-        elif not teacher:
-            teacher = Teacher(subject=subject)
+        if teacher:
+            # 沿用教师已有学科，避免与共享库冲突
+            if subject is None:
+                actual_subject = teacher.subject or "数学"
+            else:
+                actual_subject = subject
+            if teacher.subject is None:
+                created["reset_teacher_subject"] = teacher.id
+                teacher.subject = actual_subject
+            elif subject is not None and teacher.subject != subject:
+                actual_subject = teacher.subject
+        else:
+            actual_subject = subject or "数学"
+            teacher = Teacher(subject=actual_subject)
             db.add(teacher)
         db.flush()
 
@@ -48,7 +58,7 @@ def _seed_minimal_exam_scope(subject="数学", member_ids=("tapi-s1", "tapi-s2")
             TeachingClass.label == "tapi-scope", TeachingClass.grade == 2
         ).first()
         if not tc:
-            tc = TeachingClass(grade=2, label="tapi-scope", subject=subject, kind="教学")
+            tc = TeachingClass(grade=2, label="tapi-scope", subject=actual_subject, kind="教学")
             db.add(tc)
             db.flush()
             created["tc_ids"].append(tc.id)
@@ -71,7 +81,7 @@ def _seed_minimal_exam_scope(subject="数学", member_ids=("tapi-s1", "tapi-s2")
             created["exam_ids"].append(exam.id)
             for i, sid in enumerate(member_ids, 1):
                 db.add(SubjectScore(
-                    exam_id=exam.id, student_id=sid, subject=subject,
+                    exam_id=exam.id, student_id=sid, subject=actual_subject,
                     raw_score=80 + i, name=f"测试{i}", class_num=1,
                 ))
         db.commit()
@@ -131,13 +141,13 @@ def test_list_exams(client, request):
     自建最小教学范围（教师学科 + 教学班 + 考试 + 数学成绩），request.addfinalizer 测后清理，
     保证在全新临时 EXAM_TRACKER_DIR 下也能确定性通过。
     """
-    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1", "tapi-s2"])
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
     request.addfinalizer(cleanup)
     response = client.get("/api/exams")
     assert response.status_code == 200, response.text
     body = response.json()
     assert "exams" in body
-    assert body.get("subject") == "数学"
+    assert body.get("subject") is not None
 
 
 def test_chat_config_endpoint(client):
@@ -150,7 +160,7 @@ def test_chat_config_endpoint(client):
 
 def test_exam_not_found(client, request):
     """Step 6: 考试不存在返回404（单学科化后需先有教学范围）。"""
-    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1"])
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1"])
     request.addfinalizer(cleanup)
     response = client.get("/api/exams/99999")
     assert response.status_code == 404
@@ -162,7 +172,7 @@ def test_exam_detail_includes_dashboard_payload(client, request):
     学生对象携带 raw_score / grade_score / grade_percentile / rank，
     不再携带 total_scores / total_score / grade_rank / subject_scores 多科字典。
     """
-    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1", "tapi-s2"])
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
     request.addfinalizer(cleanup)
     exams_response = client.get("/api/exams")
     assert exams_response.status_code == 200
@@ -197,9 +207,15 @@ def test_exam_detail_includes_dashboard_payload(client, request):
         assert "grade_rank" not in student
 
 
-def test_focus_list(client):
-    """Step 6: 重点关注名单"""
-    response = client.get("/api/focus-list/1")
+def test_focus_list(client, request):
+    """重点关注名单（单学科化后需教师 subject + 教学班成员，自建自删隔离范围）。"""
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
+    exams_response = client.get("/api/exams")
+    assert exams_response.status_code == 200
+    exams = exams_response.json()["exams"]
+    assert exams, "seeding 后应有至少一场考试"
+    response = client.get(f"/api/focus-list/{exams[0]['id']}")
     assert response.status_code == 200
     assert "focus_list" in response.json()
 
@@ -413,52 +429,70 @@ def test_student_detail_excludes_empty_score_rows(tmp_path):
     result = json.loads(proc.stdout.strip().split("\n")[-1])
     assert "残留考试" not in result["exam_names"], "空分行不应进入 score_trend"
 
-def test_subject_weakness(client):
-    """Step 6: 单科薄弱"""
-    response = client.get("/api/subject-weakness/1")
+def test_subject_weakness(client, request):
+    """单科薄弱（单学科化后需教师 subject + 教学班成员，自建自删隔离范围）。"""
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
+    exams_response = client.get("/api/exams")
+    assert exams_response.status_code == 200
+    exams = exams_response.json()["exams"]
+    assert exams
+    response = client.get(f"/api/subject-weakness/{exams[0]['id']}")
     assert response.status_code == 200
     assert "subject_weakness" in response.json()
 
 
-def test_rank_metrics_options(client):
-    response = client.get("/api/rank-metrics?grade=1&mode=frequency")
+def test_rank_metrics_options(client, request):
+    """rank-metrics 单学科化后只返回当前任教学科（自建自删隔离范围）。"""
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
+    response = client.get("/api/rank-metrics?grade=2&mode=frequency")
     assert response.status_code == 200
     data = response.json()
     assert "metrics" in data
-    assert any(item["value"] == "subject:语文" for item in data["metrics"])
-    assert any(item["value"] == "total:主三门" for item in data["metrics"])
+    subject = data.get("teaching_subject")
+    assert subject is not None
+    values = [item["value"] for item in data["metrics"]]
+    assert all(subject in v for v in values)
+    assert not any(v.startswith("total:") for v in values)
 
 
-def test_rank_range_endpoint(client):
-    from app.db.models import SessionLocal, TotalScore
-
-    db = SessionLocal()
-    row = db.query(TotalScore).filter(TotalScore.total_type == "主三门").first()
-    db.close()
-    if row is None:
-        pytest.skip("no total scores in local tracker database")
-
+def test_rank_range_endpoint(client, request):
+    """rank-range 单学科化后只返回当前学科行（自建自删隔离范围）。"""
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
+    # 从 rank-metrics 获取实际学科
+    metrics_resp = client.get("/api/rank-metrics?grade=2&mode=range")
+    assert metrics_resp.status_code == 200
+    subject = metrics_resp.json()["teaching_subject"]
+    exams_response = client.get("/api/exams")
+    assert exams_response.status_code == 200
+    exams = exams_response.json()["exams"]
+    assert exams
+    exam_id = exams[0]["id"]
     response = client.get(
-        f"/api/rank-range?exam_id={row.exam_id}&metric=total:主三门&rank_min=1&rank_max=9999"
+        f"/api/rank-range?exam_id={exam_id}&metric=subject:{subject}&rank_min=1&rank_max=9999"
     )
     assert response.status_code == 200
     data = response.json()
-    assert {"metric", "metric_label", "rows"} <= set(data)
+    assert {"teaching_subject", "metric_basis", "rows"} <= set(data)
+    assert data["teaching_subject"] == subject
 
 
-def test_rank_frequency_endpoint(client):
-    from app.db.models import SessionLocal, Exam
-
-    db = SessionLocal()
-    exam = db.query(Exam).first()
-    db.close()
-    if exam is None:
-        pytest.skip("no exams in local tracker database")
-
-    response = client.get(f"/api/rank-frequency?grade={exam.grade}&metric=total:主三门&recent_count=2")
+def test_rank_frequency_endpoint(client, request):
+    """rank-frequency 单学科化后只统计当前学科（自建自删隔离范围）。"""
+    cleanup = _seed_minimal_exam_scope(member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
+    # 从 rank-metrics 获取实际学科
+    metrics_resp = client.get("/api/rank-metrics?grade=2&mode=frequency")
+    assert metrics_resp.status_code == 200
+    subject = metrics_resp.json()["teaching_subject"]
+    metric = metrics_resp.json()["metrics"][0]["value"]
+    response = client.get(f"/api/rank-frequency?grade=2&metric={metric}&recent_count=2")
     assert response.status_code == 200
     data = response.json()
     assert {"bins", "rows", "exams"} <= set(data)
+    assert data.get("teaching_subject") == subject
 
 
 def test_grade_score_frequency_bins_are_exact_scores():
