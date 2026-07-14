@@ -381,6 +381,11 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             else:
                 rank_by_student[r.student_id] = idx
 
+        # ── 教学班 label 映射（供学生明细标注 class_label + class_averages 现算）──
+        label_map = student_class_map(db, exam.grade)
+        mine_labels_map = my_class_labels(db, exam.grade)
+        mine_labels = set(mine_labels_map.keys())
+
         # ── 构造学生明细（单学科，不再携带 total_scores / total_score / grade_rank）──
         class_counter_by_student: dict[str, Counter] = defaultdict(Counter)
         students_by_id: dict[str, dict] = {}
@@ -391,6 +396,9 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
                     "student_id": row.student_id,
                     "name": row.name or row.student_id,
                     "class_num": row.class_num,
+                    "class_label": label_map[row.student_id][0]
+                    if row.student_id in label_map
+                    else None,
                     "xueji": row.xueji,
                     "raw_score": row.raw_score,
                     "grade_score": row.grade_score,
@@ -445,9 +453,7 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
         # 会跨范围泄漏）。直接按本次 subject_rows + 当前 member_ids，对每个
         # 选中教学班的成员集合现算当前学科均分。响应只含 subject_averages
         # 的当前学科键，不含 total_averages 或其他学科。
-        label_map = student_class_map(db, exam.grade)
-        mine_labels_map = my_class_labels(db, exam.grade)
-        mine_labels = set(mine_labels_map.keys())
+        # （label_map / mine_labels_map 已在学生明细构造前计算）
 
         # 成员按教学班 label 分组（teaching_class_id 限定模式只覆盖该班成员）
         members_by_label: dict[str, set[str]] = defaultdict(set)

@@ -83,6 +83,7 @@ interface StudentRow {
   student_id: string
   name: string
   class_num?: number | null
+  class_label?: string | null
   xueji?: number | null
   raw_score?: number | null
   grade_score?: number | null
@@ -127,11 +128,6 @@ const DEFAULT_BAND_CONFIG: BandConfig = {
   critical_min: 400,
   critical_max: 500,
   weak_min: 501,
-}
-
-interface StudentListItem {
-  student_id: string
-  class_label?: string | null
 }
 
 function formatNumber(n: number | null | undefined, digits = 1): string {
@@ -181,11 +177,6 @@ export default function ExamDetailPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  // 学生 → 所属教学班 label 映射（用于成绩表的班级徽章列）
-  const [labelByStudentId, setLabelByStudentId] = useState<Map<string, string>>(
-    () => new Map(),
-  )
-
   const [studentQuery, setStudentQuery] = useState('')
   const [studentSortKey, setStudentSortKey] = useState<string | null>(null)
   const [studentSortDir, setStudentSortDir] = useState<'asc' | 'desc' | null>(null)
@@ -233,36 +224,10 @@ export default function ExamDetailPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [examId, current])
 
-  // 拉取「学生 → 教学班 label」映射，用于成绩表的教学班徽章列。
-  useEffect(() => {
-    const grade = exam?.grade
-    if (!grade) return
-    let cancelled = false
-    if (current !== 'all') {
-      if (!cancelled) setLabelByStudentId(new Map())
-      return
-    }
-    fetch(`/api/students?grade=${grade}`)
-      .then((r) => (r.ok ? r.json() : { students: [] }))
-      .then((data) => {
-        if (cancelled) return
-        const map = new Map<string, string>()
-        ;(data.students as StudentListItem[]).forEach((s) => {
-          if (s.class_label) map.set(s.student_id, s.class_label)
-        })
-        setLabelByStudentId(map)
-      })
-      .catch(() => {
-        if (!cancelled) setLabelByStudentId(new Map())
-      })
-    return () => {
-      cancelled = true
-    }
-  }, [exam?.grade, current])
-
   function studentBadge(row: StudentRow): string | null {
-    const fromMap = labelByStudentId.get(row.student_id)
-    if (fromMap) return formatClassChip(fromMap)
+    // 后端 get_exam 已在每个学生行直接返回 class_label（教学范围标签），
+    // 不再需要额外调用 /api/students?grade 建立映射。
+    if (row.class_label) return formatClassChip(row.class_label)
     if (current !== 'all' && currentClass) return formatClassChip(currentClass.label)
     if (row.class_num != null) return `${row.class_num}班`
     return null

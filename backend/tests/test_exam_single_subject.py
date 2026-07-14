@@ -1005,6 +1005,64 @@ class TestOverlappingMembershipAPI:
         assert not data["has_dup"], "s3 不应出现两次"
 
 
+class TestStudentClassLabelInDetail:
+    """/api/exams/{id} 每个学生行直接返回 class_label（教学范围标签），
+    前端无需再调用 /api/students?grade 建立映射。"""
+
+    def test_student_rows_include_class_label(self, tmp_path):
+        """全部模式：A班学生 class_label='A班'，B班学生 class_label='B班'。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            r2 = client.get(f"/api/exams/{exam_id}")
+            assert r2.status_code == 200, r2.text
+            students = r2.json().get("students", [])
+            label_by_id = {s["student_id"]: s.get("class_label") for s in students}
+            result = {"status": "ok", "label_by_id": label_by_id}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(
+            tmp_path, TestClassAverageScopeIsolation._SETUP_DUAL_OFFICIAL, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        labels = data["label_by_id"]
+        # A班学生 s1,s2,s3
+        for sid in ["s1", "s2", "s3"]:
+            assert labels.get(sid) == "A班", \
+                f"{sid} class_label 应为 A班, 得到 {labels.get(sid)}"
+        # B班学生 s4,s5
+        for sid in ["s4", "s5"]:
+            assert labels.get(sid) == "B班", \
+                f"{sid} class_label 应为 B班, 得到 {labels.get(sid)}"
+
+    def test_current_class_mode_student_label(self, tmp_path):
+        """当前班模式：选择 A班时学生行 class_label 仍为 'A班'。"""
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            a = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            a_id = a.id
+            db.close()
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            r2 = client.get(f"/api/exams/{exam_id}?teaching_class_id={a_id}")
+            assert r2.status_code == 200, r2.text
+            students = r2.json().get("students", [])
+            labels = {s["student_id"]: s.get("class_label") for s in students}
+            result = {"status": "ok", "labels": labels}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(
+            tmp_path, TestClassAverageScopeIsolation._SETUP_DUAL_OFFICIAL, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        for sid in ["s1", "s2", "s3"]:
+            assert data["labels"].get(sid) == "A班", \
+                f"{sid} 应标注 A班, 得到 {data['labels'].get(sid)}"
+
+
 class TestSubjectConflictTeachingClass:
     """请求学科冲突的教学班必须返回 4xx，不退化为全年级。"""
 
