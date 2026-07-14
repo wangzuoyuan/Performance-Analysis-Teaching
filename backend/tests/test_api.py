@@ -4,8 +4,10 @@
 - API测试：验证端点可访问且返回正确JSON结构（使用真实~/.exam-tracker/db.sqlite）
 - DB测试：验证ORM模型可写入和查询（使用真实数据库）
 
-注意：测试不尝试数据库隔离，因为SQLAlchemy engine在模块导入时就已缓存。
-真实数据在 ~/.exam-tracker/db.sqlite，每次运行测试会累积数据。
+注意：考试端点在阶段2单学科化后要求教师已配置 subject 且有有成员的教学班。
+考试相关测试通过 _seed_minimal_exam_scope 自建自删最小教学范围，
+保证在全新临时 EXAM_TRACKER_DIR 下也能确定性通过（不依赖共享库状态、不 skip）。
+其他端点（health/teacher/uploads 等）不依赖教学范围。
 """
 
 import pytest
@@ -15,6 +17,86 @@ from app.main import app
 @pytest.fixture
 def client():
     return TestClient(app)
+
+
+def _seed_minimal_exam_scope(subject="数学", member_ids=("tapi-s1", "tapi-s2")):
+    """为单学科化考试端点临时建立最小教学范围（自建自删，不依赖共享库状态）。
+
+    单学科化后 /api/exams 与 /api/exams/{id} 要求教师已配置 subject 且有有成员的
+    教学班。本函数幂等创建：教师学科、一个高二教学班、成员、一场考试及当前学科成绩。
+
+    返回 cleanup_fn，调用方应在 request.addfinalizer / finally 中调用它清理。
+    """
+    from app.db.models import (
+        SessionLocal, Teacher, TeachingClass, TeachingClassMember,
+        Exam, SubjectScore,
+    )
+    db = SessionLocal()
+    created: dict = {"exam_ids": [], "tc_ids": [], "reset_teacher_subject": None}
+    try:
+        teacher = db.query(Teacher).first()
+        if teacher and teacher.subject is None:
+            created["reset_teacher_subject"] = teacher.id
+            teacher.subject = subject
+        elif not teacher:
+            teacher = Teacher(subject=subject)
+            db.add(teacher)
+        db.flush()
+
+        # 幂等：若已存在同名测试教学班则复用
+        tc = db.query(TeachingClass).filter(
+            TeachingClass.label == "tapi-scope", TeachingClass.grade == 2
+        ).first()
+        if not tc:
+            tc = TeachingClass(grade=2, label="tapi-scope", subject=subject, kind="教学")
+            db.add(tc)
+            db.flush()
+            created["tc_ids"].append(tc.id)
+        for sid in member_ids:
+            exists = db.query(TeachingClassMember).filter(
+                TeachingClassMember.teaching_class_id == tc.id,
+                TeachingClassMember.student_id == sid,
+            ).first()
+            if not exists:
+                db.add(TeachingClassMember(
+                    teaching_class_id=tc.id, student_id=sid, source="manual"
+                ))
+
+        # 幂等：若已存在同名测试考试则复用
+        exam = db.query(Exam).filter(Exam.name == "tapi-考试").first()
+        if not exam:
+            exam = Exam(name="tapi-考试", grade=2, semester="上", exam_type="月考", exam_date="2025-11")
+            db.add(exam)
+            db.flush()
+            created["exam_ids"].append(exam.id)
+            for i, sid in enumerate(member_ids, 1):
+                db.add(SubjectScore(
+                    exam_id=exam.id, student_id=sid, subject=subject,
+                    raw_score=80 + i, name=f"测试{i}", class_num=1,
+                ))
+        db.commit()
+    finally:
+        db.close()
+
+    def _cleanup():
+        db = SessionLocal()
+        try:
+            for eid in created["exam_ids"]:
+                db.query(SubjectScore).filter(SubjectScore.exam_id == eid).delete(synchronize_session=False)
+                db.query(Exam).filter(Exam.id == eid).delete(synchronize_session=False)
+            for tcid in created["tc_ids"]:
+                db.query(TeachingClassMember).filter(TeachingClassMember.teaching_class_id == tcid).delete(synchronize_session=False)
+                db.query(TeachingClass).filter(TeachingClass.id == tcid).delete(synchronize_session=False)
+            if created["reset_teacher_subject"] is not None:
+                t = db.query(Teacher).filter(Teacher.id == created["reset_teacher_subject"]).first()
+                if t:
+                    t.subject = None
+            db.commit()
+        finally:
+            db.close()
+
+    return _cleanup
+
 
 # === API 测试 ===
 
@@ -42,11 +124,21 @@ def test_bind_class(client):
     assert response.status_code == 200
     assert response.json()["ok"] is True
 
-def test_list_exams(client):
-    """Step 6: 列出考试"""
+
+def test_list_exams(client, request):
+    """Step 6: 列出考试（单学科化后需要教师 subject + 教学班成员）。
+
+    自建最小教学范围（教师学科 + 教学班 + 考试 + 数学成绩），request.addfinalizer 测后清理，
+    保证在全新临时 EXAM_TRACKER_DIR 下也能确定性通过。
+    """
+    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
     response = client.get("/api/exams")
-    assert response.status_code == 200
-    assert "exams" in response.json()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert "exams" in body
+    assert body.get("subject") == "数学"
+
 
 def test_chat_config_endpoint(client):
     response = client.get("/api/chat/config")
@@ -55,24 +147,36 @@ def test_chat_config_endpoint(client):
     assert {"provider", "model", "configured", "base_url_configured"} <= set(data)
     assert "api_key" not in data
 
-def test_exam_not_found(client):
-    """Step 6: 考试不存在返回404"""
+
+def test_exam_not_found(client, request):
+    """Step 6: 考试不存在返回404（单学科化后需先有教学范围）。"""
+    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1"])
+    request.addfinalizer(cleanup)
     response = client.get("/api/exams/99999")
     assert response.status_code == 404
 
-def test_exam_detail_includes_dashboard_payload(client):
-    """考试详情返回页面需要的统计、学生明细和分数段字段"""
+
+def test_exam_detail_includes_dashboard_payload(client, request):
+    """考试详情返回单学科化后的统计、学生明细和分数段字段。
+
+    学生对象携带 raw_score / grade_score / grade_percentile / rank，
+    不再携带 total_scores / total_score / grade_rank / subject_scores 多科字典。
+    """
+    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
     exams_response = client.get("/api/exams")
     assert exams_response.status_code == 200
     exams = exams_response.json()["exams"]
-    if not exams:
-        pytest.skip("no exams in local tracker database")
+    assert exams, "seeding 后应有至少一场考试"
 
     response = client.get(f"/api/exams/{exams[0]['id']}")
     assert response.status_code == 200
     data = response.json()
 
-    assert {"max_total", "min_total", "rank_min", "rank_max"} <= set(data["stats"])
+    # 单学科统计：avg/max/min/rank_min/rank_max（不再有 by_total_type / avg_main_total）
+    assert {"total_students", "avg", "max", "min", "rank_min", "rank_max"} <= set(data["stats"])
+    assert "by_total_type" not in data["stats"]
+    assert "avg_main_total" not in data["stats"]
     assert isinstance(data["students"], list)
     assert isinstance(data["rank_bands"], list)
     if data["students"]:
@@ -81,12 +185,17 @@ def test_exam_detail_includes_dashboard_payload(client):
             "student_id",
             "name",
             "xueji",
-            "subject_scores",
-            "subject_percentiles",
-            "total_scores",
-            "total_score",
-            "grade_rank",
+            "raw_score",
+            "grade_score",
+            "grade_percentile",
+            "rank",
         } <= set(student)
+        # 单学科化：不再有这些多科/总分字段
+        assert "subject_scores" not in student
+        assert "total_scores" not in student
+        assert "total_score" not in student
+        assert "grade_rank" not in student
+
 
 def test_focus_list(client):
     """Step 6: 重点关注名单"""

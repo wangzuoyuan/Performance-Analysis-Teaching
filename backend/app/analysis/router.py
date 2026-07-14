@@ -186,25 +186,69 @@ async def get_band_trend(
         db.close()
 
 @router.get("/exams")
-async def list_exams(grade: Optional[int] = None):
-    """列出已建档考试 - Step 6"""
-    from app.db.models import SessionLocal, Exam
+async def list_exams(
+    grade: Optional[int] = None,
+    teaching_class_id: Optional[int] = None,
+):
+    """列出已建档考试（单学科化）。
+
+    只返回当前任教学科在允许的教学班成员范围内确有成绩的考试。
+    其他学科有成绩但当前学科无成绩的考试不会出现。学科由后端教师上下文
+    解析，前端无需也不可传入。teaching_class_id 限定为该教学班成员集合
+    （不传=全部教学班成员并集）。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.exam_context import (
+        resolve_exam_context,
+        SubjectNotConfiguredError,
+        NoTeachingScopeError,
+    )
+    from app.teaching.subject import SubjectConflictError
     db = SessionLocal()
-    query = db.query(Exam).order_by(Exam.exam_date.desc())
-    if grade:
-        query = query.filter(Exam.grade == grade)
-    exams = query.all()
-    db.close()
-    return {
-        "exams": [{
-            "id": e.id,
-            "name": e.name,
-            "grade": e.grade,
-            "semester": e.semester,
-            "exam_date": e.exam_date,
-            "exam_type": e.exam_type,
-        } for e in exams]
-    }
+    try:
+        try:
+            ctx = resolve_exam_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            # teaching_class_id 不存在
+            raise HTTPException(404, str(e))
+
+        # 找出在允许成员范围内、当前任教学科确有成绩的考试 id
+        valid_exam_ids = set(
+            row[0]
+            for row in (
+                db.query(SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.subject == ctx.subject,
+                    SubjectScore.student_id.in_(ctx.member_ids),
+                )
+                .distinct()
+                .all()
+            )
+        )
+
+        query = db.query(Exam).filter(Exam.id.in_(valid_exam_ids)).order_by(Exam.exam_date.desc())
+        if grade:
+            query = query.filter(Exam.grade == grade)
+        exams = query.all()
+        return {
+            "subject": ctx.subject,
+            "exams": [{
+                "id": e.id,
+                "name": e.name,
+                "grade": e.grade,
+                "semester": e.semester,
+                "exam_date": e.exam_date,
+                "exam_type": e.exam_type,
+            } for e in exams]
+        }
+    finally:
+        db.close()
 
 @router.delete("/exams/{exam_id}")
 async def delete_exam(exam_id: int):
@@ -253,267 +297,276 @@ async def delete_exam(exam_id: int):
 
 
 @router.get("/exams/{exam_id}")
-async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None, class_num: Optional[int] = None):
-    """获取考试详情。teaching_class_id 限定统计子集（我的教学班），空=全年级；
-    rank_bands 按 class_label（教学班标签）分组并标 mine。"""
+async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
+    """获取考试详情（单学科化）。
+
+    学生明细、汇总统计、分布图、排名/百分位展示全部基于当前任教学科的
+    SubjectScore；同一学生同一考试的其他学科与 TotalScore 完全隔离，不再出现。
+    teaching_class_id 限定为当前教学班成员集合（不传=全部教学班成员并集）。
+    学科由后端教师上下文解析。
+    """
     from collections import Counter, defaultdict
 
-    from app.db.models import SessionLocal, Exam, ClassAverage, SubjectScore, TotalScore
-    from app.analysis.scope import resolve_scope_compat, student_class_map, my_class_labels
+    from app.db.models import SessionLocal, Exam, ClassAverage, SubjectScore
+    from app.analysis.exam_context import (
+        resolve_exam_context,
+        SubjectNotConfiguredError,
+        NoTeachingScopeError,
+    )
+    from app.teaching.subject import SubjectConflictError
+    from app.analysis.scope import student_class_map, my_class_labels
+
     db = SessionLocal()
-    exam = db.query(Exam).filter(Exam.id == exam_id).first()
-    if not exam:
-        db.close()
-        raise HTTPException(404, "考试不存在")
+    try:
+        # ── 解析学科 + 成员范围 ──
+        try:
+            ctx = resolve_exam_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            # 教学班不存在或无成员 → 明确 4xx，不退化为全年级
+            if teaching_class_id is not None:
+                raise HTTPException(404, str(e))
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            # teaching_class_id 不存在
+            raise HTTPException(404, str(e))
 
-    class_avgs = db.query(ClassAverage).filter(ClassAverage.exam_id == exam_id).all()
+        member_ids = ctx.member_ids
+        subject = ctx.subject
 
-    # 获取本班学生统计
-    main_totals = db.query(TotalScore).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门"
-    ).all()
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(404, "考试不存在")
 
-    subject_rows = db.query(SubjectScore).filter(SubjectScore.exam_id == exam_id).all()
-
-    students_by_id = {}
-    class_counter_by_student = defaultdict(Counter)
-    for row in subject_rows:
-        student = students_by_id.setdefault(
-            row.student_id,
-            {
-                "student_id": row.student_id,
-                "name": row.name or row.student_id,
-                "class_num": row.class_num,
-                "xueji": row.xueji,
-                "subject_scores": {},
-                "subject_grade_scores": {},
-                "subject_percentiles": {},
-                "total_scores": {},
-                "total_score": None,
-                "grade_rank": None,
-            },
+        # ── 只取当前任教学科 + 允许成员范围内的 SubjectScore ──
+        subject_rows = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == exam_id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(member_ids),
+            )
+            .all()
         )
-        if row.name:
-            student["name"] = row.name
-        if row.class_num is not None:
-            class_counter_by_student[row.student_id][row.class_num] += 1
-        if row.xueji is not None:
-            student["xueji"] = row.xueji
-        student["subject_scores"][row.subject] = row.raw_score
-        student["subject_grade_scores"][row.subject] = row.grade_score
-        student["subject_percentiles"][row.subject] = row.grade_percentile
 
-    for student_id, counter in class_counter_by_student.items():
-        if counter:
-            students_by_id[student_id]["class_num"] = counter.most_common(1)[0][0]
+        # ── 单科排名基准：高二/高三选考优先用 grade_score，否则用 raw_score ──
+        # 高一 grade_score 为 None，自动回落 raw_score。
+        def _rank_value(row):
+            return row.grade_score if row.grade_score is not None else row.raw_score
 
-    main_total_by_student = {t.student_id: t for t in main_totals}
-    for student_id, total in main_total_by_student.items():
-        student = students_by_id.setdefault(
-            student_id,
-            {
-                "student_id": student_id,
-                "name": student_id,
-                "class_num": None,
-                "xueji": None,
-                "subject_scores": {},
-                "subject_grade_scores": {},
-                "subject_percentiles": {},
-                "total_scores": {},
-                "total_score": None,
-                "grade_rank": None,
-            },
+        # 计算每个学生在当前学科范围内的名次（值越大名次越靠前，1=最高）
+        rows_with_rank = sorted(
+            (r for r in subject_rows if _rank_value(r) is not None),
+            key=lambda r: _rank_value(r),
+            reverse=True,
         )
-        student["total_score"] = total.total_score
-        student["grade_rank"] = total.xueji_rank or total.grade_rank
+        rank_by_student: dict[str, int] = {}
+        for idx, r in enumerate(rows_with_rank, 1):
+            # 同分同名：与上一名同分则同名次
+            if idx > 1 and _rank_value(r) == _rank_value(rows_with_rank[idx - 2]):
+                rank_by_student[r.student_id] = rank_by_student[rows_with_rank[idx - 2].student_id]
+            else:
+                rank_by_student[r.student_id] = idx
 
-    allowed = resolve_scope_compat(
-        db, teaching_class_id=teaching_class_id, class_num=class_num, exam_id=exam_id, grade=exam.grade
-    )
-    all_students = list(students_by_id.values())
-    if allowed is not None:
-        stat_student_ids = {s["student_id"] for s in all_students if s["student_id"] in allowed}
-    else:
-        stat_student_ids = {s["student_id"] for s in all_students}
+        # ── 构造学生明细（单学科，不再携带 total_scores / total_score / grade_rank）──
+        class_counter_by_student: dict[str, Counter] = defaultdict(Counter)
+        students_by_id: dict[str, dict] = {}
+        for row in subject_rows:
+            student = students_by_id.setdefault(
+                row.student_id,
+                {
+                    "student_id": row.student_id,
+                    "name": row.name or row.student_id,
+                    "class_num": row.class_num,
+                    "xueji": row.xueji,
+                    "raw_score": row.raw_score,
+                    "grade_score": row.grade_score,
+                    "grade_percentile": row.grade_percentile,
+                    "rank": rank_by_student.get(row.student_id),
+                },
+            )
+            if row.name:
+                student["name"] = row.name
+            if row.class_num is not None:
+                class_counter_by_student[row.student_id][row.class_num] += 1
+            if row.xueji is not None:
+                student["xueji"] = row.xueji
+            # raw/grade/percentile 始终用行内值（单科只有一行，直接覆盖即可）
+            student["raw_score"] = row.raw_score
+            student["grade_score"] = row.grade_score
+            student["grade_percentile"] = row.grade_percentile
+            student["rank"] = rank_by_student.get(row.student_id)
 
-    all_totals = db.query(TotalScore).filter(TotalScore.exam_id == exam_id).all()
-    for total in all_totals:
-        student = students_by_id.setdefault(
-            total.student_id,
-            {
-                "student_id": total.student_id,
-                "name": total.student_id,
-                "class_num": None,
-                "xueji": None,
-                "subject_scores": {},
-                "subject_grade_scores": {},
-                "subject_percentiles": {},
-                "total_scores": {},
-                "total_score": None,
-                "grade_rank": None,
-            },
+        for student_id, counter in class_counter_by_student.items():
+            if counter:
+                students_by_id[student_id]["class_num"] = counter.most_common(1)[0][0]
+
+        all_students = list(students_by_id.values())
+        students = sorted(
+            all_students,
+            key=lambda s: (
+                s["rank"] is None,
+                s["rank"] if s["rank"] is not None else 10**9,
+                s["student_id"],
+            ),
         )
-        student["total_scores"][total.total_type] = {
-            "score": total.total_score,
-            "rank": total.xueji_rank or total.grade_rank,
-            "percentile": total.grade_percentile,
-            "xueji_rank": total.xueji_rank,
-            "grade_rank": total.grade_rank,
+
+        # ── 单科统计（基于 grade_score 优先，否则 raw_score）──
+        scored = [s for s in all_students if _rank_value_for_student(s) is not None]
+        score_values = [_rank_value_for_student(s) for s in scored]
+        rank_values = [s["rank"] for s in scored if s["rank"] is not None]
+        avg_score = sum(score_values) / len(score_values) if score_values else None
+
+        stats = {
+            "total_students": len(all_students),
+            "avg": round(avg_score, 1) if avg_score is not None else None,
+            "max": max(score_values) if score_values else None,
+            "min": min(score_values) if score_values else None,
+            "rank_min": min(rank_values) if rank_values else None,
+            "rank_max": max(rank_values) if rank_values else None,
+            "score_basis": "grade_score" if any(s.get("grade_score") is not None for s in scored) else "raw_score",
         }
-        if total.total_type == "主三门":
-            student["total_score"] = total.total_score
-            student["grade_rank"] = total.xueji_rank or total.grade_rank
 
-    stat_totals = [t for t in main_totals if t.student_id in stat_student_ids]
-    stat_totals_by_type = defaultdict(list)
-    for total in all_totals:
-        if total.student_id in stat_student_ids:
-            stat_totals_by_type[total.total_type].append(total)
+        # ── class_averages：只返回当前任教学科，不泄漏其他学科与 total_averages ──
+        # 优先用官方 ClassAverage 行的 subject_averages[subject]；官方无则现算。
+        label_map = student_class_map(db, exam.grade)
+        mine_labels = set(my_class_labels(db, exam.grade).keys())
+        official_avgs = db.query(ClassAverage).filter(ClassAverage.exam_id == exam_id).all()
+        # 成员按 label 分组（用教学班 label，无则按行政班号）
+        members_by_label: dict[str, set[str]] = defaultdict(set)
+        for sid in member_ids:
+            if sid in label_map:
+                members_by_label[label_map[sid][0]].add(sid)
+        # 也收集每个学生的行政班号，用于官方行匹配
+        admin_class_by_student = {s["student_id"]: s.get("class_num") for s in all_students}
 
-    def summarize_totals(rows):
-        scores = [t.total_score for t in rows if t.total_score is not None]
-        ranks = [
-            rank
-            for rank in ((t.xueji_rank or t.grade_rank) for t in rows)
-            if rank is not None
+        def _subject_avg_for(label_or_num, candidate_ids):
+            vals = [
+                _rank_value(r)
+                for r in subject_rows
+                if r.student_id in candidate_ids and _rank_value(r) is not None
+            ]
+            return round(sum(vals) / len(vals), 1) if vals else None
+
+        class_averages_out = []
+        seen_labels = set()
+        for ca in official_avgs:
+            label = ca.class_label or (str(ca.class_num) if ca.class_num is not None else None)
+            if not label:
+                continue
+            sa = ca.subject_averages or {}
+            subj_avg = sa.get(subject)
+            # 若官方行无当前学科均分，尝试现算该 label 成员
+            if subj_avg is None:
+                cand = members_by_label.get(label, set())
+                if not cand and ca.class_num is not None:
+                    cand = {sid for sid, cn in admin_class_by_student.items() if cn == ca.class_num}
+                subj_avg = _subject_avg_for(label, cand) if cand else None
+            if subj_avg is None:
+                continue  # 该班无当前学科数据，不展示
+            class_averages_out.append({
+                "class_num": ca.class_num,
+                "class_label": label,
+                "class_type": ca.class_type,
+                "teacher_name": ca.teacher_name,
+                "subject_averages": {subject: subj_avg},
+                # 单学科化：不再返回 total_averages
+            })
+            seen_labels.add(label)
+
+        # 我的教学班若官方无行，用成员现算补一行
+        for label, tc_id in my_class_labels(db, exam.grade).items():
+            if label in seen_labels:
+                continue
+            cand = members_by_label.get(label, set())
+            if not cand:
+                continue
+            subj_avg = _subject_avg_for(label, cand)
+            if subj_avg is None:
+                continue
+            class_averages_out.append({
+                "class_num": None,
+                "class_label": label,
+                "class_type": "教学",
+                "teacher_name": None,
+                "subject_averages": {subject: subj_avg},
+            })
+
+        # ── rank_bands：单科名次分段（按 class_label 分组，标 mine）──
+        from app.analysis.config import get_band_config
+        band_cfg = get_band_config(db)
+        rank_bands_by_class = defaultdict(lambda: {"high_score": 0, "critical": 0, "weak": 0})
+        for s in all_students:
+            rank = s["rank"]
+            if rank is None:
+                continue
+            sid = s["student_id"]
+            if sid in label_map:
+                label = label_map[sid][0]
+            elif s.get("class_num") is not None:
+                label = str(s["class_num"])
+            else:
+                continue
+            bands = rank_bands_by_class[label]
+            if 1 <= rank <= band_cfg["high_score_max"]:
+                bands["high_score"] += 1
+            if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
+                bands["critical"] += 1
+            if rank >= band_cfg["weak_min"]:
+                bands["weak"] += 1
+
+        rank_bands = [
+            {"class_label": label, "mine": label in mine_labels, **bands}
+            for label, bands in sorted(rank_bands_by_class.items())
         ]
+
+        # ── rank_distribution：单科名次分布（只有当前学科一列）──
+        max_rank = max(rank_values, default=0)
+        max_bucket = max(40, ((max_rank + 39) // 40) * 40)
+        rank_distribution = [
+            {"band": f"{start}-{start + 39}名", subject: 0}
+            for start in range(1, max_bucket + 1, 40)
+        ]
+        distribution_index = {item["band"]: item for item in rank_distribution}
+        for s in all_students:
+            rank = s["rank"]
+            if rank is None or rank < 1:
+                continue
+            start = ((rank - 1) // 40) * 40 + 1
+            band = f"{start}-{start + 39}名"
+            if band not in distribution_index:
+                distribution_index[band] = {"band": band, subject: 0}
+                rank_distribution.append(distribution_index[band])
+            distribution_index[band][subject] = distribution_index[band].get(subject, 0) + 1
+
         return {
-            "count": len(scores),
-            "avg": round(sum(scores) / len(scores), 1) if scores else None,
-            "max": max(scores) if scores else None,
-            "min": min(scores) if scores else None,
-            "rank_min": min(ranks) if ranks else None,
-            "rank_max": max(ranks) if ranks else None,
+            "subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "exam": {
+                "id": exam.id,
+                "name": exam.name,
+                "grade": exam.grade,
+                "semester": exam.semester,
+                "exam_date": exam.exam_date,
+                "exam_type": exam.exam_type,
+            },
+            "class_averages": class_averages_out,
+            "stats": stats,
+            "students": students,
+            "rank_bands": rank_bands,
+            "band_config": band_cfg,
+            "rank_distribution": rank_distribution,
         }
+    finally:
+        db.close()
 
-    stats_by_total_type = {
-        total_type: summarize_totals(rows)
-        for total_type, rows in sorted(stat_totals_by_type.items())
-    }
-    main_summary = summarize_totals(stat_totals)
-    valid_scores = [t.total_score for t in stat_totals if t.total_score is not None]
-    valid_ranks = [
-        rank
-        for rank in ((t.xueji_rank or t.grade_rank) for t in stat_totals)
-        if rank is not None
-    ]
-    avg_score = sum(valid_scores) / len(valid_scores) if valid_scores else None
 
-    from app.analysis.config import get_band_config
-    band_cfg = get_band_config(db)
-    label_map = student_class_map(db, exam.grade)
-    mine_labels = set(my_class_labels(db, exam.grade).keys())
-    rank_band_total_types = ["主三门"] if exam.grade == 1 else ["主三门", "3+3"]
-    rank_bands_by_class = defaultdict(lambda: {"high_score": 0, "critical": 0, "weak": 0})
-    for total in all_totals:
-        if total.total_type not in rank_band_total_types:
-            continue
-        student = students_by_id.get(total.student_id)
-        if not student:
-            continue
-        sid = total.student_id
-        if sid in label_map:
-            label = label_map[sid][0]
-        elif student.get("class_num") is not None:
-            label = str(student["class_num"])
-        else:
-            continue
-        rank = total.xueji_rank or total.grade_rank
-        if rank is None:
-            continue
-        bands = rank_bands_by_class[(total.total_type, label)]
-        if 1 <= rank <= band_cfg["high_score_max"]:
-            bands["high_score"] += 1
-        if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
-            bands["critical"] += 1
-        if rank >= band_cfg["weak_min"]:
-            bands["weak"] += 1
-
-    students = sorted(
-        all_students,
-        key=lambda s: (
-            s["grade_rank"] is None,
-            s["grade_rank"] if s["grade_rank"] is not None else 10**9,
-            s["student_id"],
-        ),
-    )
-    rank_bands = [
-        {"total_type": total_type, "class_label": label, "mine": label in mine_labels, **bands}
-        for (total_type, label), bands in sorted(rank_bands_by_class.items())
-    ]
-
-    distribution_total_types = (
-        ["主三门", "五门", "九门"] if exam.grade == 1 else ["主三门", "+3", "3+3"]
-    )
-    distribution_rows = db.query(TotalScore).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type.in_(distribution_total_types),
-    ).all()
-    max_rank = max(
-        (
-            rank
-            for rank in ((row.xueji_rank or row.grade_rank) for row in distribution_rows)
-            if rank is not None
-        ),
-        default=0,
-    )
-    max_bucket = max(40, ((max_rank + 39) // 40) * 40)
-    rank_distribution = [
-        {"band": f"{start}-{start + 39}名次数", **{total_type: 0 for total_type in distribution_total_types}}
-        for start in range(1, max_bucket + 1, 40)
-    ]
-    distribution_index = {
-        item["band"]: item for item in rank_distribution
-    }
-    for row in distribution_rows:
-        rank = row.xueji_rank or row.grade_rank
-        if rank is None or rank < 1:
-            continue
-        start = ((rank - 1) // 40) * 40 + 1
-        band = f"{start}-{start + 39}名次数"
-        if band not in distribution_index:
-            distribution_index[band] = {
-                "band": band,
-                **{total_type: 0 for total_type in distribution_total_types},
-            }
-            rank_distribution.append(distribution_index[band])
-        distribution_index[band][row.total_type] = distribution_index[band].get(row.total_type, 0) + 1
-
-    db.close()
-
-    return {
-        "exam": {
-            "id": exam.id,
-            "name": exam.name,
-            "grade": exam.grade,
-            "semester": exam.semester,
-            "exam_date": exam.exam_date,
-            "exam_type": exam.exam_type,
-        },
-        "class_averages": [{
-            "class_num": c.class_num,
-            "class_label": c.class_label or (str(c.class_num) if c.class_num is not None else None),
-            "class_type": c.class_type,
-            "teacher_name": c.teacher_name,
-            "subject_averages": c.subject_averages,
-            "total_averages": c.total_averages,
-        } for c in class_avgs],
-        "stats": {
-            "total_students": len(valid_scores),
-            "avg_main_total": round(avg_score, 1) if avg_score is not None else None,
-            "max_total": max(valid_scores) if valid_scores else None,
-            "min_total": min(valid_scores) if valid_scores else None,
-            "rank_min": min(valid_ranks) if valid_ranks else None,
-            "rank_max": max(valid_ranks) if valid_ranks else None,
-            "by_total_type": stats_by_total_type,
-            "main_total": main_summary,
-        },
-        "students": students,
-        "rank_bands": rank_bands,
-        "band_config": band_cfg,
-        "rank_distribution": rank_distribution,
-    }
+def _rank_value_for_student(s: dict):
+    """学生明细里的单科排序值：grade_score 优先，否则 raw_score。"""
+    return s.get("grade_score") if s.get("grade_score") is not None else s.get("raw_score")
 
 @router.get("/focus-list/{exam_id}")
 async def get_focus_list(exam_id: int, teaching_class_id: Optional[int] = None, class_num: Optional[int] = None):
