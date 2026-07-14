@@ -1225,3 +1225,225 @@ class TestEmptyScoreResidueIsolation:
         assert data["status"] == "ok"
         assert data["grades"] == [2], \
             f"s5 画像 grades 应来自 TeachingClass=[2]: {data['grades']}"
+
+
+# ════════════════════════════════════════════════════════════════
+#  第四轮补充：错误处理完整性、跨学科完全隔离、rank_basis 显式验证
+# ════════════════════════════════════════════════════════════════
+
+
+class TestErrorHandlingCompleteness:
+    """错误处理：无成员、学科冲突、显式越权均返回明确 4xx，不退化全年级。"""
+
+    def test_no_members_returns_4xx(self, tmp_path):
+        """教师已配置学科但没有有成员的教学班 → 4xx。"""
+        setup = textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import Teacher, TeachingClass
+            t = Teacher(subject="数学", name="数学老师")
+            db.add(t)
+            db.flush()
+            # 教学班存在但无成员
+            tc = TeachingClass(grade=2, label="空班", subject="数学", kind="教学")
+            db.add(tc)
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            result = {"status_code": r.status_code}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status_code"] in (400, 409, 403, 404), \
+            f"无成员应返回4xx, 得到 {data['status_code']}"
+
+    def test_subject_conflict_returns_4xx(self, tmp_path):
+        """显式请求 subject 与教师冲突的教学班 → 4xx。"""
+        setup = textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import (
+                Teacher, TeachingClass, TeachingClassMember,
+            )
+            t = Teacher(subject="数学", name="数学老师")
+            db.add(t)
+            db.flush()
+            tc_math = TeachingClass(grade=2, label="数学班", subject="数学", kind="教学")
+            db.add(tc_math)
+            db.flush()
+            db.add(TeachingClassMember(teaching_class_id=tc_math.id, student_id="s1", source="manual"))
+            tc_phys = TeachingClass(grade=2, label="物理班", subject="物理", kind="教学")
+            db.add(tc_phys)
+            db.flush()
+            db.add(TeachingClassMember(teaching_class_id=tc_phys.id, student_id="s2", source="manual"))
+            db.commit()
+            phys_id = tc_phys.id
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            phys = db.query(TeachingClass).filter(TeachingClass.label == "物理班").first()
+            phys_id = phys.id
+            db.close()
+            r = client.get(f"/api/students?teaching_class_id={phys_id}")
+            result = {"status_code": r.status_code}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status_code"] in (400, 409, 403, 404), \
+            f"学科冲突应返回4xx, 得到 {data['status_code']}"
+
+    def test_no_teaching_classes_at_all_returns_4xx(self, tmp_path):
+        """教师配置了学科但无任何教学班 → 4xx。"""
+        setup = textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import Teacher
+            db.add(Teacher(subject="数学", name="数学老师"))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            result = {"status_code": r.status_code}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status_code"] in (400, 409, 403, 404), \
+            f"无教学班应返回4xx, 得到 {data['status_code']}"
+
+
+class TestCrossSubjectCompleteIsolation:
+    """不同学科教师查询时，完全不泄漏非本学科数据。
+    生物教师查不到物理、数学，也查不到主三门总分。"""
+
+    _SETUP_BIOLOGY_TEACHER = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore, TotalScore,
+        )
+        t = Teacher(subject="生物", name="生物老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="生物班", subject="生物", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in ["s1", "s2"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        # 生物成绩
+        db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="生物",
+            raw_score=88, grade_score=64, grade_percentile=0.8,
+            name="生1", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="生物",
+            raw_score=76, grade_score=55, grade_percentile=0.6,
+            name="生2", class_num=1))
+        # 物理成绩（非任教学科，必须被完全隔离）
+        for sid in ["s1", "s2"]:
+            db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="物理",
+                raw_score=50, grade_score=40, grade_percentile=0.3,
+                name=f"{sid}", class_num=1))
+        # TotalScore（主三门 + 3+3，不应泄漏）
+        for sid in ["s1", "s2"]:
+            db.add(TotalScore(exam_id=exam.id, student_id=sid, total_type="主三门",
+                total_score=300, xueji_rank=10, grade_percentile=0.8))
+            db.add(TotalScore(exam_id=exam.id, student_id=sid, total_type="3+3",
+                total_score=500, xueji_rank=5, grade_percentile=0.7))
+        db.commit()
+        db.close()
+    """)
+
+    def test_biology_teacher_list_no_physics_no_totals(self, tmp_path):
+        """生物教师列表只返回生物分，不含物理、不含总分字段。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            students = data.get("students", [])
+            s1 = [s for s in students if s["student_id"] == "s1"][0]
+            keys = set(s1.keys())
+            forbidden = {
+                "latest_total_score", "latest_xueji_rank",
+                "main_total_trend", "five_trend", "plus3_trend", "san3_trend",
+                "subject_trend", "total_score",
+            }
+            leaked = forbidden & keys
+            result = {
+                "status": "ok",
+                "teaching_subject": data.get("teaching_subject"),
+                "raw_score": s1.get("raw_score"),
+                "leaked_forbidden": sorted(leaked),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_BIOLOGY_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["teaching_subject"] == "生物"
+        assert data["raw_score"] == 88, \
+            f"生物教师应看到生物分 88, 得到 {data['raw_score']}"
+        assert not data["leaked_forbidden"], \
+            f"不应泄漏禁用字段: {data['leaked_forbidden']}"
+
+    def test_biology_teacher_profile_no_physics_no_totals(self, tmp_path):
+        """生物教师画像 score_trend 只含生物，不含物理/总分。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students/s1")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            trend = data.get("score_trend", [])
+            subjects = set(t.get("subject") for t in trend)
+            keys = set(data.keys())
+            forbidden_keys = {
+                "main_total_trend", "five_trend", "plus3_trend", "san3_trend",
+                "subject_trend", "class_rank_basis", "latest_total_score",
+                "latest_xueji_rank",
+            }
+            leaked = forbidden_keys & keys
+            result = {
+                "status": "ok",
+                "teaching_subject": data.get("teaching_subject"),
+                "trend_subjects": sorted(subjects),
+                "leaked_keys": sorted(leaked),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_BIOLOGY_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["teaching_subject"] == "生物"
+        assert "物理" not in data["trend_subjects"], \
+            f"生物教师不应看到物理: {data['trend_subjects']}"
+        assert data["trend_subjects"] == ["生物"], \
+            f"只应有生物: {data['trend_subjects']}"
+        assert not data["leaked_keys"], \
+            f"不应泄漏禁用字段: {data['leaked_keys']}"
+
+
+class TestRankBasisExplicitness:
+    """趋势点显式标注 rank_basis，区分 teaching vs none。"""
+
+    def test_rank_basis_is_teaching_when_class_scope(self, tmp_path):
+        """有教学班范围的 trend 点 rank_basis='teaching'。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students/s1")
+            assert r.status_code == 200, r.text
+            trend = r.json().get("score_trend", [])
+            assert len(trend) > 0
+            bases = set(t.get("rank_basis") for t in trend)
+            result = {"status": "ok", "bases": sorted(bases)}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert "teaching" in data["bases"], \
+            f"应有 teaching rank_basis: {data['bases']}"

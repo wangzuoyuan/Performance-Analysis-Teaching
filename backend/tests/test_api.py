@@ -209,63 +209,209 @@ def test_class_compare(client):
     assert response.status_code == 200
     assert "exams" in response.json()
 
-def test_student_not_found(client, request):
-    """学生不存在或不在教学范围内返回404（单学科化后需先有教学范围）。"""
-    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1"])
-    request.addfinalizer(cleanup)
-    response = client.get("/api/students/NOTEXIST123")
-    assert response.status_code == 404
+def test_student_not_found(tmp_path):
+    """学生不在教学范围内返回 404（隔离临时 DB，不依赖共享库）。"""
+    import json, os, subprocess, sys, textwrap
 
-def test_student_detail_returns_single_subject_trend(client, request):
-    """学生画像返回 teaching_subject 和单一 score_trend（单学科化）。
+    setup = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import Teacher, TeachingClass, TeachingClassMember
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="api班", subject="数学", kind="教学")
+        db.add(tc)
+        db.flush()
+        db.add(TeachingClassMember(teaching_class_id=tc.id, student_id="tapi-s1", source="manual"))
+        db.commit()
+        db.close()
+    """)
+    assert_code = textwrap.dedent("""\
+        r = client.get("/api/students/NOTEXIST123")
+        print(json.dumps({"status_code": r.status_code}))
+    """)
+    _api_script = textwrap.dedent("""\
+        import json, sys
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.db.models import SessionLocal
+        client = TestClient(app)
+        with open(sys.argv[1]) as f:
+            exec(f.read())
+        with open(sys.argv[2]) as f:
+            exec(f.read())
+    """)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    sf, af = tmp_path / "s.py", tmp_path / "a.py"
+    sf.write_text(setup)
+    af.write_text(assert_code)
+    env = os.environ.copy()
+    env["EXAM_TRACKER_DIR"] = str(data_dir)
+    env["EXAM_TRACKER_BACKUP_DIR"] = str(tmp_path / "bk")
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_python = os.path.join(os.path.dirname(sys.executable), "python")
+    if not os.path.exists(venv_python):
+        venv_python = sys.executable
+    proc = subprocess.run(
+        [venv_python, "-c", _api_script, str(sf), str(af)],
+        cwd=backend_dir, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, check=False,
+    )
+    assert proc.returncode == 0, f"子进程失败:\n{proc.stdout}"
+    result = json.loads(proc.stdout.strip().split("\n")[-1])
+    assert result["status_code"] == 404
 
-    替代旧的「加三学科」「五门总分趋势」测试——单学科化后不再有多学科趋势。
-    使用 _seed_minimal_exam_scope 自建范围，不依赖本地真实库。
-    """
-    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1", "tapi-s2"])
-    request.addfinalizer(cleanup)
+def test_student_detail_returns_single_subject_trend(tmp_path):
+    """学生画像返回 teaching_subject 和单一 score_trend（隔离临时 DB）。"""
+    import json, os, subprocess, sys, textwrap
 
-    response = client.get("/api/students/tapi-s1")
-    assert response.status_code == 200, response.text
-    data = response.json()
-    assert data["teaching_subject"] == "数学"
-    # 单一 score_trend，不再有旧的多科/总分字段
-    assert "score_trend" in data
-    assert "subject_trend" not in data
-    assert "five_trend" not in data
-    assert "main_total_trend" not in data
-    # score_trend 只含当前学科
-    if data["score_trend"]:
-        subjects = {p["subject"] for p in data["score_trend"]}
-        assert subjects == {"数学"}
+    setup = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam, SubjectScore,
+        )
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="api班", subject="数学", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in ["tapi-s1", "tapi-s2"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+        exam = Exam(name="tapi考试", grade=2, semester="上", exam_type="月考", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam.id, student_id="tapi-s1", subject="数学",
+            raw_score=85, name="测试1", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="tapi-s2", subject="数学",
+            raw_score=90, name="测试2", class_num=1))
+        db.commit()
+        db.close()
+    """)
+    assert_code = textwrap.dedent("""\
+        r = client.get("/api/students/tapi-s1")
+        assert r.status_code == 200, r.text
+        data = r.json()
+        subjects = {p["subject"] for p in data["score_trend"]} if data["score_trend"] else set()
+        result = {
+            "teaching_subject": data["teaching_subject"],
+            "has_score_trend": "score_trend" in data,
+            "has_subject_trend": "subject_trend" in data,
+            "has_five_trend": "five_trend" in data,
+            "has_main_total_trend": "main_total_trend" in data,
+            "subjects": sorted(subjects),
+        }
+        print(json.dumps(result))
+    """)
+    _api_script = textwrap.dedent("""\
+        import json, sys
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.db.models import SessionLocal
+        client = TestClient(app)
+        with open(sys.argv[1]) as f:
+            exec(f.read())
+        with open(sys.argv[2]) as f:
+            exec(f.read())
+    """)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    sf, af = tmp_path / "s.py", tmp_path / "a.py"
+    sf.write_text(setup)
+    af.write_text(assert_code)
+    env = os.environ.copy()
+    env["EXAM_TRACKER_DIR"] = str(data_dir)
+    env["EXAM_TRACKER_BACKUP_DIR"] = str(tmp_path / "bk")
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_python = os.path.join(os.path.dirname(sys.executable), "python")
+    if not os.path.exists(venv_python):
+        venv_python = sys.executable
+    proc = subprocess.run(
+        [venv_python, "-c", _api_script, str(sf), str(af)],
+        cwd=backend_dir, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, check=False,
+    )
+    assert proc.returncode == 0, f"子进程失败:\n{proc.stdout}"
+    result = json.loads(proc.stdout.strip().split("\n")[-1])
+    assert result["teaching_subject"] == "数学"
+    assert result["has_score_trend"] is True
+    assert result["has_subject_trend"] is False
+    assert result["has_five_trend"] is False
+    assert result["has_main_total_trend"] is False
+    if result["subjects"]:
+        assert result["subjects"] == ["数学"]
 
-def test_student_detail_excludes_empty_score_rows(client, request):
-    """无原始分/等级分的单科行不能进入 score_trend（单学科化）。"""
-    from app.db.models import SessionLocal, Exam, SubjectScore
-    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1"])
-    request.addfinalizer(cleanup)
+def test_student_detail_excludes_empty_score_rows(tmp_path):
+    """空分行不进入 score_trend（隔离临时 DB）。"""
+    import json, os, subprocess, sys, textwrap
 
-    # 给 tapi-s1 加一场只有百分位、无原始分/等级分的残留
-    db = SessionLocal()
-    try:
-        exam = db.query(Exam).filter(Exam.name == "tapi-考试").first()
+    setup = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam, SubjectScore,
+        )
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="api班", subject="数学", kind="教学")
+        db.add(tc)
+        db.flush()
+        db.add(TeachingClassMember(teaching_class_id=tc.id, student_id="tapi-s1", source="manual"))
+        db.commit()
+        exam = Exam(name="tapi考试", grade=2, semester="上", exam_type="月考", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam.id, student_id="tapi-s1", subject="数学",
+            raw_score=85, name="测试1", class_num=1))
         exam2 = Exam(name="残留考试", grade=2, semester="上", exam_type="月考", exam_date="2025-08")
         db.add(exam2)
         db.flush()
-        db.add(SubjectScore(
-            exam_id=exam2.id, student_id="tapi-s1", subject="数学",
+        db.add(SubjectScore(exam_id=exam2.id, student_id="tapi-s1", subject="数学",
             raw_score=None, grade_score=None, grade_percentile=0.5,
-            name="测试1", class_num=1,
-        ))
+            name="测试1", class_num=1))
         db.commit()
-    finally:
         db.close()
-
-    response = client.get("/api/students/tapi-s1")
-    assert response.status_code == 200
-    trend = response.json()["score_trend"]
-    exam_names = [p["exam_name"] for p in trend]
-    assert "残留考试" not in exam_names, "空分行不应进入 score_trend"
+    """)
+    assert_code = textwrap.dedent("""\
+        r = client.get("/api/students/tapi-s1")
+        assert r.status_code == 200, r.text
+        trend = r.json()["score_trend"]
+        exam_names = [p["exam_name"] for p in trend]
+        print(json.dumps({"exam_names": exam_names}))
+    """)
+    _api_script = textwrap.dedent("""\
+        import json, sys
+        from fastapi.testclient import TestClient
+        from app.main import app
+        from app.db.models import SessionLocal
+        client = TestClient(app)
+        with open(sys.argv[1]) as f:
+            exec(f.read())
+        with open(sys.argv[2]) as f:
+            exec(f.read())
+    """)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    sf, af = tmp_path / "s.py", tmp_path / "a.py"
+    sf.write_text(setup)
+    af.write_text(assert_code)
+    env = os.environ.copy()
+    env["EXAM_TRACKER_DIR"] = str(data_dir)
+    env["EXAM_TRACKER_BACKUP_DIR"] = str(tmp_path / "bk")
+    backend_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    venv_python = os.path.join(os.path.dirname(sys.executable), "python")
+    if not os.path.exists(venv_python):
+        venv_python = sys.executable
+    proc = subprocess.run(
+        [venv_python, "-c", _api_script, str(sf), str(af)],
+        cwd=backend_dir, env=env, text=True,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=60, check=False,
+    )
+    assert proc.returncode == 0, f"子进程失败:\n{proc.stdout}"
+    result = json.loads(proc.stdout.strip().split("\n")[-1])
+    assert "残留考试" not in result["exam_names"], "空分行不应进入 score_trend"
 
 def test_subject_weakness(client):
     """Step 6: 单科薄弱"""
