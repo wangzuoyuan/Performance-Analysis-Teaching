@@ -53,47 +53,52 @@ def root():
 
 @app.get("/api/teacher")
 def get_teacher():
-    """获取老师信息（延迟初始化）。教学版：返回当前教学班 + 已配置班级数；
-    保留 target_class_highN 字段以兼容旧库（不再读写）。"""
-    from app.db.models import SessionLocal, Teacher, TeachingClass
+    """获取老师信息（延迟初始化）。教学版：返回当前教学班 + 已配置班级数 +
+    任教科目 subject + subject_configured；保留 target_class_highN 字段以兼容
+    旧库（不再读写）。"""
+    from app.db.models import SessionLocal
+    from app.teaching.subject import get_teacher_profile
     db = SessionLocal()
-    teacher = db.query(Teacher).first()
-    if not teacher:
-        teacher = Teacher()
-        db.add(teacher)
-        db.commit()
-        db.refresh(teacher)
-    class_count = db.query(TeachingClass).count()
-    db.close()
-    return {
-        "id": teacher.id,
-        "name": teacher.name,
-        "current_teaching_class_id": teacher.current_teaching_class_id,
-        "class_count": class_count,
-        # 兼容旧字段（教学版不再使用）
-        "target_class_high1": teacher.target_class_high1,
-        "target_class_high2": teacher.target_class_high2,
-        "target_class_high3": teacher.target_class_high3,
-    }
+    try:
+        return get_teacher_profile(db)
+    finally:
+        db.close()
 
 @app.patch("/api/teacher")
 async def update_teacher(request: Request):
-    """更新老师姓名"""
-    from app.db.models import SessionLocal, Teacher
+    """更新老师姓名和/或任教科目。
+
+    body: {"name": "...", "subject": "..."} — 两者均可选，name 为空串清除姓名，
+    subject 经校验（trim + 支持列表）后写入。subject 非法返回 422；与既有教学班
+    冲突返回 409。
+    """
+    from app.db.models import SessionLocal
+    from app.teaching.subject import (
+        update_teacher_profile, InvalidSubjectError, SubjectConflictError,
+    )
     try:
         body = await request.json()
     except Exception:
         raise HTTPException(status_code=422, detail="invalid json")
-    name = body.get("name", "").strip()
+    name = body.get("name")
+    subject = body.get("subject")
+    # name 仅在请求中存在时处理；subject 同理。均未提供时为空更新。
+    updates = {}
+    if name is not None:
+        updates["name"] = name
+    if subject is not None:
+        updates["subject"] = subject
     db = SessionLocal()
-    teacher = db.query(Teacher).first()
-    if not teacher:
-        teacher = Teacher()
-        db.add(teacher)
-    teacher.name = name or None
-    db.commit()
-    db.close()
-    return {"ok": True, "name": name or None}
+    try:
+        try:
+            profile = update_teacher_profile(db, **updates)
+        except InvalidSubjectError as e:
+            raise HTTPException(status_code=422, detail=str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(status_code=409, detail=str(e))
+        return {"ok": True, **{k: profile[k] for k in ("name", "subject")}}
+    finally:
+        db.close()
 
 @app.post("/api/teacher/bind-class")
 async def bind_class(request: Request, class_num: Optional[int] = None, grade: int = 1):
@@ -104,6 +109,12 @@ async def bind_class(request: Request, class_num: Optional[int] = None, grade: i
 # 路由模块导入
 from app.db.models import Base, engine  # noqa
 Base.metadata.create_all(bind=engine)
+
+# 单科教学领域边界：必须先给旧 teacher 表补 subject 列（幂等）。
+# migrate_teaching() 可能通过 ORM 查询 Teacher；若顺序相反，旧库会因
+# SELECT teacher.subject 而在启动阶段报 no such column。
+from app.teaching.migrate_subject import migrate_teacher_subject  # noqa
+migrate_teacher_subject(engine)
 
 # 教学版迁移：建新表 + 补列 + 旧单班配置回填（幂等）
 from app.db.migrate_teaching import migrate_teaching  # noqa

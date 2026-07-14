@@ -118,30 +118,31 @@ class ClassCreate(BaseModel):
 
 @router.post("/classes")
 def create_class(payload: ClassCreate, db=Depends(get_db)):
-    from app.db.models import TeachingClass
-
-    label = payload.label.strip()
-    if not label:
-        raise HTTPException(400, "label 不能为空")
-    exists = (
-        db.query(TeachingClass)
-        .filter(TeachingClass.grade == payload.grade, TeachingClass.label == label)
-        .first()
+    from app.teaching.subject import (
+        create_class_with_subject,
+        InvalidSubjectError,
+        SubjectConflictError,
+        SubjectNotConfiguredError,
     )
-    if exists:
-        raise HTTPException(409, f"{payload.grade} 年级已存在教学班「{label}」")
-    tc = TeachingClass(
-        grade=payload.grade,
-        label=label,
-        subject=payload.subject,
-        kind=payload.kind if payload.kind in ("行政", "教学") else "教学",
-        note=payload.note,
-        sort_order=payload.sort_order,
-    )
-    db.add(tc)
-    db.commit()
-    db.refresh(tc)
-    return _class_payload(db, tc)
+    try:
+        return create_class_with_subject(
+            db,
+            grade=payload.grade,
+            label=payload.label,
+            kind=payload.kind,
+            note=payload.note,
+            sort_order=payload.sort_order,
+            subject=payload.subject,
+        )
+    except SubjectNotConfiguredError as e:
+        raise HTTPException(409, str(e))
+    except SubjectConflictError as e:
+        raise HTTPException(409, str(e))
+    except InvalidSubjectError as e:
+        raise HTTPException(422, str(e))
+    except ValueError as e:
+        # label 为空 / 同年级同名
+        raise HTTPException(400 if "不能为空" in str(e) else 409, str(e))
 
 
 class ClassUpdate(BaseModel):
@@ -154,22 +155,30 @@ class ClassUpdate(BaseModel):
 
 @router.put("/classes/{tc_id}")
 def update_class(tc_id: int, payload: ClassUpdate, db=Depends(get_db)):
-    from app.db.models import TeachingClass
-
-    tc = _get_or_404(db, TeachingClass, id=tc_id)
-    if payload.label is not None:
-        tc.label = payload.label.strip() or tc.label
-    if payload.subject is not None:
-        tc.subject = payload.subject
-    if payload.kind is not None and payload.kind in ("行政", "教学"):
-        tc.kind = payload.kind
-    if payload.note is not None:
-        tc.note = payload.note
-    if payload.sort_order is not None:
-        tc.sort_order = payload.sort_order
-    db.commit()
-    db.refresh(tc)
-    return _class_payload(db, tc)
+    from app.teaching.subject import (
+        update_class_subject_aware,
+        InvalidSubjectError,
+        SubjectConflictError,
+        SubjectNotConfiguredError,
+    )
+    try:
+        return update_class_subject_aware(
+            db,
+            tc_id,
+            label=payload.label,
+            subject=payload.subject,
+            kind=payload.kind,
+            note=payload.note,
+            sort_order=payload.sort_order,
+        )
+    except SubjectNotConfiguredError as e:
+        raise HTTPException(409, str(e))
+    except SubjectConflictError as e:
+        raise HTTPException(409, str(e))
+    except InvalidSubjectError as e:
+        raise HTTPException(422, str(e))
+    except ValueError as e:
+        raise HTTPException(404, str(e))
 
 
 @router.delete("/classes/{tc_id}")
@@ -297,15 +306,8 @@ def candidate_classes(grade: int, db=Depends(get_db)):
 
 @router.get("/current")
 def get_current(db=Depends(get_db)):
-    from app.db.models import Teacher, TeachingClass
-
-    teacher = db.query(Teacher).first()
-    tc_id = teacher.current_teaching_class_id if teacher else None
-    tc = db.query(TeachingClass).filter(TeachingClass.id == tc_id).first() if tc_id else None
-    return {
-        "teaching_class_id": tc_id,
-        "class": _class_payload(db, tc) if tc else None,
-    }
+    from app.teaching.subject import get_current_class_payload
+    return get_current_class_payload(db)
 
 
 class CurrentPayload(BaseModel):

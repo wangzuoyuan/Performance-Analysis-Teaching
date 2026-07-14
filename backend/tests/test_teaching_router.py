@@ -13,6 +13,27 @@ from app.main import app
 client = TestClient(app)
 
 
+@pytest.fixture(autouse=True)
+def _ensure_teacher_subject():
+    """单科教学领域边界：创建教学班前需教师已配置 subject。
+
+    旧测试通过 make_class 创建班时提交 subject（如 "物理"），现在后端要求
+    教师先配置同一学科。本 fixture 在模块级设置教师 subject="物理" 并在结束后
+    恢复，保证旧测试不改业务参数即可继续运行。
+    """
+    original = client.get("/api/teacher").json().get("subject")
+    client.patch("/api/teacher", json={"subject": "物理"})
+    yield
+    # 恢复原状：清除 subject（避免影响其他测试模块对共享库的假设）
+    from app.db.models import SessionLocal, Teacher
+    db = SessionLocal()
+    t = db.query(Teacher).first()
+    if t:
+        t.subject = original
+        db.commit()
+    db.close()
+
+
 def _unique_label(prefix: str = "tc") -> str:
     return f"{prefix}-{int(time.time() * 1000)}"
 
@@ -23,9 +44,13 @@ def make_class():
 
     def _make(grade: int = 2, label: str | None = None, kind: str = "教学", subject: str | None = None):
         label = label or _unique_label()
+        # subject 兼容：旧测试可能传 "物理"（与教师一致则通过）；None 则继承教师学科
+        payload = {"grade": grade, "label": label, "kind": kind}
+        if subject is not None:
+            payload["subject"] = subject
         r = client.post(
             "/api/teaching/classes",
-            json={"grade": grade, "label": label, "kind": kind, "subject": subject},
+            json=payload,
         )
         assert r.status_code == 200, r.text
         created.append(r.json()["id"])

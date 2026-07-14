@@ -28,6 +28,8 @@ class Teacher(Base):
     target_class_high3 = Column(Integer, nullable=True)
     # 教学版：上次选中的「当前教学班」，用于默认视图与侧栏展示。
     current_teaching_class_id = Column(Integer, nullable=True)
+    # 教学版：教师唯一任教科目（单科教学领域边界），是所有后续分析的唯一来源。
+    subject = Column(String, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 class Exam(Base):
