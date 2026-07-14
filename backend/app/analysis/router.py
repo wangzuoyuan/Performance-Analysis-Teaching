@@ -738,9 +738,6 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
             .all()
         )
 
-        if not subject_scores:
-            raise HTTPException(404, "该学生无当前学科成绩记录")
-
         # 考试集合由这些行决定（不依赖 TotalScore）
         exam_ids = {s.exam_id for s in subject_scores}
         exams = (
@@ -748,19 +745,35 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
             .filter(Exam.id.in_(exam_ids))
             .order_by(Exam.grade, Exam.exam_date)
             .all()
-        )
+        ) if exam_ids else []
         exam_map = {e.id: e for e in exams}
 
-        grades = set(e.grade for e in exams)
-        has_cross_year = len(grades) > 1
+        # grades 来源：有效成绩考试的年级 + 教学班成员元数据年级（补全无成绩成员）
+        from app.analysis.scope import student_class_map_multi
+        tc_grade_map = student_class_map_multi(db, None)
+        member_grades: set[int] = set()
+        for sid in ids:
+            for info in tc_grade_map.get(sid, []):
+                if info["grade"] is not None:
+                    member_grades.add(info["grade"])
+        exam_grades = set(e.grade for e in exams if e.grade is not None)
+        grades = exam_grades | member_grades
+        has_cross_year = len(exam_grades) > 1
 
         name_row = db.query(SubjectScore).filter(
             SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
         ).first()
         name = name_row.name if name_row and name_row.name else student_id
 
+        # 显式 teaching_class_id：当前年级的 label/tc/rank 强制使用该班
+        explicit_tc_obj = None
+        if teaching_class_id is not None:
+            from app.db.models import TeachingClass
+            explicit_tc_obj = db.query(TeachingClass).filter(
+                TeachingClass.id == teaching_class_id
+            ).first()
+
         # scope_rank：按对应教学班成员集合和当前学科有效分数计算
-        # 确定该学生每场考试对应的教学班成员集合（按年级）
         label_map_cache: dict[int, dict] = {}
         scope_rank_by_exam: dict[int, int | None] = {}
         rank_basis_by_exam: dict[int, str] = {}
@@ -774,27 +787,31 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
                 label_map_cache[grade] = student_class_map(db, grade)
             lm = label_map_cache[grade]
 
-            # 该考试该学生使用的学号 → 教学班
-            tc_info = lm.get(s.student_id)
-            if not tc_info:
-                # 该学号未在教学班成员中，尝试同组其他学号
-                for sid in ids:
-                    info = lm.get(sid)
-                    if info:
-                        tc_info = info
-                        break
-            if not tc_info:
-                scope_rank_by_exam[s.exam_id] = None
-                rank_basis_by_exam[s.exam_id] = "none"
-                continue
+            # 显式班级优先：若该考试年级与显式班级年级匹配，强制用该班
+            if explicit_tc_obj and explicit_tc_obj.grade == grade:
+                peer_ids = members_of(db, explicit_tc_obj.id)
+                if not peer_ids:
+                    scope_rank_by_exam[s.exam_id] = None
+                    rank_basis_by_exam[s.exam_id] = "none"
+                    continue
+            else:
+                tc_info = lm.get(s.student_id)
+                if not tc_info:
+                    for sid in ids:
+                        info = lm.get(sid)
+                        if info:
+                            tc_info = info
+                            break
+                if not tc_info:
+                    scope_rank_by_exam[s.exam_id] = None
+                    rank_basis_by_exam[s.exam_id] = "none"
+                    continue
+                peer_ids = members_of(db, tc_info[1])
+                if not peer_ids:
+                    scope_rank_by_exam[s.exam_id] = None
+                    rank_basis_by_exam[s.exam_id] = "none"
+                    continue
 
-            peer_ids = members_of(db, tc_info[1])
-            if not peer_ids:
-                scope_rank_by_exam[s.exam_id] = None
-                rank_basis_by_exam[s.exam_id] = "none"
-                continue
-
-            # 当前学科该考试 peer_ids 中的有效分数行（raw_score 或 grade_score 至少一个非空）
             peer_score_rows = (
                 db.query(SubjectScore)
                 .filter(
@@ -812,10 +829,17 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
             rank_basis_by_exam[s.exam_id] = "teaching"
 
         # 头部展示：当前（最新）年级的教学班标签
-        latest_grade = max(grades) if grades else None
+        latest_grade = max(exam_grades) if exam_grades else (
+            explicit_tc_obj.grade if explicit_tc_obj else (
+                max(member_grades) if member_grades else None
+            )
+        )
         current_label = None
         current_tc_id = None
-        if latest_grade is not None:
+        if explicit_tc_obj and explicit_tc_obj.grade == latest_grade:
+            current_label = explicit_tc_obj.label
+            current_tc_id = explicit_tc_obj.id
+        elif latest_grade is not None:
             if latest_grade not in label_map_cache:
                 label_map_cache[latest_grade] = student_class_map(db, latest_grade)
             sids_latest = {
@@ -841,12 +865,14 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
             subject_scores, key=lambda s: exam_sort_key(s.exam_id)
         )
 
-        # 每点的 class_label：该考试该学号在教学班映射中的 label
+        # 每点的 class_label：显式班级年级匹配时优先该班，否则该考试该学号在教学班映射
         def _class_label_for_point(s):
             exam = exam_map.get(s.exam_id)
             if not exam:
                 return None
             grade = exam.grade
+            if explicit_tc_obj and explicit_tc_obj.grade == grade:
+                return explicit_tc_obj.label
             if grade not in label_map_cache:
                 label_map_cache[grade] = student_class_map(db, grade)
             lm = label_map_cache[grade]
@@ -1175,8 +1201,10 @@ async def list_students(
                 .first()
             )
 
-        # 每组取最新年级学号作代表（只查当前学科，禁止其他学科污染 grades）
-        sid_grade = {
+        # 每组取最新年级学号作代表。sid_grade 只取当前学科有真实分数（raw 或
+        # grade_score 非空）的记录，空分残留不得影响 grades；无成绩成员的 grade
+        # 由教学班元数据补全。
+        sid_grade: dict[str, int] = {
             row[0]: row[1]
             for row in (
                 db.query(SubjectScore.student_id, Exam.grade)
@@ -1184,11 +1212,30 @@ async def list_students(
                 .filter(
                     SubjectScore.student_id.in_(scope_ids),
                     SubjectScore.subject == subject,
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None),
                 )
                 .distinct().all()
             )
         }
+        # 用教学班成员元数据补全无成绩成员的 grade（保证花名册有 grade 维度）
+        for sid in scope_ids:
+            if sid not in sid_grade:
+                infos = member_class_map.get(sid, [])
+                for info in infos:
+                    if grade is None or info["grade"] == grade:
+                        sid_grade[sid] = info["grade"]
+                        break
+
+        # label_map：显式 teaching_class_id 时优先该班，否则取第一个匹配年级的
         label_map = student_class_map(db, grade)
+        # 构建显式班级时的 (label, tc_id) 供学生行优先使用
+        explicit_tc_info: tuple[str, int] | None = None
+        if teaching_class_id is not None:
+            from app.db.models import TeachingClass
+            tc_obj = db.query(TeachingClass).filter(TeachingClass.id == teaching_class_id).first()
+            if tc_obj:
+                explicit_tc_info = (tc_obj.label, tc_obj.id)
 
         # 最新考试当前学科成绩（按代表学号或同组任一学号）
         latest_scores: dict[str, SubjectScore] = {}
@@ -1203,15 +1250,16 @@ async def list_students(
                 latest_scores[s.student_id] = s
 
         # scope_rank：按每个学生所属教学班独立计算（不混排全年级）
-        # 选修学科（高二/三物化生政史地）用 grade_score，其他用 raw_score
+        # 显式 teaching_class_id 时，强制所有成员归属该班
         scope_rank_map: dict[str, int] = {}
         if latest_exam:
             exam_grade_val = latest_exam.grade
-            # 收集每个学生对应的 teaching_class_id（取第一个匹配 scope 的）
             sid_to_tc: dict[str, int] = {}
             for sid in scope_ids:
+                if teaching_class_id is not None:
+                    sid_to_tc[sid] = teaching_class_id
+                    continue
                 infos = member_class_map.get(sid, [])
-                # 优先匹配请求年级的教学班
                 matched = None
                 for info in infos:
                     if grade is None or info["grade"] == grade:
@@ -1222,14 +1270,12 @@ async def list_students(
                 if matched is not None:
                     sid_to_tc[sid] = matched
 
-            # 按 teaching_class_id 分组，各组内独立排名
             tc_to_member_ids: dict[int, set[str]] = {}
             for sid, tc_id in sid_to_tc.items():
                 tc_to_member_ids.setdefault(tc_id, set()).add(sid)
 
             extract_value, lower_is_better = _rank_key_for_subject(subject, exam_grade_val)
             for tc_id, member_ids in tc_to_member_ids.items():
-                # 最新考试当前学科该教学班成员有效分数
                 tc_scores = [
                     latest_scores[sid] for sid in member_ids
                     if sid in latest_scores
@@ -1244,7 +1290,11 @@ async def list_students(
                 SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
             ).first()
             name = name_row[0] if name_row and name_row[0] else rep
-            label, tc_id = label_map.get(rep, (None, None))
+            # 显式班级优先；否则用 label_map（按 sort_order 取第一个）
+            if explicit_tc_info:
+                label, tc_id = explicit_tc_info
+            else:
+                label, tc_id = label_map.get(rep, (None, None))
             s = latest_scores.get(rep) or next(
                 (latest_scores.get(sid) for sid in ids if latest_scores.get(sid)), None
             )

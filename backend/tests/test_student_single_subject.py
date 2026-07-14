@@ -1021,3 +1021,207 @@ class TestStudentProfileScopeRankFix:
         assert data["status"] == "ok"
         assert data["scope_rank"] == 1, \
             f"物理 s1 grade=40 同 s2 应并列第1, 得到 {data['scope_rank']}"
+
+
+# ════════════════════════════════════════════════════════════════
+#  第三轮审查修复：显式 teaching_class_id 优先 + 空分残留隔离
+# ════════════════════════════════════════════════════════════════
+
+
+class TestExplicitClassPrecedence:
+    """重复学生 x 同属 A/B 班，显式传 teaching_class_id=B 时，B 班优先。"""
+
+    _SETUP_DUP_AB = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore,
+        )
+        t = Teacher(subject="物理", name="物理老师")
+        db.add(t)
+        db.flush()
+
+        # A班: x, b1 ; B班: x, b2 （x 同属两班）
+        for label, sids in [("A班", ["x", "b1"]), ("B班", ["x", "b2"])]:
+            tc = TeachingClass(grade=2, label=label, subject="物理", kind="教学")
+            db.add(tc)
+            db.flush()
+            for sid in sids:
+                db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        # A班 x grade_score=50, b1=60 ; B班 x grade_score=50, b2=70
+        db.add(SubjectScore(exam_id=exam.id, student_id="x", subject="物理",
+            raw_score=80, grade_score=50, grade_percentile=0.5,
+            name="重叠生", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="b1", subject="物理",
+            raw_score=85, grade_score=60, grade_percentile=0.4,
+            name="B1", class_num=1))
+        db.add(SubjectScore(exam_id=exam.id, student_id="b2", subject="物理",
+            raw_score=90, grade_score=70, grade_percentile=0.3,
+            name="B2", class_num=1))
+        db.commit()
+        db.close()
+    """)
+
+    def test_list_explicit_b_rank(self, tmp_path):
+        """显式请求 B班时，x 的 scope_rank 应在 B班范围（x=50,b2=70）→ b2=1,x=2。
+        而非 A班范围（x=50,b1=60）→ b1=1,x=2（碰巧也=2，但范围不同）。
+        我们验证 b2 也在列表且排名为1，证明范围是 B。"""
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            b = db.query(TeachingClass).filter(TeachingClass.label == "B班").first()
+            b_id = b.id
+            db.close()
+            r = client.get(f"/api/students?teaching_class_id={b_id}")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            by_id = {s["student_id"]: s for s in students}
+            result = {
+                "status": "ok",
+                "has_b2": "b2" in by_id,
+                "has_b1": "b1" in by_id,
+                "has_x": "x" in by_id,
+                "x_rank": by_id.get("x", {}).get("scope_rank"),
+                "b2_rank": by_id.get("b2", {}).get("scope_rank"),
+                "x_label": by_id.get("x", {}).get("class_label"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_DUP_AB, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["has_b2"], f"B班请求应含 b2: {data}"
+        assert not data["has_b1"], f"B班请求不应含 A班 b1: {data}"
+        assert data["b2_rank"] == 1, f"b2 grade=70 在B班应排第1: {data}"
+        assert data["x_rank"] == 2, f"x grade=50 在B班应排第2: {data}"
+
+    def test_detail_explicit_b_label_and_rank(self, tmp_path):
+        """显式请求 B班时，画像 x 的 class_label 应为 'B班'，
+        teaching_class_id 为 B班 id，scope_rank 在 B班范围内。"""
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            a = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            b = db.query(TeachingClass).filter(TeachingClass.label == "B班").first()
+            a_id, b_id = a.id, b.id
+            db.close()
+            r = client.get(f"/api/students/x?teaching_class_id={b_id}")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            trend = data.get("score_trend", [])
+            qizhong = [t for t in trend if t["exam_name"] == "期中"][0]
+            result = {
+                "status": "ok",
+                "class_label": data.get("class_label"),
+                "teaching_class_id": data.get("teaching_class_id"),
+                "point_label": qizhong.get("class_label"),
+                "scope_rank": qizhong.get("scope_rank"),
+                "expected_label": "B班",
+                "expected_tc": b_id,
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_DUP_AB, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["class_label"] == "B班", \
+            f"显式 B班请求，顶层 class_label 应为 B班, 得到 {data['class_label']}"
+        assert data["teaching_class_id"] == data["expected_tc"], \
+            f"显式 B班请求，teaching_class_id 应为 B班 id"
+        assert data["point_label"] == "B班", \
+            f"显式 B班请求，趋势点 class_label 应为 B班, 得到 {data['point_label']}"
+        assert data["scope_rank"] == 2, \
+            f"x grade=50 在B班(b2=70)应排第2, 得到 {data['scope_rank']}"
+
+
+class TestEmptyScoreResidueIsolation:
+    """合法成员在当前年级无真实分，但其他年级有空分残留 → grades 应来自
+    TeachingClass 元数据，空分残留不得污染 grades/代表学号。"""
+
+    _SETUP_RESIDUE = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore,
+        )
+        t = Teacher(subject="物理", name="物理老师")
+        db.add(t)
+        db.flush()
+
+        tc = TeachingClass(grade=2, label="A班", subject="物理", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in ["s1", "s2", "s5"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+
+        # 高二期中：s1/s2 有物理真实分，s5 无
+        exam2 = Exam(name="高二期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam2)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam2.id, student_id="s1", subject="物理",
+            raw_score=80, grade_score=60, grade_percentile=0.5, name="S1", class_num=1))
+        db.add(SubjectScore(exam_id=exam2.id, student_id="s2", subject="物理",
+            raw_score=70, grade_score=55, grade_percentile=0.4, name="S2", class_num=1))
+        # s5 高二期中无物理行
+
+        # 高三物理考试：s5 只有 percentile 残留（raw=null, grade_score=null）
+        exam3 = Exam(name="高三残留", grade=3, semester="上", exam_type="月考", exam_date="2026-09")
+        db.add(exam3)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam3.id, student_id="s5", subject="物理",
+            raw_score=None, grade_score=None, grade_percentile=0.3,
+            name="S5", class_num=1))
+        db.commit()
+        db.close()
+    """)
+
+    def test_empty_score_residue_not_in_grades(self, tmp_path):
+        """s5 是 A班(grade=2)合法成员但无高二物理真实分，只有高三 percentile 残留。
+        grades 应来自 TeachingClass 元数据 [2]，不应包含高三(3)。
+        残留行也不应成为代表学号选取的依据。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            s5 = [s for s in students if s["student_id"] == "s5"]
+            result = {
+                "status": "ok",
+                "has_s5": len(s5) > 0,
+                "grades": s5[0].get("grades") if s5 else None,
+                "raw_score": s5[0].get("raw_score") if s5 else None,
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_RESIDUE, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["has_s5"], f"s5 是 A班合法成员应在花名册: {data}"
+        assert data["grades"] == [2], \
+            f"s5 grades 应来自 TeachingClass=[2], 不含高三残留: {data['grades']}"
+        assert data["raw_score"] is None, \
+            f"s5 无高二物理真实分，raw_score 应为 null: {data['raw_score']}"
+
+    def test_empty_score_residue_not_in_profile_grades(self, tmp_path):
+        """s5 画像的 grades 也应来自 TeachingClass 元数据 [2]，
+        高三 percentile 残留不应污染 grades。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students/s5")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            result = {
+                "status": "ok",
+                "grades": data.get("grades"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_RESIDUE, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["grades"] == [2], \
+            f"s5 画像 grades 应来自 TeachingClass=[2]: {data['grades']}"
