@@ -8,9 +8,7 @@ import {
   ChevronRight,
   ClipboardList,
   Hash,
-  Loader2,
   Search,
-  Trash2,
   TrendingUp,
   Upload,
 } from 'lucide-react'
@@ -24,14 +22,6 @@ import {
   CardHeader,
   CardTitle,
 } from '@/components/ui/card'
-import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
 import { Skeleton } from '@/components/ui/skeleton'
 import {
@@ -108,9 +98,6 @@ export default function ExamListPage() {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [scopeError, setScopeError] = useState<string | null>(null)
-  const [pendingDelete, setPendingDelete] = useState<Exam | null>(null)
-  const [deleting, setDeleting] = useState(false)
-  const [deleteError, setDeleteError] = useState<string | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -150,31 +137,6 @@ export default function ExamListPage() {
       cancelled = true
     }
   }, [current])
-
-  async function handleDelete() {
-    if (!pendingDelete) return
-    setDeleting(true)
-    setDeleteError(null)
-    try {
-      const res = await fetch(`/api/exams/${pendingDelete.id}`, { method: 'DELETE' })
-      if (!res.ok) {
-        const body = await res.json().catch(() => null)
-        throw new Error(body?.detail || `删除失败 (${res.status})`)
-      }
-      const deletedId = pendingDelete.id
-      setExams((prev) => prev.filter((e) => e.id !== deletedId))
-      setStatsById((prev) => {
-        const next = { ...prev }
-        delete next[deletedId]
-        return next
-      })
-      setPendingDelete(null)
-    } catch (err) {
-      setDeleteError(err instanceof Error ? err.message : String(err))
-    } finally {
-      setDeleting(false)
-    }
-  }
 
   const visibleExams = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -282,7 +244,6 @@ export default function ExamListPage() {
                         <TableHead className="w-32 text-right">最高 / 最低</TableHead>
                         <TableHead className="w-32 text-right">{subjectLabel}名次</TableHead>
                         <TableHead className="w-12" />
-                        <TableHead className="w-12" />
                       </TableRow>
                     </TableHeader>
                     <TableBody>
@@ -326,19 +287,6 @@ export default function ExamListPage() {
                                 <ChevronRight className="h-4 w-4" />
                               </Link>
                             </TableCell>
-                            <TableCell>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  setDeleteError(null)
-                                  setPendingDelete(exam)
-                                }}
-                                aria-label={`删除${exam.name}`}
-                                className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-danger-50 hover:text-danger-500"
-                              >
-                                <Trash2 className="h-4 w-4" />
-                              </button>
-                            </TableCell>
                           </TableRow>
                         )
                       })}
@@ -350,57 +298,6 @@ export default function ExamListPage() {
           </Card>
         </>
       )}
-
-      <Dialog
-        open={pendingDelete !== null}
-        onOpenChange={(open) => {
-          if (!open && !deleting) {
-            setPendingDelete(null)
-            setDeleteError(null)
-          }
-        }}
-      >
-        <DialogContent>
-          <DialogHeader>
-            <DialogTitle>删除考试</DialogTitle>
-            <DialogDescription>
-              确认删除「{pendingDelete?.name}」？该考试的学生成绩、班级均分与上传记录都会一并清除，操作不可撤销。
-            </DialogDescription>
-          </DialogHeader>
-          {deleteError ? (
-            <p className="text-sm text-danger-500">{deleteError}</p>
-          ) : null}
-          <DialogFooter>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setPendingDelete(null)
-                setDeleteError(null)
-              }}
-              disabled={deleting}
-            >
-              取消
-            </Button>
-            <Button
-              onClick={handleDelete}
-              disabled={deleting}
-              className="bg-danger-500 text-white hover:bg-danger-500/90"
-            >
-              {deleting ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin" />
-                  删除中…
-                </>
-              ) : (
-                <>
-                  <Trash2 className="h-4 w-4" />
-                  确认删除
-                </>
-              )}
-            </Button>
-          </DialogFooter>
-        </DialogContent>
-      </Dialog>
     </div>
   )
 }

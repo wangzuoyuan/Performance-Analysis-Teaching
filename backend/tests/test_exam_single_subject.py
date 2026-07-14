@@ -123,12 +123,12 @@ class TestResolveExamContext:
         db.close()
 
     def test_invalid_teaching_class_id_raises(self):
-        """不存在的 teaching_class_id 必须抛错，不能静默退化为全年级。"""
+        """不存在的 teaching_class_id 必须抛 ValueError，不能静默退化为全年级。"""
         db = _mem_db()
         _setup_teacher_with_classes(db, "数学", [("A班", ["s1"], 2)])
         from app.analysis.exam_context import resolve_exam_context
 
-        with pytest.raises((ValueError, Exception)):
+        with pytest.raises(ValueError):
             resolve_exam_context(db, teaching_class_id=99999)
         db.close()
 
@@ -341,6 +341,38 @@ class TestExamsListSingleSubject:
         proc = _run_isolated_api_test(tmp_path, _SETUWITH_TOTALS, assert_code)
         data = json.loads(proc.stdout.strip().split("\n")[-1])
         assert data["status"] == "ok"
+
+    def test_exam_with_only_percentile_excluded(self, tmp_path):
+        """当前学科只有 grade_percentile、raw_score 和 grade_score 均为空的考试不出现在列表。"""
+        setup = _SETUWITH_TOTALS + textwrap.dedent("""\
+            # 考试3: 数学只有百分位、无原始分和等级分（残留行）
+            db = SessionLocal()
+            from app.db.models import Exam, SubjectScore
+            exam3 = Exam(name="百分位残留", grade=2, semester="上", exam_type="月考", exam_date="2025-09")
+            db.add(exam3)
+            db.flush()
+            for i, sid in enumerate(["s1","s2","s3"], 1):
+                db.add(SubjectScore(exam_id=exam3.id, student_id=sid, subject="数学",
+                    raw_score=None, grade_score=None, grade_percentile=0.8-i*0.1,
+                    name=f"学生{i}", class_num=1, xueji=252000+i))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            exam_names = [e["name"] for e in data["exams"]]
+            assert "期中" in exam_names              # 有真实分数 → 出现
+            assert "百分位残留" not in exam_names     # 只有百分位 → 隐藏
+            result = {"status": "ok", "exam_names": exam_names}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert "百分位残留" not in data["exam_names"], \
+            f"只有百分位的考试不应出现: {data}"
 
 
 class TestExamDetailSingleSubject:
@@ -566,3 +598,441 @@ class TestExamDetailSingleSubject:
         assert not data["has_ghost"], f"幽灵学生不应出现: {data}"
         assert "ghost" not in data["student_ids"], \
             f"幽灵学生不应在 students 列表: {data}"
+
+    def test_empty_score_rows_excluded_from_detail(self, tmp_path):
+        """当前学科 raw_score 与 grade_score 均为空的残留行（学生在教学班范围内）
+        不进入 students / total_students / 分布。"""
+        setup = _SETUWITH_TOTALS + textwrap.dedent("""\
+            # empty1 是 A 班成员，但期中数学只有百分位、无原始分/等级分（残留行）
+            db = SessionLocal()
+            from app.db.models import Exam, SubjectScore, TeachingClass, TeachingClassMember
+            exam1 = db.query(Exam).filter(Exam.name == "期中").first()
+            a_tc = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            db.add(TeachingClassMember(teaching_class_id=a_tc.id, student_id="empty1", source="manual"))
+            db.add(SubjectScore(exam_id=exam1.id, student_id="empty1", subject="数学",
+                raw_score=None, grade_score=None, grade_percentile=0.5,
+                name="空分学生", class_num=1, xueji=252099))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            r2 = client.get(f"/api/exams/{exam_id}")
+            assert r2.status_code == 200, r2.text
+            detail = r2.json()
+            student_ids = [s["student_id"] for s in detail.get("students", [])]
+            total = detail.get("stats", {}).get("total_students")
+            result = {
+                "status": "ok",
+                "student_ids": sorted(student_ids),
+                "total_students": total,
+                "has_empty1": "empty1" in student_ids,
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert not data["has_empty1"], f"空分行学生不应出现在 students: {data}"
+        assert "empty1" not in data["student_ids"], \
+            f"空分行学生不应在 students 列表: {data}"
+        # 期中原始 5 人（s1-s5），空分行不应使 total_students 变成 6
+        assert data["total_students"] == 5, \
+            f"total_students 应为 5（不含空分行）, 得到 {data['total_students']}"
+
+
+# ════════════════════════════════════════════════════════════════
+#  补充覆盖（任务要求中未覆盖的视角）
+# ════════════════════════════════════════════════════════════════
+
+# 物理教师 fixture：同样的考试数据，但教师=物理
+_SETUP_PHYSICS_TEACHER = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore,
+    )
+
+    t = Teacher(subject="物理", name="物理老师")
+    db.add(t)
+    db.flush()
+
+    for label, sids in [("A班", ["s1","s2","s3"]), ("B班", ["s4","s5"])]:
+        tc = TeachingClass(grade=2, label=label, subject="物理", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in sids:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+    db.commit()
+
+    # 考试1: 有物理和数学成绩
+    exam1 = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam1)
+    db.flush()
+    for i, sid in enumerate(["s1","s2","s3","s4","s5"], 1):
+        db.add(SubjectScore(exam_id=exam1.id, student_id=sid, subject="物理",
+            raw_score=50+i, name=f"学生{i}", class_num=1))
+    for i, sid in enumerate(["s1","s2","s3","s4","s5"], 1):
+        db.add(SubjectScore(exam_id=exam1.id, student_id=sid, subject="数学",
+            raw_score=80+i, name=f"学生{i}", class_num=1))
+    db.commit()
+
+    # 考试2: 只有数学成绩（物理老师不应看到）
+    exam2 = Exam(name="数学月考", grade=2, semester="上", exam_type="月考", exam_date="2025-10")
+    db.add(exam2)
+    db.flush()
+    for i, sid in enumerate(["s1","s2","s3","s4","s5"], 1):
+        db.add(SubjectScore(exam_id=exam2.id, student_id=sid, subject="数学",
+            raw_score=70+i, name=f"学生{i}", class_num=1))
+    db.commit()
+
+    db.close()
+""")
+
+
+class TestClassAverageScopeIsolation:
+    """class_averages 范围隔离：选择 A 班时只返回 A 班当前学科均分，
+    不返回 B 班或其他班的官方 ClassAverage 行；全部模式只返回教师所教教学班
+    范围内的当前学科均分，不包含 total_averages 或其他学科键。"""
+
+    # 双官方均分 fixture：A班/B班各有自己的 ClassAverage 行（不同数学均分）
+    _SETUP_DUAL_OFFICIAL = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore, ClassAverage,
+        )
+
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t)
+        db.flush()
+
+        for label, sids, cnum in [("A班", ["s1","s2","s3"], 1), ("B班", ["s4","s5"], 2)]:
+            tc = TeachingClass(grade=2, label=label, subject="数学", kind="教学")
+            db.add(tc)
+            db.flush()
+            for sid in sids:
+                db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        # A班数学：81,82,83 → 均分 82；B班数学：84,85 → 均分 84.5
+        for i, sid in enumerate(["s1","s2","s3"], 1):
+            db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="数学",
+                raw_score=80+i, grade_score=70+i*0.5, name=f"A学生{i}", class_num=1, xueji=252000+i))
+        for i, sid in enumerate(["s4","s5"], 1):
+            db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="数学",
+                raw_score=83+i, grade_score=68+i*0.5, name=f"B学生{i}", class_num=2, xueji=252010+i))
+        # 官方 ClassAverage：A班数学均分 82，B班数学均分 84.5（不同值便于辨认泄漏）
+        db.add(ClassAverage(exam_id=exam.id, class_num=1, class_label="A班",
+            class_type="平行", teacher_name="A老师",
+            subject_averages={"数学": 82, "物理": 50},
+            total_averages={"主三门": 280}))
+        db.add(ClassAverage(exam_id=exam.id, class_num=2, class_label="B班",
+            class_type="平行", teacher_name="B老师",
+            subject_averages={"数学": 84.5, "物理": 55},
+            total_averages={"主三门": 290}))
+        db.commit()
+        db.close()
+    """)
+
+    @staticmethod
+    def _get_qizhong_id_and_a_class():
+        return textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            a = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            a_id = a.id
+            db.close()
+        """)
+
+    def test_select_class_a_returns_only_a_class_average(self, tmp_path):
+        """选择 A 教学班时 class_averages 只返回 A 班行，不返回 B 班行。"""
+        assert_code = self._get_qizhong_id_and_a_class() + textwrap.dedent("""\
+            r2 = client.get(f"/api/exams/{exam_id}?teaching_class_id={a_id}")
+            assert r2.status_code == 200, r2.text
+            cas = r2.json().get("class_averages", [])
+            labels = [c.get("class_label") for c in cas]
+            result = {
+                "status": "ok",
+                "labels": labels,
+                "has_B": "B班" in labels,
+                "count": len(cas),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_DUAL_OFFICIAL, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert not data["has_B"], \
+            f"选择 A 班时不应返回 B 班 class_average: {data}"
+        assert data["count"] == 1, \
+            f"选择 A 班时应只有 1 行 class_average, 得到 {data['count']}"
+
+    def test_select_class_a_no_total_averages_or_other_subject(self, tmp_path):
+        """选择 A 班时 class_averages 行只含当前学科键，无 total_averages/其他学科。"""
+        assert_code = self._get_qizhong_id_and_a_class() + textwrap.dedent("""\
+            r2 = client.get(f"/api/exams/{exam_id}?teaching_class_id={a_id}")
+            assert r2.status_code == 200, r2.text
+            cas = r2.json().get("class_averages", [])
+            subj_keys = set()
+            has_total = False
+            for ca in cas:
+                sa = ca.get("subject_averages") or {}
+                subj_keys |= set(sa.keys())
+                if ca.get("total_averages") is not None:
+                    has_total = True
+            result = {
+                "subj_keys": sorted(subj_keys),
+                "has_total_averages": has_total,
+                "has_physics": "物理" in subj_keys,
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_DUAL_OFFICIAL, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert not data["has_total_averages"], \
+            f"不应有 total_averages: {data}"
+        assert not data["has_physics"], \
+            f"不应含物理学科: {data}"
+        assert "数学" in data["subj_keys"], \
+            f"应含数学: {data}"
+
+    def test_all_mode_only_returns_my_teaching_classes(self, tmp_path):
+        """全部模式只返回教师所教教学班范围内的当前学科均分，不泄漏外部班。"""
+        setup = self._SETUP_DUAL_OFFICIAL + textwrap.dedent("""\
+            # 加一个不在教师教学班范围内的「C班」官方均分行（模拟其他老师的班）
+            db = SessionLocal()
+            from app.db.models import Exam, ClassAverage, SubjectScore
+            exam1 = db.query(Exam).filter(Exam.name == "期中").first()
+            # C班学生 s6 不在任何教学班成员中
+            db.add(SubjectScore(exam_id=exam1.id, student_id="s6", subject="数学",
+                raw_score=90, name="C学生", class_num=3, xueji=252020))
+            db.add(ClassAverage(exam_id=exam1.id, class_num=3, class_label="C班",
+                class_type="平行", teacher_name="C老师",
+                subject_averages={"数学": 90},
+                total_averages={"主三门": 300}))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            r2 = client.get(f"/api/exams/{exam_id}")
+            assert r2.status_code == 200, r2.text
+            cas = r2.json().get("class_averages", [])
+            labels = [c.get("class_label") for c in cas]
+            result = {
+                "status": "ok",
+                "labels": sorted(labels),
+                "has_C": "C班" in labels,
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert not data["has_C"], \
+            f"全部模式不应返回非教师教学班的 C 班 class_average: {data}"
+
+
+class TestBidirectionalSubjectFiltering:
+    """学科过滤双向：数学老师只看数学考试，物理老师只看物理考试。"""
+
+    def test_physics_teacher_sees_physics_exam_not_math_only(self, tmp_path):
+        """物理老师能看到含物理成绩的考试，但看不到只有数学成绩的考试。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            assert data["subject"] == "物理"
+            exam_names = [e["name"] for e in data["exams"]]
+            assert "期中" in exam_names            # 有物理成绩 → 出现
+            assert "数学月考" not in exam_names     # 只有数学 → 隐藏
+            result = {"status": "ok", "subject": data["subject"], "exam_names": exam_names}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_PHYSICS_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["subject"] == "物理"
+        assert "期中" in data["exam_names"]
+        assert "数学月考" not in data["exam_names"]
+
+    def test_physics_teacher_detail_has_physics_score_not_math(self, tmp_path):
+        """物理老师查看考试详情时，学生分数是物理分数而非数学分数。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            r2 = client.get(f"/api/exams/{exam_id}")
+            assert r2.status_code == 200, r2.text
+            detail = r2.json()
+            assert detail["subject"] == "物理"
+            s1 = [s for s in detail["students"] if s["student_id"] == "s1"][0]
+            # s1 物理 raw_score=51, 数学 raw_score=81
+            # 必须返回物理分数 51，不能是数学 81
+            result = {
+                "status": "ok",
+                "raw_score": s1.get("raw_score"),
+                "expected": 51,
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_PHYSICS_TEACHER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["raw_score"] == 51, \
+            f"物理老师应看到 s1 物理分 51，得到 {data['raw_score']}"
+
+
+class TestExplicitScoreValueIsolation:
+    """考试详情中学生分数必须精确匹配当前学科，而非其他学科。"""
+
+    def test_math_teacher_sees_math_score_value(self, tmp_path):
+        """数学老师查看期中详情时，s1 的 raw_score 必须是数学分 81 而非物理分 51。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = [e["id"] for e in exams if e["name"] == "期中"][0]
+            r2 = client.get(f"/api/exams/{exam_id}")
+            assert r2.status_code == 200, r2.text
+            detail = r2.json()
+            s1 = [s for s in detail["students"] if s["student_id"] == "s1"][0]
+            result = {
+                "status": "ok",
+                "raw_score": s1.get("raw_score"),
+                "grade_percentile": s1.get("grade_percentile"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUWITH_TOTALS, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        # _SETUWITH_TOTALS: s1 数学 raw_score=81, 物理 raw_score=51
+        assert data["raw_score"] == 81, \
+            f"s1 数学 raw_score 应为 81，得到 {data['raw_score']}"
+        # s1 数学 grade_percentile=0.85 (0.9-0.05*1), 物理为 0.5
+        assert data["grade_percentile"] is not None
+
+
+class TestOverlappingMembershipAPI:
+    """API 层面重叠教学班成员：当前班模式只返回该班成员，全部模式返回并集去重。"""
+
+    # 重叠成员 fixture：A班 s1,s2,s3 ; B班 s3,s4,s5（s3 跨班）
+    _SETUP_OVERLAP = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore,
+        )
+
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t)
+        db.flush()
+
+        # A班 s1,s2,s3 ; B班 s3,s4,s5（s3 同时在两个班）
+        for label, sids in [("A班", ["s1","s2","s3"]), ("B班", ["s3","s4","s5"])]:
+            tc = TeachingClass(grade=2, label=label, subject="数学", kind="教学")
+            db.add(tc)
+            db.flush()
+            for sid in sids:
+                db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        db.commit()
+
+        exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+        db.add(exam)
+        db.flush()
+        for i, sid in enumerate(["s1","s2","s3","s4","s5"], 1):
+            db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="数学",
+                raw_score=80+i, name=f"学生{i}", class_num=1))
+        db.commit()
+        db.close()
+    """)
+
+    def test_current_class_excludes_other_class_members(self, tmp_path):
+        """当前班 A 只包含 s1,s2,s3——即使 s3 也在 B 班。"""
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            a = db.query(TeachingClass).filter(TeachingClass.label == "A班").first()
+            a_id = a.id
+            db.close()
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = exams[0]["id"]
+            r2 = client.get(f"/api/exams/{exam_id}?teaching_class_id={a_id}")
+            assert r2.status_code == 200, r2.text
+            students = r2.json().get("students", [])
+            student_ids = sorted(s["student_id"] for s in students)
+            result = {"status": "ok", "student_ids": student_ids}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_OVERLAP, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["student_ids"] == ["s1", "s2", "s3"], \
+            f"A班应只有 s1-s3: {data}"
+
+    def test_all_mode_union_dedup_overlapping(self, tmp_path):
+        """全部模式返回 A∪B 并集去重：s1-s5（s3 只出现一次）。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json()["exams"]
+            exam_id = exams[0]["id"]
+            r2 = client.get(f"/api/exams/{exam_id}")
+            assert r2.status_code == 200, r2.text
+            students = r2.json().get("students", [])
+            student_ids = sorted(s["student_id"] for s in students)
+            # s3 跨班，全部模式应去重
+            result = {"status": "ok", "student_ids": student_ids,
+                      "has_dup": len(student_ids) != len(set(student_ids))}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_OVERLAP, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["student_ids"] == ["s1", "s2", "s3", "s4", "s5"], \
+            f"全部模式应包含 s1-s5 去重: {data}"
+        assert not data["has_dup"], "s3 不应出现两次"
+
+
+class TestSubjectConflictTeachingClass:
+    """请求学科冲突的教学班必须返回 4xx，不退化为全年级。"""
+
+    def test_conflicting_subject_class_returns_4xx(self, tmp_path):
+        """数学教师请求一个 subject=物理 的教学班 → 必须返回 4xx。"""
+        setup = _SETUWITH_TOTALS + textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import TeachingClass, TeachingClassMember
+            # 新建一个 subject=物理 的教学班（与教师 subject=数学 冲突）
+            tc = TeachingClass(grade=2, label="物理班", subject="物理", kind="教学")
+            db.add(tc)
+            db.flush()
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id="s1", source="manual"))
+            db.commit()
+            conflict_id = tc.id
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            tc = db.query(TeachingClass).filter(TeachingClass.label == "物理班").first()
+            conflict_id = tc.id
+            db.close()
+            r = client.get(f"/api/exams?teaching_class_id={conflict_id}")
+            result = {"status_code": r.status_code}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status_code"] in (400, 403, 404, 409), \
+            f"学科冲突的教学班应返回4xx, 得到 {data['status_code']}"

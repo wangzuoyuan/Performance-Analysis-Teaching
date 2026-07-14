@@ -218,7 +218,8 @@ async def list_exams(
             # teaching_class_id 不存在
             raise HTTPException(404, str(e))
 
-        # 找出在允许成员范围内、当前任教学科确有成绩的考试 id
+        # 找出在允许成员范围内、当前任教学科确有真实分数（raw_score 或 grade_score
+        # 至少一个非空）的考试 id。只有 grade_percentile 或全空残留行不算成绩。
         valid_exam_ids = set(
             row[0]
             for row in (
@@ -226,6 +227,10 @@ async def list_exams(
                 .filter(
                     SubjectScore.subject == ctx.subject,
                     SubjectScore.student_id.in_(ctx.member_ids),
+                )
+                .filter(
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None)
                 )
                 .distinct()
                 .all()
@@ -307,7 +312,7 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
     """
     from collections import Counter, defaultdict
 
-    from app.db.models import SessionLocal, Exam, ClassAverage, SubjectScore
+    from app.db.models import SessionLocal, Exam, SubjectScore
     from app.analysis.exam_context import (
         resolve_exam_context,
         SubjectNotConfiguredError,
@@ -342,12 +347,17 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             raise HTTPException(404, "考试不存在")
 
         # ── 只取当前任教学科 + 允许成员范围内的 SubjectScore ──
+        # 排除 raw_score 与 grade_score 均为空的残留行（只有百分位/全空）。
         subject_rows = (
             db.query(SubjectScore)
             .filter(
                 SubjectScore.exam_id == exam_id,
                 SubjectScore.subject == subject,
                 SubjectScore.student_id.in_(member_ids),
+            )
+            .filter(
+                SubjectScore.raw_score.isnot(None)
+                | SubjectScore.grade_score.isnot(None)
             )
             .all()
         )
@@ -430,20 +440,22 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             "score_basis": "grade_score" if any(s.get("grade_score") is not None for s in scored) else "raw_score",
         }
 
-        # ── class_averages：只返回当前任教学科，不泄漏其他学科与 total_averages ──
-        # 优先用官方 ClassAverage 行的 subject_averages[subject]；官方无则现算。
+        # ── class_averages：范围隔离的当前学科现算均分 ──
+        # 不再依赖官方 ClassAverage 行（它们可能包含其他老师/其他班的均分，
+        # 会跨范围泄漏）。直接按本次 subject_rows + 当前 member_ids，对每个
+        # 选中教学班的成员集合现算当前学科均分。响应只含 subject_averages
+        # 的当前学科键，不含 total_averages 或其他学科。
         label_map = student_class_map(db, exam.grade)
-        mine_labels = set(my_class_labels(db, exam.grade).keys())
-        official_avgs = db.query(ClassAverage).filter(ClassAverage.exam_id == exam_id).all()
-        # 成员按 label 分组（用教学班 label，无则按行政班号）
+        mine_labels_map = my_class_labels(db, exam.grade)
+        mine_labels = set(mine_labels_map.keys())
+
+        # 成员按教学班 label 分组（teaching_class_id 限定模式只覆盖该班成员）
         members_by_label: dict[str, set[str]] = defaultdict(set)
         for sid in member_ids:
             if sid in label_map:
                 members_by_label[label_map[sid][0]].add(sid)
-        # 也收集每个学生的行政班号，用于官方行匹配
-        admin_class_by_student = {s["student_id"]: s.get("class_num") for s in all_students}
 
-        def _subject_avg_for(label_or_num, candidate_ids):
+        def _subject_avg_for(candidate_ids):
             vals = [
                 _rank_value(r)
                 for r in subject_rows
@@ -451,40 +463,14 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             ]
             return round(sum(vals) / len(vals), 1) if vals else None
 
+        # 只输出在当前 member_ids 范围内、确有当前学科数据的教学班行。
+        # 顺序：mine 教学班优先（与 my_class_labels 的 sort_order 一致）。
         class_averages_out = []
-        seen_labels = set()
-        for ca in official_avgs:
-            label = ca.class_label or (str(ca.class_num) if ca.class_num is not None else None)
-            if not label:
-                continue
-            sa = ca.subject_averages or {}
-            subj_avg = sa.get(subject)
-            # 若官方行无当前学科均分，尝试现算该 label 成员
-            if subj_avg is None:
-                cand = members_by_label.get(label, set())
-                if not cand and ca.class_num is not None:
-                    cand = {sid for sid, cn in admin_class_by_student.items() if cn == ca.class_num}
-                subj_avg = _subject_avg_for(label, cand) if cand else None
-            if subj_avg is None:
-                continue  # 该班无当前学科数据，不展示
-            class_averages_out.append({
-                "class_num": ca.class_num,
-                "class_label": label,
-                "class_type": ca.class_type,
-                "teacher_name": ca.teacher_name,
-                "subject_averages": {subject: subj_avg},
-                # 单学科化：不再返回 total_averages
-            })
-            seen_labels.add(label)
-
-        # 我的教学班若官方无行，用成员现算补一行
-        for label, tc_id in my_class_labels(db, exam.grade).items():
-            if label in seen_labels:
-                continue
+        for label in mine_labels_map:  # dict 保序（list_classes 已按 sort_order）
             cand = members_by_label.get(label, set())
             if not cand:
                 continue
-            subj_avg = _subject_avg_for(label, cand)
+            subj_avg = _subject_avg_for(cand)
             if subj_avg is None:
                 continue
             class_averages_out.append({
