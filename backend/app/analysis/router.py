@@ -636,201 +636,231 @@ async def get_focus_list(exam_id: int, teaching_class_id: Optional[int] = None, 
     return {"focus_list": focus_list[:50]}
 
 @router.get("/students/{student_id}")
-async def get_student(student_id: str):
-    """获取学生画像（跨学年）。学号会随分班变化，用身份层 student_ids_of_person
-    把同一人的全部学号并起来查，使跨学年趋势/档案接续。班级排名按教学班成员集合
-    （无配置时回退行政班）。"""
-    from app.db.models import SessionLocal, TotalScore, SubjectScore, Exam
+async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
+    """获取学生画像（单学科化）。
+
+    学科由后端教师上下文解析（resolve_exam_context），前端不传也不可信。
+    请求人/其身份别名必须与合法成员范围有交集，否则 404/403。
+
+    可保留跨学年 identity 合并，但历史只查询当前任教学科 SubjectScore 且
+    raw_score 或 grade_score 至少一个非空；考试集合由这些行决定，不依赖 TotalScore。
+    返回顶层 teaching_subject 和单一 score_trend；每点至少含 exam_id/name/date/grade、
+    raw_score、grade_score、grade_percentile、class_label、教学班内 scope_rank/rank_basis。
+
+    完全删除 main_total_trend、five_trend、plus3_trend、san3_trend、多科 subject_trend、
+    class_rank_basis 和全部总分字段。
+
+    scope_rank 只能按对应教学班成员集合和当前学科有效分数计算；无可靠教学班范围时
+    为 null，不得回退行政班或全年级。
+    """
+    from app.db.models import SessionLocal, SubjectScore, Exam
+    from app.analysis.exam_context import (
+        resolve_exam_context,
+        SubjectNotConfiguredError,
+        NoTeachingScopeError,
+    )
+    from app.teaching.subject import SubjectConflictError
     from app.analysis.scope import (
         student_ids_of_person, identity_of, student_class_map, members_of,
     )
 
     db = SessionLocal()
-    ids = student_ids_of_person(db, student_id)
-    identity_id = identity_of(db, student_id)
+    try:
+        try:
+            ctx = resolve_exam_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
 
-    # 该人所有考试（跨学号并集）
-    exams = db.query(Exam).join(TotalScore, Exam.id == TotalScore.exam_id).filter(
-        TotalScore.student_id.in_(ids)
-    ).order_by(Exam.grade, Exam.exam_date).all()
+        subject = ctx.subject
+        allowed_ids = set(ctx.member_ids)
 
-    if not exams:
-        db.close()
-        raise HTTPException(404, "该学生无成绩记录")
+        # 跨学年 identity 合并
+        ids = student_ids_of_person(db, student_id)
+        identity_id = identity_of(db, student_id)
 
-    grades = set(e.grade for e in exams)
-    has_cross_year = len(grades) > 1
+        # 范围校验：请求人/其身份别名必须与合法成员范围有交集
+        if not (ids & allowed_ids):
+            raise HTTPException(404, "该学生不在当前教学范围内")
 
-    main_totals = db.query(TotalScore).filter(
-        TotalScore.student_id.in_(ids), TotalScore.total_type == "主三门"
-    ).order_by(TotalScore.exam_id).all()
-    five_totals = db.query(TotalScore).filter(
-        TotalScore.student_id.in_(ids), TotalScore.total_type == "五门"
-    ).order_by(TotalScore.exam_id).all()
-    plus3_totals = db.query(TotalScore).filter(
-        TotalScore.student_id.in_(ids), TotalScore.total_type == "+3"
-    ).order_by(TotalScore.exam_id).all()
-    san3_totals = db.query(TotalScore).filter(
-        TotalScore.student_id.in_(ids), TotalScore.total_type == "3+3"
-    ).order_by(TotalScore.exam_id).all()
-    subject_scores = db.query(SubjectScore).filter(
-        SubjectScore.student_id.in_(ids)
-    ).order_by(SubjectScore.exam_id).all()
+        # 只查询当前任教学科 SubjectScore 且 raw_score 或 grade_score 至少一个非空
+        subject_scores = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.student_id.in_(ids),
+                SubjectScore.subject == subject,
+                SubjectScore.raw_score.isnot(None)
+                | SubjectScore.grade_score.isnot(None),
+            )
+            .order_by(SubjectScore.exam_id)
+            .all()
+        )
 
-    name_row = db.query(SubjectScore).filter(
-        SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
-    ).first()
-    name = name_row.name if name_row and name_row.name else student_id
+        if not subject_scores:
+            raise HTTPException(404, "该学生无当前学科成绩记录")
 
-    exam_map = {e.id: e for e in exams}
+        # 考试集合由这些行决定（不依赖 TotalScore）
+        exam_ids = {s.exam_id for s in subject_scores}
+        exams = (
+            db.query(Exam)
+            .filter(Exam.id.in_(exam_ids))
+            .order_by(Exam.grade, Exam.exam_date)
+            .all()
+        )
+        exam_map = {e.id: e for e in exams}
 
-    # 班级排名：优先教学班成员集合，无则回退行政班号
-    label_map_cache: dict[int, dict] = {}
-    student_class_by_exam: dict[int, int] = {}
-    for s in subject_scores:
-        if s.class_num is not None and s.exam_id not in student_class_by_exam:
-            student_class_by_exam[s.exam_id] = s.class_num
+        grades = set(e.grade for e in exams)
+        has_cross_year = len(grades) > 1
 
-    class_rank_by_exam: dict[int, int | None] = {}
-    class_rank_basis: dict[int, str] = {}  # 'teaching' | 'admin'
-    for t in main_totals:
-        if t.total_score is None:
-            class_rank_by_exam[t.exam_id] = None
-            continue
-        exam = exam_map.get(t.exam_id)
-        grade = exam.grade if exam else None
-        peer_ids: list[str] = []
-        basis = "admin"
-        # 优先：该学号在该年级的教学班成员
-        if grade is not None:
+        name_row = db.query(SubjectScore).filter(
+            SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
+        ).first()
+        name = name_row.name if name_row and name_row.name else student_id
+
+        # scope_rank：按对应教学班成员集合和当前学科有效分数计算
+        # 确定该学生每场考试对应的教学班成员集合（按年级）
+        label_map_cache: dict[int, dict] = {}
+        scope_rank_by_exam: dict[int, int | None] = {}
+        rank_basis_by_exam: dict[int, str] = {}
+
+        for s in subject_scores:
+            exam = exam_map.get(s.exam_id)
+            if not exam:
+                continue
+            grade = exam.grade
             if grade not in label_map_cache:
                 label_map_cache[grade] = student_class_map(db, grade)
             lm = label_map_cache[grade]
-            tc_info = lm.get(t.student_id)
-            if tc_info:
-                peer_ids = sorted(members_of(db, tc_info[1]))
-                basis = "teaching"
-        # 回退：行政班号
-        if not peer_ids:
-            cls = student_class_by_exam.get(t.exam_id)
-            if cls is None:
-                class_rank_by_exam[t.exam_id] = None
+
+            # 该考试该学生使用的学号 → 教学班
+            tc_info = lm.get(s.student_id)
+            if not tc_info:
+                # 该学号未在教学班成员中，尝试同组其他学号
+                for sid in ids:
+                    info = lm.get(sid)
+                    if info:
+                        tc_info = info
+                        break
+            if not tc_info:
+                scope_rank_by_exam[s.exam_id] = None
+                rank_basis_by_exam[s.exam_id] = "none"
                 continue
-            peer_ids = [
-                row[0]
-                for row in db.query(SubjectScore.student_id)
-                .filter(SubjectScore.exam_id == t.exam_id, SubjectScore.class_num == cls)
-                .distinct().all()
-            ]
-        if not peer_ids:
-            class_rank_by_exam[t.exam_id] = None
-            continue
-        peer_scores = [
-            row[0]
-            for row in db.query(TotalScore.total_score)
-            .filter(
-                TotalScore.exam_id == t.exam_id,
-                TotalScore.total_type == "主三门",
-                TotalScore.student_id.in_(peer_ids),
-                TotalScore.total_score.isnot(None),
-            ).all()
-        ]
-        class_rank_by_exam[t.exam_id] = sum(1 for s in peer_scores if s > t.total_score) + 1
-        class_rank_basis[t.exam_id] = basis
 
-    # 头部展示：当前（最新）年级的教学班标签
-    latest_grade = max(grades) if grades else None
-    current_label = None
-    current_tc_id = None
-    if latest_grade is not None:
-        if latest_grade not in label_map_cache:
-            label_map_cache[latest_grade] = student_class_map(db, latest_grade)
-        # 该人在最新年级出现的任一学号
-        sids_latest = {s.student_id for s in subject_scores if exam_map.get(s.exam_id) and exam_map[s.exam_id].grade == latest_grade}
-        for sid in sids_latest:
-            info = label_map_cache[latest_grade].get(sid)
+            peer_ids = members_of(db, tc_info[1])
+            if not peer_ids:
+                scope_rank_by_exam[s.exam_id] = None
+                rank_basis_by_exam[s.exam_id] = "none"
+                continue
+
+            # 当前学科该考试 peer_ids 中的有效分数（raw_score 非空）
+            peer_scores = {
+                row[0]: row[1]
+                for row in (
+                    db.query(SubjectScore.student_id, SubjectScore.raw_score)
+                    .filter(
+                        SubjectScore.exam_id == s.exam_id,
+                        SubjectScore.subject == subject,
+                        SubjectScore.student_id.in_(peer_ids),
+                        SubjectScore.raw_score.isnot(None),
+                    )
+                    .all()
+                )
+            }
+            my_score = s.raw_score
+            if my_score is None or s.student_id not in peer_scores:
+                scope_rank_by_exam[s.exam_id] = None
+                rank_basis_by_exam[s.exam_id] = "teaching"
+                continue
+            # 排名：比我高的 + 1
+            scope_rank_by_exam[s.exam_id] = (
+                sum(1 for v in peer_scores.values() if v > my_score) + 1
+            )
+            rank_basis_by_exam[s.exam_id] = "teaching"
+
+        # 头部展示：当前（最新）年级的教学班标签
+        latest_grade = max(grades) if grades else None
+        current_label = None
+        current_tc_id = None
+        if latest_grade is not None:
+            if latest_grade not in label_map_cache:
+                label_map_cache[latest_grade] = student_class_map(db, latest_grade)
+            sids_latest = {
+                s.student_id for s in subject_scores
+                if exam_map.get(s.exam_id) and exam_map[s.exam_id].grade == latest_grade
+            }
+            for sid in sids_latest:
+                info = label_map_cache[latest_grade].get(sid)
+                if info:
+                    current_label, current_tc_id = info
+                    break
+
+        class_counter = Counter(s.class_num for s in subject_scores if s.class_num is not None)
+        class_num_value = class_counter.most_common(1)[0][0] if class_counter else None
+        xueji_counter = Counter(s.xueji for s in subject_scores if s.xueji is not None)
+        xueji_code_value = xueji_counter.most_common(1)[0][0] if xueji_counter else None
+
+        def exam_sort_key(exam_id):
+            e = exam_map.get(exam_id)
+            return (e.grade if e else 0, e.exam_date if e else "")
+
+        subject_scores_sorted = sorted(
+            subject_scores, key=lambda s: exam_sort_key(s.exam_id)
+        )
+
+        # 每点的 class_label：该考试该学号在教学班映射中的 label
+        def _class_label_for_point(s):
+            exam = exam_map.get(s.exam_id)
+            if not exam:
+                return None
+            grade = exam.grade
+            if grade not in label_map_cache:
+                label_map_cache[grade] = student_class_map(db, grade)
+            lm = label_map_cache[grade]
+            info = lm.get(s.student_id)
             if info:
-                current_label, current_tc_id = info
-                break
+                return info[0]
+            for sid in ids:
+                info2 = lm.get(sid)
+                if info2:
+                    return info2[0]
+            return None
 
-    class_counter = Counter(s.class_num for s in subject_scores if s.class_num is not None)
-    class_num_value = class_counter.most_common(1)[0][0] if class_counter else None
-    xueji_counter = Counter(s.xueji for s in subject_scores if s.xueji is not None)
-    xueji_code_value = xueji_counter.most_common(1)[0][0] if xueji_counter else None
-
-    db.close()
-
-    def exam_sort_key(exam_id):
-        e = exam_map.get(exam_id)
-        return (e.grade if e else 0, e.exam_date if e else "")
-
-    main_totals_sorted = sorted(main_totals, key=lambda t: exam_sort_key(t.exam_id))
-    five_totals_sorted = sorted(five_totals, key=lambda t: exam_sort_key(t.exam_id))
-    plus3_totals_sorted = sorted(plus3_totals, key=lambda t: exam_sort_key(t.exam_id))
-    san3_totals_sorted = sorted(san3_totals, key=lambda t: exam_sort_key(t.exam_id))
-    subject_scores_sorted = sorted(subject_scores, key=lambda s: exam_sort_key(s.exam_id))
-    subject_scores_with_score = [
-        s for s in subject_scores_sorted if s.raw_score is not None or s.grade_score is not None
-    ]
-
-    return {
-        "student_id": student_id,
-        "identity_id": identity_id,
-        "all_student_ids": sorted(ids),  # 学段履历
-        "name": name,
-        "has_cross_year": has_cross_year,
-        "grades": sorted(list(grades)),
-        "class_num": class_num_value,
-        "class_label": current_label,
-        "teaching_class_id": current_tc_id,
-        "xueji_code": xueji_code_value,
-        "class_rank_basis": class_rank_basis,
-        "main_total_trend": [{
-            "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
-            "total_score": t.total_score,
-            "xueji_rank": t.xueji_rank,
-            "grade_percentile": t.grade_percentile,
-            "class_rank": class_rank_by_exam.get(t.exam_id),
-        } for t in main_totals_sorted],
-        "five_trend": [{
-            "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
-            "total_score": t.total_score,
-            "xueji_rank": t.xueji_rank,
-            "grade_percentile": t.grade_percentile,
-        } for t in five_totals_sorted],
-        "subject_trend": [{
-            "exam_id": s.exam_id,
-            "exam_name": exam_map[s.exam_id].name if s.exam_id in exam_map else str(s.exam_id),
-            "exam_date": exam_map[s.exam_id].exam_date if s.exam_id in exam_map else None,
-            "subject": s.subject,
-            "raw_score": s.raw_score,
-            "grade_percentile": s.grade_percentile,
-        } for s in subject_scores_with_score],
-        "plus3_trend": [{
-            "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
-            "total_score": t.total_score,
-            "xueji_rank": t.xueji_rank,
-            "grade_percentile": t.grade_percentile,
-        } for t in plus3_totals_sorted],
-        "san3_trend": [{
-            "exam_id": t.exam_id,
-            "exam_name": exam_map[t.exam_id].name if t.exam_id in exam_map else str(t.exam_id),
-            "exam_date": exam_map[t.exam_id].exam_date if t.exam_id in exam_map else None,
-            "grade": exam_map[t.exam_id].grade if t.exam_id in exam_map else None,
-            "total_score": t.total_score,
-            "xueji_rank": t.xueji_rank,
-            "grade_percentile": t.grade_percentile,
-        } for t in san3_totals_sorted],
-    }
+        return {
+            "student_id": student_id,
+            "identity_id": identity_id,
+            "all_student_ids": sorted(ids),
+            "name": name,
+            "teaching_subject": subject,
+            "has_cross_year": has_cross_year,
+            "grades": sorted(list(grades)),
+            "class_num": class_num_value,
+            "class_label": current_label,
+            "teaching_class_id": current_tc_id,
+            "xueji_code": xueji_code_value,
+            "score_trend": [
+                {
+                    "exam_id": s.exam_id,
+                    "exam_name": exam_map[s.exam_id].name if s.exam_id in exam_map else str(s.exam_id),
+                    "exam_date": exam_map[s.exam_id].exam_date if s.exam_id in exam_map else None,
+                    "grade": exam_map[s.exam_id].grade if s.exam_id in exam_map else None,
+                    "subject": s.subject,
+                    "raw_score": s.raw_score,
+                    "grade_score": s.grade_score,
+                    "grade_percentile": s.grade_percentile,
+                    "class_label": _class_label_for_point(s),
+                    "scope_rank": scope_rank_by_exam.get(s.exam_id),
+                    "rank_basis": rank_basis_by_exam.get(s.exam_id),
+                }
+                for s in subject_scores_sorted
+            ],
+        }
+    finally:
+        db.close()
 
 @router.get("/class/compare")
 async def compare_classes(exam_id: Optional[int] = None):
@@ -1000,23 +1030,57 @@ async def list_students(
     grade: Optional[int] = None,
     q: Optional[str] = None,
 ):
-    """学生检索数据源（替代前端逐场 fetch /api/exams/{id} 的低效做法）。
-    teaching_class_id 为空=我教所有班的成员并集。按「人」去重（同一人多学号合并一行，
-    取最新年级学号为代表）。返回每生所属教学班 label + 最新主三门摘要。"""
-    from app.db.models import SessionLocal, Exam, SubjectScore, TotalScore
+    """学生检索数据源（单学科化）。
+
+    学科由后端教师上下文解析（resolve_exam_context），前端不传也不可信。
+    成绩摘要只用当前任教学科 SubjectScore，不查询 TotalScore。
+    teaching_class_id 为空=我教所有班的成员并集。按「人」去重（同一人多学号
+    合并一行，取最新年级学号为代表）。
+
+    每行返回 student_id/name/class_label/teaching_class_id/grades，以及当前
+    学科摘要：latest_exam、raw_score、grade_score、grade_percentile、scope_rank。
+    没有当前学科分数的合法班级成员留在花名册，但成绩字段为 null。
+
+    latest_exam 是当前学科在合法成员范围内有真实分数（raw_score 或 grade_score
+    非空）的最新考试；只有百分位或空分残留不能成为最新考试。
+
+    scope_rank 按教学班成员集合和当前学科有效分数计算；无可靠教学班范围时为 null。
+    """
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.analysis.exam_context import (
+        resolve_exam_context,
+        SubjectNotConfiguredError,
+        NoTeachingScopeError,
+    )
+    from app.teaching.subject import SubjectConflictError
     from app.analysis.scope import (
-        all_my_member_ids, members_of, student_class_map, student_ids_of_person, identity_of,
+        student_class_map, student_ids_of_person, identity_of,
     )
 
     db = SessionLocal()
     try:
-        if teaching_class_id is not None:
-            scope_ids = members_of(db, teaching_class_id)
-        else:
-            scope_ids = all_my_member_ids(db, grade)
+        try:
+            ctx = resolve_exam_context(db, teaching_class_id=teaching_class_id)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
+        except ValueError as e:
+            raise HTTPException(404, str(e))
+
+        subject = ctx.subject
+        scope_ids = set(ctx.member_ids)
+        if grade is not None:
+            # 限定年级：只保留该年级教学班的成员
+            scope_ids = {
+                sid for sid in scope_ids
+                if _student_has_grade(db, sid, grade, subject)
+            }
 
         if not scope_ids:
-            return {"students": []}
+            return {"students": [], "count": 0, "teaching_subject": subject}
 
         # 姓名过滤
         if q:
@@ -1031,7 +1095,7 @@ async def list_students(
                 if (nm and q in nm) or q in sid
             }
             if not scope_ids:
-                return {"students": []}
+                return {"students": [], "count": 0, "teaching_subject": subject}
 
         # 按身份去重：identity → 学号集合；无 alias 的学号自成一组
         groups: dict = {}
@@ -1051,6 +1115,30 @@ async def list_students(
                 groups[key] |= ids
                 seen |= ids
 
+        # 当前学科在合法范围内有真实分数的考试集合（用于 latest_exam）
+        valid_exam_ids = set(
+            row[0]
+            for row in (
+                db.query(SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(scope_ids),
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None),
+                )
+                .distinct().all()
+            )
+        )
+        # 最新考试：按年级/日期/id（只在有真实分数的考试中选）
+        latest_exam = None
+        if valid_exam_ids:
+            latest_exam = (
+                db.query(Exam)
+                .filter(Exam.id.in_(valid_exam_ids))
+                .order_by(Exam.grade.desc(), Exam.exam_date.desc(), Exam.id.desc())
+                .first()
+            )
+
         # 每组取最新年级学号作代表
         sid_grade = {
             row[0]: row[1]
@@ -1063,18 +1151,30 @@ async def list_students(
         }
         label_map = student_class_map(db, grade)
 
-        # 最新考试（按年级/日期）
-        latest_exam = (
-            db.query(Exam).order_by(Exam.grade.desc(), Exam.exam_date.desc(), Exam.id.desc()).first()
-        )
-        latest_totals = {}
+        # 最新考试当前学科成绩（按代表学号或同组任一学号）
+        latest_scores: dict[str, SubjectScore] = {}
         if latest_exam:
-            for t in db.query(TotalScore).filter(
-                TotalScore.exam_id == latest_exam.id,
-                TotalScore.total_type == "主三门",
-                TotalScore.student_id.in_(scope_ids),
+            for s in db.query(SubjectScore).filter(
+                SubjectScore.exam_id == latest_exam.id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(scope_ids),
+                SubjectScore.raw_score.isnot(None)
+                | SubjectScore.grade_score.isnot(None),
             ).all():
-                latest_totals[t.student_id] = t
+                latest_scores[s.student_id] = s
+
+        # scope_rank 基数：当前教学班范围内、最新考试当前学科有效分数
+        scope_rank_map: dict[str, int] = {}
+        if latest_exam:
+            scores_for_rank = [
+                s for s in latest_scores.values()
+                if s.student_id in scope_ids
+            ]
+            # 用 raw_score 排名（单科趋势的基准之一）
+            valid = [s for s in scores_for_rank if s.raw_score is not None]
+            valid.sort(key=lambda s: s.raw_score, reverse=True)
+            for rank, s in enumerate(valid, 1):
+                scope_rank_map[s.student_id] = rank
 
         students = []
         for ids in groups.values():
@@ -1084,8 +1184,8 @@ async def list_students(
             ).first()
             name = name_row[0] if name_row and name_row[0] else rep
             label, tc_id = label_map.get(rep, (None, None))
-            lt = latest_totals.get(rep) or next(
-                (latest_totals.get(s) for s in ids if latest_totals.get(s)), None
+            s = latest_scores.get(rep) or next(
+                (latest_scores.get(sid) for sid in ids if latest_scores.get(sid)), None
             )
             students.append({
                 "student_id": rep,
@@ -1094,14 +1194,49 @@ async def list_students(
                 "teaching_class_id": tc_id,
                 "grades": sorted({sid_grade.get(s) for s in ids if sid_grade.get(s)}),
                 "latest_exam_id": latest_exam.id if latest_exam else None,
-                "latest_total_score": lt.total_score if lt else None,
-                "latest_xueji_rank": lt.xueji_rank if lt else None,
+                "latest_exam": (
+                    {"id": latest_exam.id, "name": latest_exam.name}
+                    if latest_exam else None
+                ),
+                "raw_score": s.raw_score if s else None,
+                "grade_score": s.grade_score if s else None,
+                "grade_percentile": s.grade_percentile if s else None,
+                "scope_rank": scope_rank_map.get(rep) if s else None,
             })
-        students.sort(key=lambda s: ((s["latest_xueji_rank"] or 10**9), s["student_id"]))
-        return {"students": students, "count": len(students),
-                "latest_exam": {"id": latest_exam.id, "name": latest_exam.name} if latest_exam else None}
+        # 排序：有 scope_rank 的优先（越小越好），无成绩的排末尾
+        students.sort(
+            key=lambda st: (
+                st["scope_rank"] if st["scope_rank"] is not None else 10 ** 9,
+                st["student_id"],
+            )
+        )
+        return {
+            "students": students,
+            "count": len(students),
+            "teaching_subject": subject,
+            "latest_exam": (
+                {"id": latest_exam.id, "name": latest_exam.name}
+                if latest_exam else None
+            ),
+        }
     finally:
         db.close()
+
+
+def _student_has_grade(db, student_id: str, grade: int, subject: str) -> bool:
+    """该学号在指定年级是否有过当前学科成绩记录。"""
+    from app.db.models import Exam, SubjectScore
+
+    return bool(
+        db.query(SubjectScore.id)
+        .join(Exam, Exam.id == SubjectScore.exam_id)
+        .filter(
+            SubjectScore.student_id == student_id,
+            SubjectScore.subject == subject,
+            Exam.grade == grade,
+        )
+        .first()
+    )
 
 
 @router.get("/dashboard/overview")

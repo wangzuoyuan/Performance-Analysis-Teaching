@@ -209,58 +209,63 @@ def test_class_compare(client):
     assert response.status_code == 200
     assert "exams" in response.json()
 
-def test_student_not_found(client):
-    """Step 6: 学生不存在返回404"""
+def test_student_not_found(client, request):
+    """学生不存在或不在教学范围内返回404（单学科化后需先有教学范围）。"""
+    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1"])
+    request.addfinalizer(cleanup)
     response = client.get("/api/students/NOTEXIST123")
     assert response.status_code == 404
 
-def test_student_detail_includes_plus_three_subjects(client):
-    """学生详情需要返回加三学科，供历次考试明细表展示。"""
-    from app.db.models import SessionLocal, SubjectScore
-    from sqlalchemy import or_
+def test_student_detail_returns_single_subject_trend(client, request):
+    """学生画像返回 teaching_subject 和单一 score_trend（单学科化）。
 
+    替代旧的「加三学科」「五门总分趋势」测试——单学科化后不再有多学科趋势。
+    使用 _seed_minimal_exam_scope 自建范围，不依赖本地真实库。
+    """
+    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1", "tapi-s2"])
+    request.addfinalizer(cleanup)
+
+    response = client.get("/api/students/tapi-s1")
+    assert response.status_code == 200, response.text
+    data = response.json()
+    assert data["teaching_subject"] == "数学"
+    # 单一 score_trend，不再有旧的多科/总分字段
+    assert "score_trend" in data
+    assert "subject_trend" not in data
+    assert "five_trend" not in data
+    assert "main_total_trend" not in data
+    # score_trend 只含当前学科
+    if data["score_trend"]:
+        subjects = {p["subject"] for p in data["score_trend"]}
+        assert subjects == {"数学"}
+
+def test_student_detail_excludes_empty_score_rows(client, request):
+    """无原始分/等级分的单科行不能进入 score_trend（单学科化）。"""
+    from app.db.models import SessionLocal, Exam, SubjectScore
+    cleanup = _seed_minimal_exam_scope(subject="数学", member_ids=["tapi-s1"])
+    request.addfinalizer(cleanup)
+
+    # 给 tapi-s1 加一场只有百分位、无原始分/等级分的残留
     db = SessionLocal()
-    row = db.query(SubjectScore).filter(
-        SubjectScore.subject.notin_(["语文", "数学", "英语"]),
-        or_(SubjectScore.raw_score.isnot(None), SubjectScore.grade_score.isnot(None)),
-    ).first()
-    db.close()
-    if row is None:
-        pytest.skip("no plus-three subject scores in local tracker database")
+    try:
+        exam = db.query(Exam).filter(Exam.name == "tapi-考试").first()
+        exam2 = Exam(name="残留考试", grade=2, semester="上", exam_type="月考", exam_date="2025-08")
+        db.add(exam2)
+        db.flush()
+        db.add(SubjectScore(
+            exam_id=exam2.id, student_id="tapi-s1", subject="数学",
+            raw_score=None, grade_score=None, grade_percentile=0.5,
+            name="测试1", class_num=1,
+        ))
+        db.commit()
+    finally:
+        db.close()
 
-    response = client.get(f"/api/students/{row.student_id}")
+    response = client.get("/api/students/tapi-s1")
     assert response.status_code == 200
-    subjects = {s["subject"] for s in response.json()["subject_trend"]}
-    assert row.subject in subjects
-
-def test_student_detail_excludes_subject_trend_without_scores(client):
-    """无原始分/等级分的单科行不能进入趋势线数据。"""
-    response = client.get("/api/students/7250615")
-    if response.status_code == 404:
-        pytest.skip("local database does not contain regression student 7250615")
-    assert response.status_code == 200
-
-    invalid_rows = [
-        row
-        for row in response.json()["subject_trend"]
-        if row["exam_date"] == "2025-09" and row["subject"] in {"物理", "化学", "生物", "政治", "历史", "地理"}
-    ]
-    assert invalid_rows == []
-
-def test_student_detail_includes_grade1_five_total_trend(client):
-    """高一学生详情需要返回五门总分趋势，供个人页展示语数英物化总分和排名。"""
-    from app.db.models import SessionLocal, TotalScore
-
-    db = SessionLocal()
-    row = db.query(TotalScore).filter(TotalScore.total_type == "五门").first()
-    db.close()
-    if row is None:
-        pytest.skip("no grade1 five-total scores in local tracker database")
-
-    response = client.get(f"/api/students/{row.student_id}")
-    assert response.status_code == 200
-    five_trend = response.json()["five_trend"]
-    assert any(item["exam_id"] == row.exam_id for item in five_trend)
+    trend = response.json()["score_trend"]
+    exam_names = [p["exam_name"] for p in trend]
+    assert "残留考试" not in exam_names, "空分行不应进入 score_trend"
 
 def test_subject_weakness(client):
     """Step 6: 单科薄弱"""

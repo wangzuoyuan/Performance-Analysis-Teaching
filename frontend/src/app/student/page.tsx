@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useState } from 'react'
 import Link from 'next/link'
 import {
   ChevronRight,
@@ -41,13 +41,17 @@ interface StudentRow {
   teaching_class_id?: number | null
   grades?: number[]
   latest_exam_id?: number | null
-  latest_total_score?: number | null
-  latest_xueji_rank?: number | null
+  latest_exam?: { id: number; name: string } | null
+  raw_score?: number | null
+  grade_score?: number | null
+  grade_percentile?: number | null
+  scope_rank?: number | null
 }
 
 interface StudentsResponse {
   students: StudentRow[]
   count: number
+  teaching_subject?: string | null
   latest_exam?: { id: number; name: string } | null
 }
 
@@ -66,6 +70,11 @@ function formatInt(n: number | null | undefined): string {
   return String(Math.round(Number(n)))
 }
 
+function formatPercent(v: number | null | undefined): string {
+  if (v === null || v === undefined || Number.isNaN(Number(v))) return '—'
+  return `${Math.round(Number(v) * 100)}%`
+}
+
 function gradeLabel(grades?: number[] | null): string {
   if (!grades || grades.length === 0) return '—'
   return grades.map((g) => formatGradeLabel(g)).join(' / ')
@@ -75,6 +84,7 @@ export default function StudentSearchPage() {
   const { scopeParam, loading: scopeLoading } = useClassScope()
   const [students, setStudents] = useState<StudentRow[]>([])
   const [count, setCount] = useState(0)
+  const [subject, setSubject] = useState<string | null>(null)
   const [latestExam, setLatestExam] = useState<{ id: number; name: string } | null>(null)
   const [query, setQuery] = useState('')
   const [debouncedQuery, setDebouncedQuery] = useState('')
@@ -107,10 +117,12 @@ export default function StudentSearchPage() {
       if (res) {
         setStudents(res.students ?? [])
         setCount(res.count ?? res.students?.length ?? 0)
+        setSubject(res.teaching_subject ?? null)
         setLatestExam(res.latest_exam ?? null)
       } else {
         setStudents([])
         setCount(0)
+        setSubject(null)
         setLatestExam(null)
       }
       setLoading(false)
@@ -122,10 +134,7 @@ export default function StudentSearchPage() {
     }
   }, [scopeParam, debouncedQuery])
 
-  const rankedCount = useMemo(
-    () => students.filter((s) => s.latest_xueji_rank != null).length,
-    [students],
-  )
+  const rankedCount = students.filter((s) => s.scope_rank != null).length
 
   const scopeBusy = loading || scopeLoading
 
@@ -137,7 +146,7 @@ export default function StudentSearchPage() {
             学生检索
           </h1>
           <p className="mt-1 text-sm text-slate-500">
-            按姓名或学号查找学生画像，支持按教学班筛选
+            {subject ? `当前学科：${subject} · ` : ''}按姓名或学号查找学生画像，支持按教学班筛选
           </p>
         </div>
         <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
@@ -174,7 +183,7 @@ export default function StudentSearchPage() {
           <div>
             <CardTitle>学生名单</CardTitle>
             <CardDescription>
-              默认按最近一次考试的学籍名次排序，点击姓名进入学生趋势页。
+              默认按教学班内排名排序，点击姓名进入学生单科趋势页。
             </CardDescription>
           </div>
           <div className="relative w-full sm:w-80">
@@ -207,8 +216,10 @@ export default function StudentSearchPage() {
                       <TableHead>姓名</TableHead>
                       <TableHead className="w-28">教学班</TableHead>
                       <TableHead className="w-32">年级</TableHead>
-                      <TableHead className="w-28 text-right">最近主三门总分</TableHead>
-                      <TableHead className="w-24 text-right">学籍名次</TableHead>
+                      <TableHead className="w-24 text-right">原始分</TableHead>
+                      <TableHead className="w-24 text-right">等级分</TableHead>
+                      <TableHead className="w-24 text-right">百分位</TableHead>
+                      <TableHead className="w-24 text-right">班内排名</TableHead>
                       <TableHead className="w-12" />
                     </TableRow>
                   </TableHeader>
@@ -239,10 +250,16 @@ export default function StudentSearchPage() {
                           {gradeLabel(student.grades)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {formatInt(student.latest_total_score)}
+                          {formatInt(student.raw_score)}
                         </TableCell>
                         <TableCell className="text-right tabular-nums">
-                          {formatInt(student.latest_xueji_rank)}
+                          {formatInt(student.grade_score)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatPercent(student.grade_percentile)}
+                        </TableCell>
+                        <TableCell className="text-right tabular-nums">
+                          {formatInt(student.scope_rank)}
                         </TableCell>
                         <TableCell>
                           <Link
@@ -283,15 +300,15 @@ export default function StudentSearchPage() {
                     <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
                       <span>年级：{gradeLabel(student.grades)}</span>
                       <span>
-                        主三门：
+                        原始分：
                         <span className="tabular-nums text-slate-900">
-                          {formatInt(student.latest_total_score)}
+                          {formatInt(student.raw_score)}
                         </span>
                       </span>
                       <span>
-                        名次：
+                        班内排名：
                         <span className="tabular-nums text-slate-900">
-                          {formatInt(student.latest_xueji_rank)}
+                          {formatInt(student.scope_rank)}
                         </span>
                       </span>
                     </div>
