@@ -41,7 +41,10 @@ def test_restore_missing_file(client):
 
 
 def test_weekly_focus_shape(client):
+    # 单学科化：class_num 不再允许（400）；默认范围（全部教学班并集）
     r = client.get("/api/weekly-focus?class_num=6")
+    assert r.status_code == 400
+    r = client.get("/api/weekly-focus")
     assert r.status_code == 200
     body = r.json()
     assert "students" in body and "week" in body

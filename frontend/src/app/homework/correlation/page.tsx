@@ -17,49 +17,63 @@ import {
 import { ChevronLeft } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ClassScopePicker } from '@/components/ClassScopePicker'
+import { useClassScope } from '@/lib/class-scope'
 
 interface Row {
   student_id: string
   name: string
   miss_count: number
-  xueji_rank?: number | null
-  grade_percentile?: number | null
+  subject_rank?: number | null
 }
 interface Correlation {
   exam_id: number | null
-  subject: string | null
+  teaching_subject?: string | null
+  teaching_class_id?: number | null
+  subject?: string | null
   y_field: string
   y_label: string
   rows: Row[]
 }
+
 export default function CorrelationPage() {
+  const scope = useClassScope()
+  const { currentClass } = scope
+  const tidParam = scope.scopeParam(currentClass?.grade).teaching_class_id
+
   const [data, setData] = useState<Correlation | null>(null)
   const [error, setError] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     setError(null)
     try {
-      // 不传 class_num：后端按全花名册（我教的所有班并集）统计
-      const corr = await fetch('/api/homework/correlation').then((r) => r.json())
+      const url = tidParam
+        ? `/api/homework/correlation?teaching_class_id=${tidParam}`
+        : '/api/homework/correlation'
+      const corr = await fetch(url).then((r) => r.json())
       setData(corr)
     } catch {
       setError('加载失败')
     }
-  }, [])
+  }, [tidParam])
 
   useEffect(() => {
     load()
   }, [load])
 
-  const yField: 'xueji_rank' | 'grade_percentile' =
-    data?.y_field === 'grade_percentile' ? 'grade_percentile' : 'xueji_rank'
+  const subjectLabel = data?.teaching_subject ?? '当前学科'
+  const yLabel = data?.y_label ?? `${subjectLabel}班内名次`
 
   const points = useMemo(
     () =>
       (data?.rows || [])
-        .filter((r) => r[yField] != null)
-        .map((r) => ({ x: r.miss_count, y: r[yField] as number, name: r.name })),
-    [data, yField]
+        .filter((r) => r.subject_rank != null)
+        .map((r) => ({
+          x: r.miss_count,
+          y: r.subject_rank as number,
+          name: r.name,
+        })),
+    [data],
   )
 
   const missThreshold = useMemo(() => {
@@ -70,15 +84,15 @@ export default function CorrelationPage() {
   const yThreshold = useMemo(() => {
     if (points.length === 0) return 0
     const ys = points.map((p) => p.y).sort((a, b) => a - b)
+    // rank 越大越差，取 60 分位为"靠后"阈值
     return ys[Math.floor(ys.length * 0.6)]
   }, [points])
   const flagged = useMemo(
+    // 高缺交（x 大）且名次靠后（y 大）
     () => points.filter((p) => p.x >= missThreshold && p.y >= yThreshold),
-    [points, missThreshold, yThreshold]
+    [points, missThreshold, yThreshold],
   )
   const flaggedNames = new Set(flagged.map((p) => p.name))
-
-  const yLabel = data?.y_label || '学籍排名'
 
   return (
     <div className="space-y-6">
@@ -90,16 +104,30 @@ export default function CorrelationPage() {
         返回作业看板
       </Link>
 
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div>
+          <h1 className="text-lg font-semibold text-slate-900">
+            缺交 × {subjectLabel}班内名次
+          </h1>
+          <p className="mt-0.5 text-xs text-slate-500">
+            缺交越多且名次越靠后（rank 越大）的学生，落在重点关注象限
+          </p>
+        </div>
+        <ClassScopePicker compact />
+      </div>
+
       <Card>
         <CardHeader>
-          <CardTitle className="text-base">缺交总数 × 学籍排名</CardTitle>
+          <CardTitle className="text-base">
+            缺交次数 × {yLabel}
+          </CardTitle>
         </CardHeader>
         <CardContent>
           {error ? (
             <p className="py-10 text-center text-sm text-slate-400">{error}</p>
           ) : points.length === 0 ? (
             <p className="py-10 text-center text-sm text-slate-400">
-              暂无可对照数据（需该班已导入考试成绩）
+              暂无可对照数据（需当前学科已导入考试成绩）
             </p>
           ) : (
             <>
@@ -112,31 +140,43 @@ export default function CorrelationPage() {
                     name="缺交次数"
                     tick={{ fontSize: 11, fill: '#64748b' }}
                     stroke="#e2e8f0"
-                    label={{ value: '缺交次数 →', position: 'insideBottom', offset: -16, fontSize: 12, fill: '#64748b' }}
+                    label={{
+                      value: '缺交次数 →',
+                      position: 'insideBottom',
+                      offset: -16,
+                      fontSize: 12,
+                      fill: '#64748b',
+                    }}
                   />
                   <YAxis
                     type="number"
                     dataKey="y"
                     name={yLabel}
                     reversed
-                    domain={yField === 'grade_percentile' ? [0, 1] : ['auto', 'auto']}
+                    domain={['auto', 'auto']}
                     tick={{ fontSize: 11, fill: '#64748b' }}
                     stroke="#e2e8f0"
-                    label={{ value: `${yLabel}（越上越好）`, angle: -90, position: 'insideLeft', fontSize: 12, fill: '#64748b' }}
+                    label={{
+                      value: `${yLabel}（越上越好）`,
+                      angle: -90,
+                      position: 'insideLeft',
+                      fontSize: 12,
+                      fill: '#64748b',
+                    }}
                   />
                   <ZAxis range={[60, 60]} />
                   <RTooltip
                     cursor={{ strokeDasharray: '3 3' }}
                     content={({ payload }) => {
-                      const p = payload?.[0]?.payload as { name: string; x: number; y: number } | undefined
+                      const p = payload?.[0]?.payload as
+                        | { name: string; x: number; y: number }
+                        | undefined
                       if (!p) return null
-                      const yText =
-                        yField === 'grade_percentile' ? `${Math.round(p.y * 100)}%` : p.y
                       return (
                         <div className="rounded-md border border-slate-200 bg-white px-3 py-2 text-xs shadow-sm">
                           <div className="font-medium text-slate-800">{p.name}</div>
                           <div className="text-slate-500">
-                            缺交 {p.x} 次 · {yLabel} {yText}
+                            缺交 {p.x} 次 · {yLabel} {p.y}
                           </div>
                         </div>
                       )
@@ -144,13 +184,20 @@ export default function CorrelationPage() {
                   />
                   <Scatter data={points}>
                     {points.map((p, i) => (
-                      <Cell key={i} fill={flaggedNames.has(p.name) ? '#dc2626' : '#94a3b8'} />
+                      <Cell
+                        key={i}
+                        fill={flaggedNames.has(p.name) ? '#dc2626' : '#94a3b8'}
+                      />
                     ))}
                     <LabelList
                       dataKey="name"
                       position="top"
                       content={(props) => {
-                        const { x, y, value } = props as { x?: number; y?: number; value?: string }
+                        const { x, y, value } = props as {
+                          x?: number
+                          y?: number
+                          value?: string
+                        }
                         if (x == null || y == null || !value) return null
                         const flagged = flaggedNames.has(value)
                         return (
@@ -171,9 +218,8 @@ export default function CorrelationPage() {
                 </ScatterChart>
               </ResponsiveContainer>
               <p className="mt-2 text-xs text-slate-400">
-                红点 = 缺交偏多且排名靠后的学生，落在重点关注象限。
-                {yField === 'grade_percentile' ? '年级百分位越小越靠前（图中越高）。' : '学籍排名越小越靠前（图中越高）。'}
-                作业数据仅反映缺交，不代表完成质量。
+                红点 = 缺交偏多且名次靠后的学生，落在重点关注象限。
+                {yLabel}越小越靠前（图中越高）。作业数据仅反映缺交，不代表完成质量。
               </p>
             </>
           )}
@@ -184,7 +230,7 @@ export default function CorrelationPage() {
         <Card>
           <CardHeader>
             <CardTitle className="text-base">
-              重点关注（高缺交 + 排名靠后）
+              重点关注（高缺交 + 名次靠后）
             </CardTitle>
           </CardHeader>
           <CardContent>
@@ -192,9 +238,11 @@ export default function CorrelationPage() {
               {flagged
                 .sort((a, b) => b.x - a.x)
                 .map((p) => (
-                  <span key={p.name} className="rounded-md bg-danger-50 px-3 py-1.5 text-sm text-danger-600">
-                    {p.name} · 缺交{p.x}次 ·{' '}
-                    {yField === 'grade_percentile' ? `${Math.round(p.y * 100)}%` : `排名${p.y}`}
+                  <span
+                    key={p.name}
+                    className="rounded-md bg-danger-50 px-3 py-1.5 text-sm text-danger-600"
+                  >
+                    {p.name} · 缺交{p.x}次 · 名次{p.y}
                   </span>
                 ))}
             </div>

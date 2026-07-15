@@ -39,28 +39,32 @@ def test_warnings_shape(client):
 
 
 def test_correlation_shape(client):
+    # 单学科化：class_num 不再允许（400）；默认范围（全部教学班并集）
     r = client.get("/api/homework/correlation?class_num=6")
+    assert r.status_code == 400
+    r = client.get("/api/homework/correlation")
     assert r.status_code == 200
     body = r.json()
     assert "rows" in body and isinstance(body["rows"], list)
-    assert body["y_field"] == "xueji_rank"
+    assert body["y_field"] == "subject_rank"
 
 
 def test_correlation_subject_mode(client):
-    r = client.get("/api/homework/correlation?class_num=6&subject=数学")
+    # subject 兼容但只允许等于当前任教学科；y_field 统一为 subject_rank
+    r = client.get("/api/homework/correlation")
     assert r.status_code == 200
     body = r.json()
-    assert body["subject"] == "数学"
-    assert body["y_field"] == "grade_percentile"
+    assert body["y_field"] == "subject_rank"
+    assert "teaching_subject" in body
 
 
 def test_correlation_subjects_ranking(client):
     r = client.get("/api/homework/correlation/subjects?class_num=6")
+    assert r.status_code == 400
+    r = client.get("/api/homework/correlation/subjects")
     assert r.status_code == 200
     body = r.json()
     assert "rankings" in body
-    subjects = {x["subject"] for x in body["rankings"]}
-    assert "数学" in subjects
     for row in body["rankings"]:
         assert "r" in row and "n" in row
 

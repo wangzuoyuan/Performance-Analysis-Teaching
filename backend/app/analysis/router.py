@@ -1269,110 +1269,158 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
 
 @router.get("/class/compare")
 async def compare_classes(exam_id: Optional[int] = None):
-    """班级对比（D2：全年级所有班，高亮我的教学班）。
-    - 按 class_label 组织横轴（空则 str(class_num)）；mine=我的教学班集合。
-    - 官方 ClassAverage 优先（source=class_average）；我的教学班若无官方行，用成员
-      总分现算（source=computed）。
-    - dimension：高一=行政班；高二/三 数据含 class_label 或已配教学班=教学班，否则行政班。"""
-    from collections import defaultdict
-    from app.db.models import SessionLocal, Exam, ClassAverage, TotalScore
-    from app.analysis.scope import my_class_labels, members_of
+    """班级横向对比（单学科化）：只返回当前任教学科的教学班。
+
+    重定义：不再返回全年级行政班、ClassAverage.total_averages 或其他学科数据。
+    删除所有总分字段。每班至少返回 teaching_class_id/class_label/member_count/
+    subject_avg/score_basis/source。同分采用 competition ranking（跳号）。
+
+    - 考试集合只含当前学科在合法成员范围内有真实分数的考试。
+    - 显式 exam_id 必须落在合法范围内（不扩大范围）。
+    - 每场考试按成员去重后的总体均分供前端计算差值。
+    - 无成绩班保留 subject_avg=null，不得用其他班官方均分补值。
+    """
+    from app.db.models import SessionLocal, Exam, TeachingClass
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        _ELECTIVE_SUBJECTS,
+        compute_subject_rank_contextual,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
+    from app.analysis.scope import count_members
 
     db = SessionLocal()
+    try:
+        try:
+            ctx = resolve_single_subject_context(db)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
 
-    def _avg_over(members, exam_id):
-        rows = (
-            db.query(TotalScore.total_type, TotalScore.total_score)
-            .filter(
-                TotalScore.exam_id == exam_id,
-                TotalScore.student_id.in_(members),
-                TotalScore.total_type.in_(["主三门", "五门", "九门", "+3", "3+3"]),
-                TotalScore.total_score.isnot(None),
+        subject = ctx.subject
+
+        # 合法考试集合：当前学科在合法成员范围内有真实分数的考试
+        valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids)
+
+        # 显式 exam_id 必须落在合法范围内
+        if exam_id is not None and exam_id not in valid_ids:
+            return {"teaching_subject": subject, "exams": []}
+
+        if exam_id is not None:
+            selected_ids = [exam_id]
+        else:
+            exams_q = (
+                db.query(Exam)
+                .filter(Exam.id.in_(valid_ids))
+                .order_by(Exam.exam_date.desc(), Exam.id.desc())
             )
+            selected_ids = [e.id for e in exams_q.limit(10).all()]
+
+        exams = (
+            db.query(Exam)
+            .filter(Exam.id.in_(selected_ids))
+            .order_by(Exam.exam_date.desc(), Exam.id.desc())
+            .all()
+        ) if selected_ids else []
+
+        # 列出当前学科的所有教学班（逐班计算均分/成员）
+        tc_rows = (
+            db.query(TeachingClass)
+            .filter(TeachingClass.subject == subject)
+            .order_by(TeachingClass.sort_order, TeachingClass.id)
             .all()
         )
-        sums = defaultdict(list)
-        for tt, sc in rows:
-            sums[tt].append(sc)
 
-        def avg(tt):
-            v = sums.get(tt)
-            return round(sum(v) / len(v), 1) if v else None
+        result = []
+        for e in exams:
+            score_basis = (
+                "grade_score"
+                if (e.grade in (2, 3) and subject in _ELECTIVE_SUBJECTS)
+                else "raw_score"
+            )
+            classes = []
+            overall_sum = 0.0
+            overall_count = 0
+            for tc in tc_rows:
+                if tc.grade != e.grade:
+                    continue
+                # 该教学班成员（限当前学科成员范围）
+                members = _members_for_class(db, tc.id) & ctx.member_ids
+                entry = {
+                    "teaching_class_id": tc.id,
+                    "class_label": tc.label,
+                    "member_count": count_members(db, tc.id),
+                    "subject_avg": None,
+                    "score_basis": score_basis,
+                    "source": "computed",
+                }
+                if members:
+                    # 按班排名（competition ranking），顺便取均分
+                    try:
+                        sub_ctx = resolve_single_subject_context(
+                            db, teaching_class_id=tc.id, grade=e.grade,
+                        )
+                    except (SubjectNotConfiguredError, NoTeachingScopeError,
+                            SubjectConflictError, ValueError):
+                        sub_ctx = None
+                    if sub_ctx is not None:
+                        _rank_map, rows_by_sid = compute_subject_rank_contextual(
+                            db, sub_ctx, e.id, exam_grade=e.grade,
+                        )
+                        vals = []
+                        for _sid, r in rows_by_sid.items():
+                            v = r.grade_score if score_basis == "grade_score" else r.raw_score
+                            if v is not None:
+                                vals.append(float(v))
+                        if vals:
+                            entry["subject_avg"] = round(sum(vals) / len(vals), 1)
+                entry["rank"] = None
+                classes.append(entry)
+                if entry["subject_avg"] is not None:
+                    overall_sum += entry["subject_avg"]
+                    overall_count += 1
 
-        return {
-            "main_total_avg": avg("主三门"),
-            "five_total_avg": avg("五门"),
-            "nine_total_avg": avg("九门"),
-            "plus3_avg": avg("+3"),
-            "total_avg": avg("3+3"),
-        }
+            # competition ranking 按 subject_avg 降序
+            scored = [(idx, c["subject_avg"]) for idx, c in enumerate(classes)
+                      if c["subject_avg"] is not None]
+            scored.sort(key=lambda x: x[1], reverse=True)
+            prev_val = None
+            prev_rank = 0
+            for i, (idx, val) in enumerate(scored, 1):
+                if prev_val is not None and val == prev_val:
+                    classes[idx]["rank"] = prev_rank
+                else:
+                    classes[idx]["rank"] = i
+                    prev_rank = i
+                    prev_val = val
 
-    exams_query = db.query(Exam).order_by(Exam.exam_date.desc())
-    if exam_id:
-        exams_query = exams_query.filter(Exam.id == exam_id)
-    exams = exams_query.limit(10).all()
+            overall_avg = round(overall_sum / overall_count, 1) if overall_count else None
 
-    result = []
-    for e in exams:
-        my_labels = my_class_labels(db, e.grade)
-        mine_set = set(my_labels.keys())
-        avgs = db.query(ClassAverage).filter(ClassAverage.exam_id == e.id).all()
-        by_label: dict[str, dict] = {}
-
-        for a in avgs:
-            label = a.class_label or (str(a.class_num) if a.class_num is not None else None)
-            if label is None:
-                continue
-            ta = a.total_averages or {}
-            by_label[label] = {
-                "class_label": label,
-                "class_num": a.class_num,
-                "class_type": a.class_type,
-                "teacher_name": a.teacher_name,
-                "main_total_avg": ta.get("主三门"),
-                "five_total_avg": ta.get("五门") or ta.get("五门总分"),
-                "nine_total_avg": ta.get("九门") or ta.get("九门总分"),
-                "plus3_avg": ta.get("+3"),
-                "total_avg": ta.get("3+3总分") or ta.get("3+3"),
-                "mine": label in mine_set,
-                "source": "class_average",
-            }
-
-        # 我的教学班若无官方均分，用成员现算补一根柱
-        for label, tc_id in my_labels.items():
-            if label in by_label:
-                continue
-            members = members_of(db, tc_id)
-            if not members:
-                continue
-            entry = {"class_label": label, "class_num": None, "class_type": None,
-                     "teacher_name": None, "mine": True, "source": "computed"}
-            entry.update(_avg_over(members, e.id))
-            by_label[label] = entry
-
-        has_label_data = any(a.class_label for a in avgs) or bool(my_labels)
-        dimension = "行政班" if e.grade == 1 else ("教学班" if has_label_data else "行政班")
-
-        classes = sorted(
-            by_label.values(),
-            key=lambda c: (
-                not c["mine"],
-                c["main_total_avg"] is None,
-                -(c["main_total_avg"] or 0),
+            classes.sort(key=lambda c: (
+                c["rank"] if c["rank"] is not None else 10**9,
                 c["class_label"],
-            ),
-        )
-        result.append({
-            "exam_id": e.id,
-            "exam_name": e.name,
-            "grade": e.grade,
-            "dimension": dimension,
-            "mine_labels": sorted(mine_set),
-            "classes": classes,
-        })
+            ))
+            result.append({
+                "exam_id": e.id,
+                "exam_name": e.name,
+                "grade": e.grade,
+                "teaching_subject": subject,
+                "score_basis": score_basis,
+                "overall_subject_avg": overall_avg,
+                "classes": classes,
+            })
 
-    db.close()
-    return {"exams": result}
+        return {"teaching_subject": subject, "exams": result}
+    finally:
+        db.close()
 
 @router.get("/subject-weakness/{exam_id}")
 async def subject_weakness(exam_id: int, teaching_class_id: Optional[int] = None, class_num: Optional[int] = None):
@@ -1708,62 +1756,128 @@ async def list_students(
 
 @router.get("/dashboard/overview")
 async def dashboard_overview(grade: Optional[int] = None):
-    """总览仪表盘聚合：我教的所有班（可限年级）。每个教学班一行（人数、最近考试
-    主三门班均、关注数）；并附跨班并集的总体统计。避免前端 N 次 fetch。"""
-    from collections import defaultdict
-    from app.db.models import SessionLocal, Exam, TotalScore
+    """总览仪表盘聚合（单学科化）：只列当前任教学科的教学班，每班一行。
+
+    每班最近考试必须是：该班成员在当前学科至少有一条 raw_score/grade_score 有值
+    的最近考试（不得使用全局最近考试）。均分：高二/高三选考用 grade_score，其他
+    用 raw_score，不混合量纲。focus_count 使用阶段4按班 subject rank +
+    get_band_config，不年级混排。
+
+    删除 main_total_avg；返回 teaching_subject、subject_avg、score_basis、focus_count。
+    overall 学生数为当前学科教学班成员去重并集（不含遗留他科班）。
+    """
+    from app.db.models import SessionLocal, Exam
     from app.analysis.config import get_band_config
-    from app.analysis.scope import list_classes, members_of, count_members
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        _ELECTIVE_SUBJECTS,
+        band_classify,
+        compute_subject_rank_contextual,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
 
     db = SessionLocal()
     try:
-        cfg = get_band_config(db)
-        classes = list_classes(db, grade)
-        # 最新考试（按年级分别取）
-        latest_by_grade: dict[int, Exam] = {}
-        for g in {c.grade for c in classes}:
-            ex = (
-                db.query(Exam).filter(Exam.grade == g)
-                .order_by(Exam.exam_date.desc(), Exam.id.desc()).first()
-            )
-            if ex:
-                latest_by_grade[g] = ex
+        try:
+            ctx_all = resolve_single_subject_context(db, grade=grade)
+        except SubjectNotConfiguredError as e:
+            raise HTTPException(409, str(e))
+        except NoTeachingScopeError as e:
+            raise HTTPException(409, str(e))
+        except SubjectConflictError as e:
+            raise HTTPException(409, str(e))
 
+        subject = ctx_all.subject
+        cfg = get_band_config(db)
+        # score_basis 按每个班级的实际 grade 决定（避免年级混判）。
+
+        from app.db.models import TeachingClass
+        # 重新列出当前学科的教学班（resolve_single_subject_context 已限定成员范围，
+        # 这里按同样的 subject/grade 列出班级用于逐班展示）。
+        tc_q = db.query(TeachingClass).filter(TeachingClass.subject == subject)
+        if grade is not None:
+            tc_q = tc_q.filter(TeachingClass.grade == grade)
+        classes = tc_q.order_by(TeachingClass.sort_order, TeachingClass.id).all()
+
+        from app.analysis.scope import count_members
         rows = []
-        union_ids: set[str] = set()
+        union_ids: set[str] = set(ctx_all.member_ids)
         for tc in classes:
-            members = members_of(db, tc.id)
-            union_ids |= members
-            ex = latest_by_grade.get(tc.grade)
-            entry = {
-                "id": tc.id, "grade": tc.grade, "label": tc.label,
-                "subject": tc.subject, "kind": tc.kind, "member_count": count_members(db, tc.id),
-                "latest_exam": {"id": ex.id, "name": ex.name, "exam_date": ex.exam_date} if ex else None,
-                "main_total_avg": None, "focus_count": 0,
-            }
-            if ex and members:
-                totals = (
-                    db.query(TotalScore).filter(
-                        TotalScore.exam_id == ex.id, TotalScore.total_type == "主三门",
-                        TotalScore.student_id.in_(members),
-                    ).all()
+            # 逐班解析成员：必须是该教学班实际成员且属于当前学科成员范围
+            members = _members_for_class(db, tc.id) & ctx_all.member_ids
+            if not members:
+                members = _members_for_class(db, tc.id)
+            # 该班的 score_basis：高二/三选考用 grade_score，否则 raw_score
+            score_basis = (
+                "grade_score"
+                if (tc.grade in (2, 3) and subject in _ELECTIVE_SUBJECTS)
+                else "raw_score"
+            )
+            # 该班在当前学科有真实分数的最近考试
+            valid_ids = valid_exam_ids_for_subject(db, subject, members, grade=tc.grade)
+            latest_ex = None
+            if valid_ids:
+                latest_ex = (
+                    db.query(Exam)
+                    .filter(Exam.id.in_(valid_ids), Exam.grade == tc.grade)
+                    .order_by(Exam.exam_date.desc(), Exam.id.desc())
+                    .first()
                 )
-                scores = [t.total_score for t in totals if t.total_score is not None]
-                if scores:
-                    entry["main_total_avg"] = round(sum(scores) / len(scores), 1)
-                focus = 0
-                for t in totals:
-                    rank = t.xueji_rank or t.grade_rank
-                    if rank is None:
-                        continue
-                    if cfg["critical_min"] <= rank <= cfg["critical_max"] or rank >= cfg["weak_min"]:
-                        focus += 1
-                entry["focus_count"] = focus
+            entry = {
+                "id": tc.id,
+                "grade": tc.grade,
+                "label": tc.label,
+                "teaching_class_id": tc.id,
+                "subject": tc.subject,
+                "kind": tc.kind,
+                "member_count": count_members(db, tc.id),
+                "latest_exam": (
+                    {"id": latest_ex.id, "name": latest_ex.name, "exam_date": latest_ex.exam_date}
+                    if latest_ex else None
+                ),
+                "subject_avg": None,
+                "score_basis": score_basis,
+                "focus_count": 0,
+            }
+            if latest_ex and members:
+                # 按班 subject rank + band config 计算 focus_count（阶段4口径）
+                try:
+                    sub_ctx = resolve_single_subject_context(
+                        db, teaching_class_id=tc.id, grade=tc.grade,
+                    )
+                except (SubjectNotConfiguredError, NoTeachingScopeError, SubjectConflictError, ValueError):
+                    sub_ctx = None
+                rank_map, rows_by_sid = (None, None)
+                if sub_ctx is not None:
+                    rank_map, rows_by_sid = compute_subject_rank_contextual(
+                        db, sub_ctx, latest_ex.id, exam_grade=latest_ex.grade,
+                    )
+                # 均分：按 score_basis 选列
+                if rows_by_sid:
+                    vals = []
+                    for _sid, r in rows_by_sid.items():
+                        v = r.grade_score if score_basis == "grade_score" else r.raw_score
+                        if v is not None:
+                            vals.append(float(v))
+                    if vals:
+                        entry["subject_avg"] = round(sum(vals) / len(vals), 1)
+                    # focus_count
+                    if rank_map:
+                        for _sid, sr in rank_map.items():
+                            issues = band_classify(sr, cfg)
+                            if issues:
+                                entry["focus_count"] += 1
             rows.append(entry)
 
         rows.sort(key=lambda r: (r["grade"], r["label"]))
         return {
             "grade": grade,
+            "teaching_subject": subject,
             "classes": rows,
             "overall": {
                 "class_count": len(classes),
@@ -1772,3 +1886,9 @@ async def dashboard_overview(grade: Optional[int] = None):
         }
     finally:
         db.close()
+
+
+def _members_for_class(db, teaching_class_id: int) -> set[str]:
+    """某教学班的成员学号集合（复用 scope.members_of，避免循环导入问题）。"""
+    from app.analysis.scope import members_of
+    return members_of(db, teaching_class_id)

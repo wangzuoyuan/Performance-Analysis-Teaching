@@ -132,22 +132,55 @@ async def hw_dashboard(start_date: str = "", end_date: str = "", student: str = 
 
 
 @router.get("/homework/correlation")
-async def hw_correlation(class_num: Optional[int] = None, exam_id: Optional[int] = None,
-                         total_type: str = "主三门", subject: str = ""):
+async def hw_correlation(
+    teaching_class_id: Optional[int] = None,
+    exam_id: Optional[int] = None,
+    subject: str = "",
+    class_num: Optional[int] = None,
+    total_type: str = "",
+):
+    """作业缺交 × 成绩相关性（单学科化）。
+
+    - 后端自行解析唯一任教学科；前端/请求不得选择其他学科或总分类型。
+    - subject 若保留兼容，只允许等于当前学科；total_type 不再允许。
+    - class_num 非空 → 400，改用 teaching_class_id。
+    - X 为所有作业种类的缺交次数（HomeworkRecord.subject 是作业种类，不得误当学科
+      过滤）；Y 统一使用最近合法考试的当前学科 subject_rank（按班排名，越小越好）。
+    - 无当前学科成绩的合法成员保留，subject_rank=null。
+    """
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
+    if total_type:
+        raise HTTPException(400, "单学科化后不再支持 total_type")
     db = next(get_db())
     try:
         return service.grade_correlation(
-            db, class_num, exam_id, total_type, subject=subject or None
+            db,
+            teaching_class_id=teaching_class_id,
+            exam_id=exam_id,
+            subject=subject or None,
         )
     finally:
         db.close()
 
 
 @router.get("/homework/correlation/subjects")
-async def hw_correlation_subjects(class_num: Optional[int] = None, exam_id: Optional[int] = None):
+async def hw_correlation_subjects(
+    teaching_class_id: Optional[int] = None,
+    exam_id: Optional[int] = None,
+    class_num: Optional[int] = None,
+):
+    """各学科「缺交 × 该科成绩」皮尔逊相关排序（单学科化重定义）。
+
+    不再多学科扫描：重定义为仅当前任教学科一项，并返回 teaching_subject。
+    """
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
     db = next(get_db())
     try:
-        return service.subject_correlation_ranking(db, class_num, exam_id)
+        return service.subject_correlation_ranking(
+            db, teaching_class_id=teaching_class_id, exam_id=exam_id,
+        )
     finally:
         db.close()
 
@@ -163,11 +196,25 @@ async def hw_student_summary(student_id: str):
 
 
 @router.get("/weekly-focus")
-async def weekly_focus(class_num: Optional[int] = None):
-    """本周关注名单（仪表盘主动提醒）。"""
+async def weekly_focus(
+    teaching_class_id: Optional[int] = None,
+    class_num: Optional[int] = None,
+):
+    """本周关注名单（仪表盘主动提醒，单学科化）。
+
+    - 改为 teaching_class_id；非空 class_num 明确 400。
+    - 默认范围为当前任教学科教学班成员并集。
+    - 作业缺交、特殊记录、谈话跟进仍保留，但只能落在合法成员范围内。
+    - 最近考试信号不得导入/调用 chat.tools.focus_list，不得查询 TotalScore。
+      直接复用阶段4当前学科上下文、合法考试、按班 subject rank 和 band config；
+      理由仅「临界段/薄弱段」，不再「偏科」。
+    - 返回 teaching_subject、teaching_class_id。
+    """
+    if class_num is not None:
+        raise HTTPException(400, "请使用 teaching_class_id 参数，不再支持 class_num")
     db = next(get_db())
     try:
-        return service.weekly_focus(db, class_num)
+        return service.weekly_focus(db, teaching_class_id=teaching_class_id)
     finally:
         db.close()
 

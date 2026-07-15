@@ -45,33 +45,27 @@ interface Exam {
   semester?: string | null
 }
 
-interface ExamStats {
-  avg_main_total?: number | null
+interface ExamDetailStats {
   rank_min?: number | null
   rank_max?: number | null
-  by_total_type?: Record<string, TotalTypeStats | undefined> | null
-}
-
-interface TotalTypeStats {
+  avg_subject?: number | null
+  max_subject?: number | null
+  min_subject?: number | null
   count?: number | null
-  avg?: number | null
-  max?: number | null
-  min?: number | null
-  rank_min?: number | null
-  rank_max?: number | null
 }
 
 interface ExamDetailResponse {
-  stats?: ExamStats
+  stats?: ExamDetailStats
+  teaching_subject?: string | null
 }
 
 interface FocusStudent {
   student_id: string
   name: string
-  class_num?: number | null
   class_label?: string | null
-  xueji_rank: number
-  total_score?: number | null
+  subject_rank?: number | null
+  raw_score?: number | null
+  grade_score?: number | null
   issues: string[]
 }
 
@@ -83,16 +77,19 @@ interface OverviewClass {
   id: number
   grade: number
   label: string
+  teaching_class_id: number
   subject?: string | null
   kind: string
   member_count: number
   latest_exam: { id: number; name: string; exam_date: string } | null
-  main_total_avg: number | null
+  subject_avg: number | null
+  score_basis: string
   focus_count: number
 }
 
 interface OverviewResponse {
   grade: number | null
+  teaching_subject?: string | null
   classes: OverviewClass[]
   overall: { class_count: number; total_students: number }
 }
@@ -103,9 +100,11 @@ function classifyIssue(issues: string[]): { label: string; tone: IssueTone } {
   const text = issues.join(' ')
   if (/退步|下滑/.test(text)) return { label: issues[0] ?? '退步', tone: 'danger' }
   if (/波动/.test(text)) return { label: issues[0] ?? '波动', tone: 'warning' }
-  if (/偏科/.test(text)) {
-    const hit = issues.find((i) => /偏科/.test(i))
-    return { label: hit ?? '偏科', tone: 'purple' }
+  if (/临界段/.test(text)) {
+    return { label: issues.find((i) => /临界段/.test(i)) ?? '临界段', tone: 'warning' }
+  }
+  if (/薄弱段/.test(text)) {
+    return { label: issues.find((i) => /薄弱段/.test(i)) ?? '薄弱段', tone: 'danger' }
   }
   return { label: issues[0] ?? '关注', tone: 'slate' }
 }
@@ -134,15 +133,11 @@ function formatNumber(n: number | null | undefined, digits = 1): string {
   return Number(n).toFixed(digits)
 }
 
-function formatRankRange(stats: ExamStats | undefined): string {
+function formatRankRange(stats: ExamDetailStats | undefined): string {
   if (!stats || (stats.rank_min == null && stats.rank_max == null)) return '—'
   const min = stats.rank_min == null ? '—' : String(Math.round(Number(stats.rank_min)))
   const max = stats.rank_max == null ? '—' : String(Math.round(Number(stats.rank_max)))
   return `${min}-${max}`
-}
-
-function totalAvg(stats: ExamStats | undefined, key: string): string {
-  return formatNumber(stats?.by_total_type?.[key]?.avg)
 }
 
 function todayString(): string {
@@ -175,7 +170,8 @@ export default function Dashboard() {
   const [exams, setExams] = useState<Exam[]>([])
   const [focusList, setFocusList] = useState<FocusStudent[]>([])
   const [focusHistory, setFocusHistory] = useState<number[]>([])
-  const [examStatsById, setExamStatsById] = useState<Record<number, ExamStats>>({})
+  const [examStatsById, setExamStatsById] = useState<Record<number, ExamDetailStats>>({})
+  const [teachingSubject, setTeachingSubject] = useState<string | null>(null)
   const [loading, setLoading] = useState(true)
   const [focusLoading, setFocusLoading] = useState(true)
   const [showUploadPrompt, setShowUploadPrompt] = useState(false)
@@ -183,36 +179,36 @@ export default function Dashboard() {
   const [overview, setOverview] = useState<OverviewResponse | null>(null)
   const [overviewLoading, setOverviewLoading] = useState(true)
 
-  // 全局：考试列表 + 统计（与 scope 无关，只拉一次）
+  // 全局：考试列表（与 scope 无关，只拉一次，但随 scope 携带 teaching_class_id）
+  const isAll = current === 'all'
+  const scopeParam = scope.scopeParam(currentClass?.grade)
+  const tidParam = scopeParam.teaching_class_id
+  const tidQuery = tidParam ? `?teaching_class_id=${tidParam}` : ''
+
   useEffect(() => {
     let cancelled = false
     async function load() {
-      const [, examsRes] = await Promise.all([
-        safeJson<unknown>('/api/health'),
-        safeJson<{ exams?: Exam[] }>('/api/exams'),
-      ])
+      // 考试列表必须随当前 scope 重取并携带同一 teaching_class_id
+      const examsRes = await safeJson<{ exams?: Exam[] }>(`/api/exams${tidQuery}`)
       if (cancelled) return
 
       const examsList = examsRes?.exams ?? []
       setExams(examsList)
-
-      // 教学版：是否提示「去上传成绩」只看有没有任何成绩数据，
-      // 不再依赖已废弃的旧单班字段 target_class_highN（读侧已弃用）。
       setShowUploadPrompt(examsList.length === 0)
       setLoading(false)
 
-      // 拉每场考试的 stats（时间线徽章用），与最新关注名单历史
+      // 拉每场考试的 stats（当前学科，时间线徽章用）+ 关注名单历史
       const historyTargets = examsList.slice(0, 6)
       const historyPromise = Promise.all(
         historyTargets.map((e) =>
-          safeJson<FocusListResponse>(`/api/focus-list/${e.id}`).then(
+          safeJson<FocusListResponse>(`/api/focus-list/${e.id}${tidQuery}`).then(
             (r) => r?.focus_list?.length ?? 0
           )
         )
       )
       const statsPromise = Promise.all(
         examsList.map((e) =>
-          safeJson<ExamDetailResponse>(`/api/exams/${e.id}`).then((r) => [
+          safeJson<ExamDetailResponse>(`/api/exams/${e.id}${tidQuery}`).then((r) => [
             e.id,
             r?.stats ?? {},
           ] as const)
@@ -231,15 +227,11 @@ export default function Dashboard() {
     return () => {
       cancelled = true
     }
-  }, [])
-
-  const isAll = current === 'all'
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [tidQuery])
 
   // 关注名单 + KPI 统计：随 scope 变化
   const latestExam = exams[0] ?? null
-  const scopeParam = scope.scopeParam(currentClass?.grade)
-  const tidParam = scopeParam.teaching_class_id
-  const tidQuery = tidParam ? `?teaching_class_id=${tidParam}` : ''
 
   useEffect(() => {
     let cancelled = false
@@ -261,8 +253,8 @@ export default function Dashboard() {
     }
   }, [latestExam, tidQuery])
 
-  // KPI 统计：总览用全年级最新考试 stats；分班用带 tid 的 stats
-  const [scopeStats, setScopeStats] = useState<ExamStats | undefined>(undefined)
+  // KPI 统计：当前学科最近考试 stats（单学科化）
+  const [scopeStats, setScopeStats] = useState<ExamDetailStats | undefined>(undefined)
   const [scopeStatsLoading, setScopeStatsLoading] = useState(false)
   useEffect(() => {
     let cancelled = false
@@ -274,6 +266,7 @@ export default function Dashboard() {
     safeJson<ExamDetailResponse>(`/api/exams/${latestExam.id}${tidQuery}`).then((r) => {
       if (cancelled) return
       setScopeStats(r?.stats)
+      setTeachingSubject(r?.teaching_subject ?? null)
       setScopeStatsLoading(false)
     })
     return () => {
@@ -281,7 +274,7 @@ export default function Dashboard() {
     }
   }, [latestExam, tidQuery])
 
-  // 总览态：拉 overview
+  // 总览态：拉 overview（单学科化）
   useEffect(() => {
     if (!isAll) return
     let cancelled = false
@@ -289,6 +282,7 @@ export default function Dashboard() {
     safeJson<OverviewResponse>('/api/dashboard/overview').then((r) => {
       if (cancelled) return
       setOverview(r)
+      if (r?.teaching_subject) setTeachingSubject(r.teaching_subject)
       setOverviewLoading(false)
     })
     return () => {
@@ -304,9 +298,10 @@ export default function Dashboard() {
 
   const focusSeries = useMemo(() => focusHistory.map((v) => ({ v })), [focusHistory])
 
-  const latestGrade = latestExam?.grade ?? null
-  const teacherName = '班主任'
-
+  const subjectLabel = teachingSubject ?? '当前学科'
+  const scoreBasisLabel = scopeStats?.max_subject != null || scopeStats?.min_subject != null
+    ? '原始分'
+    : '原始分'
   // 首次使用：无任何教学班 → 引导去配置
   const noClassesAtAll = !scopeLoading && scopeClasses.length === 0
 
@@ -320,10 +315,10 @@ export default function Dashboard() {
           </h1>
           <p className="mt-1 text-sm text-slate-500">
             {isAll
-              ? `${teacherName} · 我教的所有班级数据概览`
+              ? `任课教师 · ${subjectLabel} · 我教的所有班级数据概览`
               : currentClass
-              ? `${formatTeachingClass(currentClass)} 班级数据概览`
-              : `${teacherName} 的班级数据概览`}
+              ? `任课教师 · ${subjectLabel} · ${formatTeachingClass(currentClass)} 班级数据概览`
+              : `任课教师 · ${subjectLabel} 的班级数据概览`}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
@@ -390,10 +385,10 @@ export default function Dashboard() {
         </Card>
       )}
 
-      {/* 本周关注（主动提醒） */}
-      <WeeklyFocusCard />
+      {/* 本周关注（主动提醒，单学科化） */}
+      <WeeklyFocusCard teachingClassId={tidParam ?? undefined} />
 
-      {/* KPI 行 */}
+      {/* KPI 行（单学科化：当前学科均分 / 最高·最低或有效人数 / 班内名次区间 / 重点关注） */}
       {loading || scopeStatsLoading ? (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
           {Array.from({ length: 4 }).map((_, i) => (
@@ -402,45 +397,28 @@ export default function Dashboard() {
         </div>
       ) : (
         <div className="grid grid-cols-1 gap-4 md:grid-cols-2 lg:grid-cols-4">
-          {latestGrade === 1 ? (
-            <>
-              <KpiCard
-                title={isAll ? '主三门均分' : '主三门班均'}
-                icon={<ClipboardList className="h-4 w-4" />}
-                value={totalAvg(scopeStats, '主三门')}
-                spark={examCountSeries}
-              />
-              <KpiCard
-                title={isAll ? '五门均分' : '五门班均'}
-                icon={<School className="h-4 w-4" />}
-                value={totalAvg(scopeStats, '五门')}
-              />
-              <KpiCard
-                title={isAll ? '年级名次区间' : '班级名次'}
-                icon={<CalendarDays className="h-4 w-4" />}
-                value={formatRankRange(scopeStats)}
-              />
-            </>
-          ) : (
-            <>
-              <KpiCard
-                title={isAll ? '主三门均分' : '主三门班均'}
-                icon={<ClipboardList className="h-4 w-4" />}
-                value={totalAvg(scopeStats, '主三门')}
-                spark={examCountSeries}
-              />
-              <KpiCard
-                title={isAll ? '+3均分' : '+3班均'}
-                icon={<School className="h-4 w-4" />}
-                value={totalAvg(scopeStats, '+3')}
-              />
-              <KpiCard
-                title={isAll ? '3+3均分' : '3+3班均'}
-                icon={<School className="h-4 w-4" />}
-                value={totalAvg(scopeStats, '3+3')}
-              />
-            </>
-          )}
+          <KpiCard
+            title={`${subjectLabel}均分（${scoreBasisLabel}）`}
+            icon={<ClipboardList className="h-4 w-4" />}
+            value={formatNumber(scopeStats?.avg_subject)}
+            spark={examCountSeries}
+          />
+          <KpiCard
+            title="最高·最低"
+            icon={<School className="h-4 w-4" />}
+            value={
+              scopeStats?.max_subject != null || scopeStats?.min_subject != null
+                ? `${formatNumber(scopeStats?.max_subject)} / ${formatNumber(scopeStats?.min_subject)}`
+                : formatNumber(scopeStats?.count) !== '—'
+                ? `${scopeStats?.count} 人`
+                : '—'
+            }
+          />
+          <KpiCard
+            title={isAll ? '年级名次区间' : '班内名次区间'}
+            icon={<CalendarDays className="h-4 w-4" />}
+            value={formatRankRange(scopeStats)}
+          />
           <KpiCard
             title="重点关注"
             icon={<AlertCircle className="h-4 w-4" />}
@@ -453,7 +431,7 @@ export default function Dashboard() {
 
       {/* 主体两列 */}
       <div className="grid grid-cols-1 gap-6 lg:grid-cols-3">
-        {/* 左：总览态=我的班级总览；分班态=考试时间线 */}
+        {/* 左：总览态=我的班级总览（单学科 subject_avg）；分班态=考试时间线 */}
         {isAll ? (
           <Card className="lg:col-span-2">
             <CardHeader>
@@ -463,7 +441,7 @@ export default function Dashboard() {
               </CardTitle>
               <CardDescription>
                 {overview
-                  ? `共 ${overview.overall.class_count} 个班 · ${overview.overall.total_students} 名学生`
+                  ? `${subjectLabel} · 共 ${overview.overall.class_count} 个班 · ${overview.overall.total_students} 名学生`
                   : '点击任一班级进入分班视图'}
               </CardDescription>
             </CardHeader>
@@ -482,7 +460,7 @@ export default function Dashboard() {
                     <li key={c.id}>
                       <button
                         type="button"
-                        onClick={() => setCurrent(c.id)}
+                        onClick={() => setCurrent(c.teaching_class_id)}
                         className="group flex w-full flex-col gap-2 rounded-lg border border-slate-100 p-3 text-left transition-colors hover:border-brand-300 hover:bg-brand-50/40 sm:flex-row sm:items-center sm:justify-between"
                       >
                         <div className="min-w-0">
@@ -506,7 +484,7 @@ export default function Dashboard() {
                         </div>
                         <div className="flex shrink-0 flex-wrap gap-2">
                           <Badge variant="outline" className="font-normal">
-                            主三门 {formatNumber(c.main_total_avg)}
+                            {c.score_basis === 'grade_score' ? '等级' : '原始'} {formatNumber(c.subject_avg)}
                           </Badge>
                           <Badge
                             variant="outline"
@@ -533,8 +511,8 @@ export default function Dashboard() {
               <CardTitle>考试时间线</CardTitle>
               <CardDescription>
                 {currentClass
-                  ? `${formatTeachingClass(currentClass)} · 按时间倒序`
-                  : '按时间倒序展示已建档考试'}
+                  ? `${subjectLabel} · ${formatTeachingClass(currentClass)} · 按时间倒序`
+                  : `${subjectLabel} · 按时间倒序展示已建档考试`}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -567,10 +545,10 @@ export default function Dashboard() {
                         </div>
                         <div className="flex gap-2">
                           <Badge variant="outline" className="font-normal">
-                            主三门班均 {formatNumber(examStatsById[exam.id]?.avg_main_total)}
+                            {subjectLabel}均分 {formatNumber(examStatsById[exam.id]?.avg_subject)}
                           </Badge>
                           <Badge variant="outline" className="font-normal">
-                            年级名次 {formatRankRange(examStatsById[exam.id])}
+                            班内名次 {formatRankRange(examStatsById[exam.id])}
                           </Badge>
                         </div>
                       </Link>
@@ -582,7 +560,7 @@ export default function Dashboard() {
           </Card>
         )}
 
-        {/* 右：重点关注速览 */}
+        {/* 右：重点关注速览（单学科化） */}
         <Card className="lg:col-span-1">
           <CardHeader className="flex-row items-start justify-between space-y-0">
             <div className="space-y-1.5">
@@ -590,7 +568,7 @@ export default function Dashboard() {
                 {isAll ? '重点关注（最近一次·全部班）' : '重点关注（最近一次）'}
               </CardTitle>
               <CardDescription>
-                {isAll ? '所有班并集预警名单' : '当前班级预警名单'}
+                {isAll ? `${subjectLabel}·所有班并集预警名单` : `${subjectLabel}·当前班级预警名单`}
               </CardDescription>
             </div>
             {latestExam && (

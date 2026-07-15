@@ -739,10 +739,6 @@ def student_summary(db, student_id=None, name=None):
     }
 
 
-# 9 门学考学科（按学科相关性用，排除"全科"）
-ACADEMIC_SUBJECTS = ("语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理")
-
-
 def _pearson(xs, ys):
     """皮尔逊相关系数；样本<3 或任一方差为 0 返回 None。"""
     n = len(xs)
@@ -758,189 +754,248 @@ def _pearson(xs, ys):
     return round(sxy / (sxx ** 0.5 * syy ** 0.5), 4)
 
 
-def _latest_exam_id(db):
-    from app.db.models import Exam, TotalScore
-    exam = (
-        db.query(Exam)
-        .join(TotalScore, TotalScore.exam_id == Exam.id)
-        .order_by(Exam.exam_date.desc(), Exam.id.desc())
-        .first()
-    )
-    return exam.id if exam else None
-
-
-def grade_correlation(db, class_num=None, exam_id=None, total_type="主三门",
+def grade_correlation(db, teaching_class_id=None, exam_id=None,
                       start=None, end=None, subject=None):
-    """班级「缺交 × 成绩」相关性数据。
+    """作业缺交 × 当前学科成绩相关性（单学科化）。
 
-    - 总分模式（subject 为空）：X=学期总缺交次数，Y=该次考试 total_type 学籍排名。
-    - 单科模式（subject 非空）：X=该科学期缺交次数，Y=该科年级百分位（越小越靠前）。
-    - class_num=None（教学版默认）：跨全花名册（我教的所有班并集）。
+    - 后端自行解析唯一任教学科；subject 兼容但只允许等于当前学科，否则 ValueError。
+    - 范围必须是当前学科教学班成员（显式班或默认去重并集）。
+    - X 为所有作业种类的缺交次数（HomeworkRecord.subject 是作业种类，不得误当学科
+      过滤）；Y 统一使用最近合法考试的当前学科 subject_rank（按班排名，越小越好），
+      高二/三选考自然由 grade_score 排名。
+    - 无当前学科成绩的合法成员保留，subject_rank=null。
     """
-    from app.db.models import SubjectScore, TotalScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+    from fastapi import HTTPException
+
+    teaching_subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+    # subject 兼容：只允许等于当前学科
+    if subject is not None and subject != teaching_subject:
+        raise HTTPException(400, f"subject 只允许当前任教学科「{teaching_subject}」")
 
     if not start or not end:
         sem = get_semester(db)
         start, end = sem["semester_start"], sem["semester_end"]
-    if exam_id is None:
-        exam_id = _latest_exam_id(db)
 
-    roster_q = db.query(ClassRoster)
-    if class_num is not None:
-        roster_q = roster_q.filter(ClassRoster.class_num == class_num)
-    roster = {r.student_id: r for r in roster_q.all()}
+    # 解析当前学科成员范围（显式班或默认并集）
+    try:
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id,
+        )
+    except Exception as e:
+        # 让领域错误冒泡为 4xx
+        raise HTTPException(409, str(e))
 
-    # 学期内缺交次数（subject 非空时只算该科）
-    miss_rows = _base_miss_query(db, start, end, subject=subject, respect_excluded=True).all()
+    member_ids = set(ctx.member_ids)
+
+    # 合法考试：当前学科在该范围内有真实分数的考试
+    valid_ids = valid_exam_ids_for_subject(db, teaching_subject, member_ids)
+    if exam_id is not None and exam_id not in valid_ids:
+        exam_id = None
+    if exam_id is None and valid_ids:
+        exam_id = max(valid_ids)
+
+    # subject_rank（按班 competition ranking，越小越好）
+    rank_map: dict[str, int] = {}
+    if exam_id is not None:
+        try:
+            rm, _rows = compute_subject_rank_contextual(
+                db, ctx, exam_id, exam_grade=None,
+            )
+            rank_map = rm
+        except Exception:
+            rank_map = {}
+
+    # 学期内缺交次数（所有作业种类，不得按学科过滤——HomeworkRecord.subject 是作业种类）
+    miss_rows = _base_miss_query(
+        db, start, end,
+        teaching_class_id=teaching_class_id,
+        respect_excluded=True,
+    ).all()
     miss_by_sid = defaultdict(int)
-    for rec, _ in miss_rows:
+    for rec, _roster in miss_rows:
         miss_by_sid[rec.student_id] += 1
 
-    if subject:
-        scores = {}
-        if exam_id is not None:
-            for s in db.query(SubjectScore).filter(
-                SubjectScore.exam_id == exam_id,
-                SubjectScore.subject == subject,
-            ).all():
-                scores[s.student_id] = s
-        rows = []
-        for sid, roster_row in roster.items():
-            if roster_row.excluded:
-                continue
-            s = scores.get(sid)
-            rows.append({
-                "student_id": sid,
-                "name": roster_row.name,
-                "miss_count": miss_by_sid.get(sid, 0),
-                "grade_percentile": s.grade_percentile if s else None,
-                "raw_score": s.raw_score if s else None,
-            })
-        rows.sort(key=lambda x: x["miss_count"], reverse=True)
-        return {
-            "class_num": class_num,
-            "exam_id": exam_id,
-            "subject": subject,
-            "y_field": "grade_percentile",
-            "y_label": "年级百分位",
-            "semester": {"start": start, "end": end},
-            "rows": rows,
-            "note": f"miss_count 为学期内{subject}缺交次数；grade_percentile 越小越靠前。{subject}缺交多且百分位大（成绩差）即落在重点关注象限。作业数据仅反映缺交，不代表完成质量。",
-        }
-
-    # 总分模式
-    totals = {}
-    if exam_id is not None:
-        for t in db.query(TotalScore).filter(
-            TotalScore.exam_id == exam_id,
-            TotalScore.total_type == total_type,
-        ).all():
-            totals[t.student_id] = t
+    # 花名册（限合法成员范围，排除 excluded）
+    roster_rows = (
+        db.query(ClassRoster)
+        .filter(ClassRoster.student_id.in_(member_ids))
+        .all()
+    )
     rows = []
-    for sid, roster_row in roster.items():
-        if roster_row.excluded:
+    for r in roster_rows:
+        if r.excluded:
             continue
-        t = totals.get(sid)
         rows.append({
-            "student_id": sid,
-            "name": roster_row.name,
-            "miss_count": miss_by_sid.get(sid, 0),
-            "xueji_rank": t.xueji_rank if t else None,
-            "grade_rank": t.grade_rank if t else None,
-            "total_score": t.total_score if t else None,
+            "student_id": r.student_id,
+            "name": r.name,
+            "miss_count": miss_by_sid.get(r.student_id, 0),
+            "subject_rank": rank_map.get(r.student_id),
         })
     rows.sort(key=lambda x: x["miss_count"], reverse=True)
     return {
-        "class_num": class_num,
+        "teaching_subject": teaching_subject,
+        "teaching_class_id": teaching_class_id,
         "exam_id": exam_id,
-        "total_type": total_type,
-        "subject": None,
-        "y_field": "xueji_rank",
-        "y_label": "学籍排名",
+        "subject": teaching_subject,
+        "y_field": "subject_rank",
+        "y_label": f"{teaching_subject}班内名次",
         "semester": {"start": start, "end": end},
         "rows": rows,
-        "note": "miss_count 为学期内缺交次数；xueji_rank 越小越靠前。缺交多且排名靠后即落在「高缺交+低排名」象限，值得重点关注。作业数据仅反映缺交，不代表完成质量。",
+        "note": (
+            f"miss_count 为学期内所有作业种类的缺交次数；subject_rank 为当前{teaching_subject}"
+            "按班排名（越小越好）。缺交多且名次靠后即落在重点关注象限。"
+            "作业数据仅反映缺交，不代表完成质量。"
+        ),
     }
 
 
-def subject_correlation_ranking(db, class_num=None, exam_id=None, start=None, end=None):
-    """各学科「缺交次数 × 该科年级百分位」皮尔逊相关排序。
 
-    r>0 表示该科缺交越多、百分位越大（成绩越差），即"缺交越拖成绩"。
-    仅纳入有该科百分位、非 excluded 的学生（缺交为 0 也计入）。按 r 降序。
+def subject_correlation_ranking(db, teaching_class_id=None, exam_id=None, start=None, end=None):
+    """「缺交 × 当前学科成绩」皮尔逊相关（单学科化重定义）。
+
+    不再多学科扫描：重定义为仅当前任教学科一项，并返回 teaching_subject。
+    r>0 表示缺交越多、当前学科排名越靠后（rank 越大）。
+    仅纳入有当前学科 subject_rank、非 excluded 的合法成员（缺交为 0 也计入）。
     """
-    from app.db.models import SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+    from fastapi import HTTPException
+
+    teaching_subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
 
     if not start or not end:
         sem = get_semester(db)
         start, end = sem["semester_start"], sem["semester_end"]
-    if exam_id is None:
-        exam_id = _latest_exam_id(db)
 
-    excluded_q = db.query(ClassRoster).filter(ClassRoster.excluded == 1)
-    if class_num is not None:
-        excluded_q = excluded_q.filter(ClassRoster.class_num == class_num)
-    excluded = {r.student_id for r in excluded_q.all()}
+    try:
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id,
+        )
+    except Exception as e:
+        raise HTTPException(409, str(e))
 
-    # 一次取全学期缺交，按 (科目, 学生) 计数
-    miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
-    miss_by_subj_sid = defaultdict(lambda: defaultdict(int))
-    for rec, _ in miss_rows:
-        miss_by_subj_sid[normalize_subject(rec.subject)][rec.student_id] += 1
+    member_ids = set(ctx.member_ids)
+    valid_ids = valid_exam_ids_for_subject(db, teaching_subject, member_ids)
+    if exam_id is not None and exam_id not in valid_ids:
+        exam_id = None
+    if exam_id is None and valid_ids:
+        exam_id = max(valid_ids)
 
-    results = []
-    for subject in ACADEMIC_SUBJECTS:
-        score_rows = []
-        if exam_id is not None:
-            score_rows = db.query(SubjectScore).filter(
-                SubjectScore.exam_id == exam_id,
-                SubjectScore.subject == subject,
-            ).all()
-        miss_map = miss_by_subj_sid.get(subject, {})
-        xs, ys = [], []
-        for s in score_rows:
-            if s.student_id in excluded or s.grade_percentile is None:
-                continue
-            xs.append(miss_map.get(s.student_id, 0))
-            ys.append(s.grade_percentile)
-        r = _pearson(xs, ys)
-        results.append({"subject": subject, "r": r, "n": len(xs)})
+    rank_map: dict[str, int] = {}
+    if exam_id is not None:
+        try:
+            rm, _rows = compute_subject_rank_contextual(
+                db, ctx, exam_id, exam_grade=None,
+            )
+            rank_map = rm
+        except Exception:
+            rank_map = {}
 
-    # r 降序；None（样本不足）排末尾
-    results.sort(key=lambda x: (x["r"] is None, -(x["r"] or 0)))
+    # 学期内缺交次数（所有作业种类）
+    miss_rows = _base_miss_query(
+        db, start, end,
+        teaching_class_id=teaching_class_id,
+        respect_excluded=True,
+    ).all()
+    miss_by_sid = defaultdict(int)
+    for rec, _roster in miss_rows:
+        miss_by_sid[rec.student_id] += 1
+
+    roster_rows = (
+        db.query(ClassRoster)
+        .filter(ClassRoster.student_id.in_(member_ids))
+        .all()
+    )
+    excluded = {r.student_id for r in roster_rows if r.excluded}
+    xs, ys = [], []
+    for r in roster_rows:
+        if r.student_id in excluded:
+            continue
+        sr = rank_map.get(r.student_id)
+        if sr is None:
+            continue
+        xs.append(miss_by_sid.get(r.student_id, 0))
+        ys.append(sr)  # rank 越小越好
+    r_val = _pearson(xs, ys)
+    results = [{"subject": teaching_subject, "r": r_val, "n": len(xs)}]
     return {
-        "class_num": class_num,
+        "teaching_subject": teaching_subject,
+        "teaching_class_id": teaching_class_id,
         "exam_id": exam_id,
         "semester": {"start": start, "end": end},
         "rankings": results,
-        "note": "r 为皮尔逊相关系数，正值越大表示该科缺交越多、年级百分位越大（成绩越差），即缺交越拖该科成绩；n 为样本数，n<3 记 r=null。作业数据仅反映缺交，不代表完成质量。",
+        "note": (
+            f"r 为皮尔逊相关系数，正值越大表示缺交越多、{teaching_subject}班内名次越靠后"
+            "（成绩越差）；n 为样本数，n<3 记 r=null。作业数据仅反映缺交，不代表完成质量。"
+        ),
     }
 
 
-def weekly_focus(db, class_num=None, today=None):
-    """本周关注名单：合并连续缺交预警、本周缺交激增、最近一次考试临界/薄弱/
-    偏科、谈话跟进待办。主要由缺交信号驱动，不依赖新考试。"""
+def weekly_focus(db, teaching_class_id=None, today=None):
+    """本周关注名单（单学科化）：合并连续缺交预警、本周缺交激增、最近一次考试
+    临界/薄弱、谈话跟进待办。主要由缺交信号驱动，不依赖新考试。
+
+    - 接受 teaching_class_id；默认范围为当前任教学科教学班成员并集。
+    - 作业缺交、特殊记录、谈话跟进仍保留，但只能落在合法成员范围内。
+    - 最近考试信号不得导入/调用 chat.tools.focus_list，不得查询 TotalScore。
+      直接复用阶段4当前学科上下文、合法考试、按班 subject rank 和 band config；
+      理由仅「临界段/薄弱段」，不再「偏科」。
+    - 返回 teaching_subject、teaching_class_id。
+    """
     from datetime import date, timedelta
 
-    from app.db.models import StudentNote
+    from app.db.models import StudentNote, Exam
+    from app.analysis.config import get_band_config
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        valid_exam_ids_for_subject,
+        band_classify,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+    from fastapi import HTTPException
+
+    teaching_subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+
+    try:
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id,
+        )
+    except Exception as e:
+        raise HTTPException(409, str(e))
+
+    member_ids = set(ctx.member_ids)
 
     sem = get_semester(db)
     start, end = sem["semester_start"], sem["semester_end"]
     today = today or date.today().isoformat()
     week_start = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
 
-    roster_q = db.query(ClassRoster).filter(ClassRoster.excluded == 0)
-    if class_num is not None:
-        roster_q = roster_q.filter(ClassRoster.class_num == class_num)
-    roster = {r.student_id: r for r in roster_q.all()}
-    reasons = defaultdict(list)  # student_id -> [理由标签]
+    # 花名册：限合法成员范围、非 excluded
+    roster = {
+        r.student_id: r
+        for r in db.query(ClassRoster)
+        .filter(ClassRoster.student_id.in_(member_ids), ClassRoster.excluded == 0)
+        .all()
+    }
+    reasons: dict[str, list] = defaultdict(list)
 
     def add(sid, tag, weight):
         if sid in roster:
             reasons[sid].append({"tag": tag, "weight": weight})
 
-    # ① 连续缺交预警（取每生最高连续次数）
-    w = warnings(db, start, end)
+    # ① 连续缺交预警（限当前学科范围）
+    w = warnings(db, start, end, teaching_class_id=teaching_class_id)
     best = {}
     for item in w["serious"] + w["warning"]:
         sid = item.get("student_id")
@@ -950,11 +1005,15 @@ def weekly_focus(db, class_num=None, today=None):
         sev = 3 if item["streak"] >= 3 else 2
         add(sid, f"连续缺交{item['streak']}次（{item['subject']}）", sev)
 
-    # ② 本周缺交激增
-    miss_rows = _base_miss_query(db, start, end, respect_excluded=True).all()
+    # ② 本周缺交激增（限当前学科范围）
+    miss_rows = _base_miss_query(
+        db, start, end,
+        teaching_class_id=teaching_class_id,
+        respect_excluded=True,
+    ).all()
     total_by_sid = defaultdict(int)
     week_by_sid = defaultdict(int)
-    for rec, _ in miss_rows:
+    for rec, _roster in miss_rows:
         total_by_sid[rec.student_id] += 1
         if week_start <= rec.date <= today:
             week_by_sid[rec.student_id] += 1
@@ -964,23 +1023,28 @@ def weekly_focus(db, class_num=None, today=None):
         if wk >= 3 and wk >= 2 * max(avg, 0.5):
             add(sid, f"本周缺交激增（{wk}次）", 2)
 
-    # ③ 最近一次考试的临界/薄弱/偏科（复用 focus_list 口径，过滤到本班）
-    try:
-        from app.chat.tools import focus_list
-        from app.db.models import Exam, TotalScore
+    # ③ 最近一次当前学科合法考试的临界/薄弱（复用阶段4口径，不调用 focus_list、
+    #    不查询 TotalScore；理由仅临界段/薄弱段）
+    valid_ids = valid_exam_ids_for_subject(db, teaching_subject, member_ids)
+    latest = None
+    if valid_ids:
         latest = (
-            db.query(Exam).join(TotalScore, TotalScore.exam_id == Exam.id)
-            .order_by(Exam.exam_date.desc(), Exam.id.desc()).first()
+            db.query(Exam)
+            .filter(Exam.id.in_(valid_ids))
+            .order_by(Exam.exam_date.desc(), Exam.id.desc())
+            .first()
         )
-        if latest:
-            for row in focus_list(latest.id):
-                sid = row.get("student_id")
-                if sid in roster and row.get("issues"):
-                    add(sid, "、".join(row["issues"]), 1)
-    except Exception:
-        pass
+    if latest:
+        cfg = get_band_config(db)
+        rank_map, _rows = compute_subject_rank_contextual(
+            db, ctx, latest.id, exam_grade=latest.grade,
+        )
+        for sid, sr in rank_map.items():
+            issues = band_classify(sr, cfg)
+            if issues:
+                add(sid, "、".join(issues), 1)
 
-    # ④ 谈话跟进待办
+    # ④ 谈话跟进待办（限合法成员范围）
     note_rows = (
         db.query(StudentNote)
         .filter(StudentNote.follow_up.isnot(None), StudentNote.follow_up_done == 0)
@@ -1000,8 +1064,12 @@ def weekly_focus(db, class_num=None, today=None):
         })
     out.sort(key=lambda x: x["score"], reverse=True)
     return {
-        "class_num": class_num,
+        "teaching_subject": teaching_subject,
+        "teaching_class_id": teaching_class_id,
         "week": {"start": week_start, "end": today},
         "students": out,
-        "note": "合并连续缺交预警、本周缺交激增、最近考试临界/薄弱/偏科、谈话跟进待办。主要由缺交信号驱动，无新考试也每天更新。",
+        "note": (
+            "合并连续缺交预警、本周缺交激增、最近考试临界/薄弱（仅当前学科）、谈话跟进待办。"
+            "主要由缺交信号驱动，无新考试也每天更新。作业数据仅反映缺交，不代表完成质量。"
+        ),
     }

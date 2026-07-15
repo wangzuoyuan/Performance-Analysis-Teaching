@@ -1327,29 +1327,29 @@ def class_homework_ranking(
 
 
 def homework_grade_correlation(
-    class_num: Optional[int] = None,
+    teaching_class_id: Optional[int] = None,
     exam_id: Optional[int] = None,
-    total_type: str = "主三门",
     subject: Optional[str] = None,
 ) -> dict[str, Any]:
-    """班级「缺交 × 成绩」联动。
+    """作业缺交 × 当前学科成绩联动（单学科化）。
 
-    - 不传 subject：X=学期总缺交次数，Y=该次考试总分学籍排名；并附带各科
-      「缺交拖成绩」皮尔逊相关排序（subject_correlation），可答"哪门课缺交最影响成绩"。
-    - 传 subject（如"数学"）：X=该科缺交次数，Y=该科年级百分位（越小越靠前）。
-    exam_id 不填取最新考试。"""
+    - 学科由后端教师上下文解析，前端/请求不可选择其他学科或总分类型。
+    - X 为所有作业种类的缺交次数；Y 为当前学科最近合法考试的 subject_rank（按班
+      排名，越小越好）。无当前学科成绩的合法成员 subject_rank=null。
+    - 附带 subject_correlation（仅当前学科缺交 × 当前学科名次 皮尔逊相关）。
+    exam_id 不填取最近一场。"""
     from app.db.models import get_db
     from app.homework import service
 
     db = next(get_db())
     try:
         result = service.grade_correlation(
-            db, class_num, exam_id, total_type, subject=subject
+            db, teaching_class_id=teaching_class_id, exam_id=exam_id,
+            subject=subject,
         )
-        if not subject:
-            result["subject_correlation"] = service.subject_correlation_ranking(
-                db, class_num, exam_id
-            )["rankings"]
+        result["subject_correlation"] = service.subject_correlation_ranking(
+            db, teaching_class_id=teaching_class_id, exam_id=exam_id,
+        )["rankings"]
         return result
     finally:
         db.close()
@@ -1662,14 +1662,12 @@ TOOLS = [
     },
     {
         "name": "homework_grade_correlation",
-        "description": "把全班「缺交」和「成绩」放在一起，回答“作业缺交多的学生成绩是不是更差”“缺交和排名有没有关系”“哪门课缺交最影响成绩”“数学缺交多的学生数学成绩如何”。不传 subject 时返回每生 miss_count 和 xueji_rank，并附带 subject_correlation（各科缺交与成绩的皮尔逊相关排序，r 越大该科缺交越拖成绩）；传 subject（如“数学”）时返回该科缺交次数与该科年级百分位。exam_id 不填取最新考试。作业数据仅反映缺交，不代表完成质量。",
+        "description": "把「缺交」和「当前学科成绩」放在一起，回答“作业缺交多的学生当前学科成绩是不是更差”“缺交和名次有没有关系”。X 为所有作业种类的缺交次数，Y 为当前学科最近合法考试的 subject_rank（按班排名，越小越好）。附带 subject_correlation（当前学科缺交 × 当前学科名次 皮尔逊相关，r 越大表示缺交越拖成绩）。学科由后端教师上下文解析，不可选择其他学科或总分。exam_id 不填取最近一场。作业数据仅反映缺交，不代表完成质量。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_num": {"type": "integer", "description": "行政班号；不填=我教的所有班并集（全花名册）"},
-                "exam_id": {"type": "integer", "description": "考试ID；不填取最新一场"},
-                "total_type": {"type": "string", "description": "总分类型，默认主三门（仅总览模式用）"},
-                "subject": {"type": "string", "description": "学科名（语文/数学/英语/物理/化学/生物/政治/历史/地理）；传了就看该科缺交×该科百分位"},
+                "teaching_class_id": {"type": "integer", "description": "教学班 id；不填=当前任教学科所有教学班成员并集"},
+                "exam_id": {"type": "integer", "description": "考试ID；不填取最近一场"},
             },
         },
     },

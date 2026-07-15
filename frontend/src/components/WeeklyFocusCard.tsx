@@ -15,6 +15,7 @@ interface FocusStudent {
 interface WeeklyFocus {
   week: { start: string; end: string }
   students: FocusStudent[]
+  teaching_subject?: string | null
 }
 
 function reasonStyle(reason: string): string {
@@ -24,31 +25,34 @@ function reasonStyle(reason: string): string {
   return 'bg-slate-100 text-slate-600'
 }
 
-export default function WeeklyFocusCard({ classNum }: { classNum?: number }) {
+export default function WeeklyFocusCard({ teachingClassId }: { teachingClassId?: number }) {
   const [data, setData] = useState<WeeklyFocus | null>(null)
   const [loaded, setLoaded] = useState(false)
 
   useEffect(() => {
-    // classNum 缺省：后端按全花名册（我教的所有班并集）合成本周关注
+    // teachingClassId 缺省：后端按当前任教学科教学班成员并集合成本周关注
     const url =
-      classNum != null ? `/api/weekly-focus?class_num=${classNum}` : '/api/weekly-focus'
+      teachingClassId != null
+        ? `/api/weekly-focus?teaching_class_id=${teachingClassId}`
+        : '/api/weekly-focus'
     fetch(url)
       .then((r) => r.json())
       .then(setData)
       .catch(() => {})
       .finally(() => setLoaded(true))
-  }, [classNum])
+  }, [teachingClassId])
 
   if (loaded && (!data || data.students.length === 0)) return null
 
   const students = data?.students || []
+  const subjectLabel = data?.teaching_subject ?? '当前学科'
 
   return (
     <Card className="border-warning-500/30 bg-warning-50/30">
       <CardHeader className="flex-row items-center justify-between space-y-0">
         <CardTitle className="flex items-center gap-2 text-base">
           <Bell className="h-4 w-4 text-warning-600" />
-          本周关注（{students.length} 人）
+          本周关注（{subjectLabel}·{students.length} 人）
         </CardTitle>
         {data && (
           <span className="text-xs text-slate-400">
@@ -85,7 +89,7 @@ export default function WeeklyFocusCard({ classNum }: { classNum?: number }) {
           </p>
         )}
         <p className="mt-3 text-xs text-slate-400">
-          合并连续缺交预警、本周缺交激增、最近考试临界/薄弱/偏科、谈话跟进待办。不依赖新考试，每天更新。
+          合并连续缺交预警、本周缺交激增、最近考试临界/薄弱（仅{subjectLabel}）、谈话跟进待办。不依赖新考试，每天更新。
         </p>
       </CardContent>
     </Card>
