@@ -37,6 +37,20 @@ def get_client():
 
 
 # ────────────────────────────── 教学班范围解析 ──────────────────────────────
+#
+# 阶段6A：chat 工具全部单学科化。范围解析不再有全年级/行政班回退：
+# - 默认 scope = 当前教师唯一任教学科的全部教学班成员去重并集；
+# - 显式 teaching_class_id 必须属于当前教师、当前 subject 和请求年级；
+# - 越权（他科班）/跨年级 拒绝，不回退。
+
+_FORBIDDEN_CLASS_PARAMS_MSG = "单学科化后不再支持 class_num / class_label，请使用 teaching_class_id"
+
+
+def _reject_legacy_class_params(class_label=None, class_num=None):
+    """禁止遗留跨口径入参（非空必须明确拒绝，不能旁路）。"""
+    if class_label is not None or class_num is not None:
+        raise ValueError(_FORBIDDEN_CLASS_PARAMS_MSG)
+
 
 def _resolve_class_scope(
     teaching_class_id: Optional[int] = None,
@@ -45,18 +59,46 @@ def _resolve_class_scope(
     grade: Optional[int] = None,
     exam_id: Optional[int] = None,
 ):
-    """把教学班参数解析成成员学号集合（None=全年级）。优先 teaching_class_id，
-    其次 class_label（按我的教学班名匹配成 tc_id），最后 class_num（行政班号回退）。"""
-    from app.analysis.scope import resolve_scope_compat, my_class_labels, members_of
+    """把教学班参数解析成 (SingleSubjectContext, grade)。
 
-    if teaching_class_id is not None:
-        return members_of(_db(), teaching_class_id)
-    if class_label:
-        labels = my_class_labels(_db(), grade)
-        tc_id = labels.get(class_label.strip()) or labels.get(class_label)
-        if tc_id is not None:
-            return members_of(_db(), tc_id)
-    return resolve_scope_compat(_db(), class_num=class_num, exam_id=exam_id, grade=grade)
+    始终基于 resolve_single_subject_context（当前教师唯一任教学科 + 合法教学班成员）。
+    class_label/class_num 非空 → ValueError（不再旁路）。
+    grade 为 None 且给了 exam_id 时用该考试年级解析。
+    """
+    from app.analysis.single_subject_metrics import resolve_single_subject_context
+    from app.db.models import Exam
+
+    _reject_legacy_class_params(class_label=class_label, class_num=class_num)
+
+    g = grade
+    if g is None and exam_id is not None:
+        db = _db()
+        try:
+            ex = db.query(Exam).filter(Exam.id == exam_id).first()
+            g = ex.grade if ex else None
+        finally:
+            db.close()
+
+    db = _db()
+    try:
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=g)
+        return ctx, g
+    finally:
+        db.close()
+
+
+def _resolve_class_scope_by_grade(
+    teaching_class_id: Optional[int],
+    grade: Optional[int],
+):
+    """范围解析（按 grade，不依赖 exam_id）。返回 SingleSubjectContext。"""
+    from app.analysis.single_subject_metrics import resolve_single_subject_context
+
+    db = _db()
+    try:
+        return resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=grade)
+    finally:
+        db.close()
 
 
 def _db():
@@ -150,77 +192,241 @@ def _missing_subject_payload(subject: str) -> dict[str, Any]:
     }
 
 def list_exams(grade: Optional[int] = None, year_range: Optional[tuple] = None) -> list:
-    """列出已建档考试"""
-    from app.db.models import Exam
-    from app.db.models import get_db
+    """列出当前任教学科在合法成员中有真实分数的考试。
 
-    db = next(get_db())
-    query = db.query(Exam).order_by(Exam.exam_date.desc())
-    if grade:
-        query = query.filter(Exam.grade == grade)
-    exams = query.all()
-    db.close()
-    return [{"id": e.id, "name": e.name, "grade": e.grade, "exam_date": e.exam_date} for e in exams]
+    单学科化：只返回当前教师任教学科在教学班成员范围内有 raw_score 或
+    grade_score 的考试；最近考试按 exam_date desc, id desc。
+    """
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+    from app.db.models import Exam
+
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db)
+        ctx = resolve_single_subject_context(db, grade=grade)
+        valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids, grade=grade)
+        if not valid_ids:
+            return []
+        q = (
+            db.query(Exam)
+            .filter(Exam.id.in_(valid_ids))
+            .order_by(Exam.exam_date.desc(), Exam.id.desc())
+        )
+        if grade:
+            q = q.filter(Exam.grade == grade)
+        exams = q.all()
+        return [
+            {"id": e.id, "name": e.name, "grade": e.grade,
+             "exam_date": e.exam_date, "teaching_subject": subject}
+            for e in exams
+        ]
+    finally:
+        db.close()
 
 def student_lookup(name: Optional[str] = None, student_id: Optional[str] = None) -> list:
-    """按姓名/学号定位学生"""
+    """按姓名/学号定位学生（限当前任教学科教学班成员范围）。"""
     from app.db.models import SubjectScore
-    from app.db.models import get_db
+    from app.analysis.scope import all_my_member_ids
+    from app.teaching.subject import resolve_teaching_subject
 
-    db = next(get_db())
-    query = db.query(SubjectScore.student_id, SubjectScore.name).distinct()
-    if student_id:
-        query = query.filter(SubjectScore.student_id == student_id)
-    if name:
-        query = query.filter(SubjectScore.name.like(f"%{name}%"))
-    results = query.all()
-    db.close()
-    return [{"student_id": r[0], "name": r[1]} for r in results]
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db)
+        member_ids = all_my_member_ids(db)
+        query = (
+            db.query(SubjectScore.student_id, SubjectScore.name)
+            .filter(
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(member_ids),
+            )
+            .distinct()
+        )
+        if student_id:
+            query = query.filter(SubjectScore.student_id == student_id)
+        if name:
+            query = query.filter(SubjectScore.name.like(f"%{name}%"))
+        results = query.all()
+        return [
+            {"student_id": r[0], "name": r[1]}
+            for r in results
+        ]
+    finally:
+        db.close()
 
 def student_exam_detail(student_id: str, exam_id: int) -> dict:
-    """某生某次考试的完整成绩"""
-    from app.db.models import SubjectScore, TotalScore
-    from app.db.models import get_db
+    """某生某次考试的当前学科成绩（单学科化）。
 
-    db = next(get_db())
-    subjects = db.query(SubjectScore).filter(
-        SubjectScore.student_id == student_id,
-        SubjectScore.exam_id == exam_id
-    ).all()
-    totals = db.query(TotalScore).filter(
-        TotalScore.student_id == student_id,
-        TotalScore.exam_id == exam_id
-    ).all()
-    db.close()
+    只返回当前任教学科一科，不含 totals/其他学科；附 subject_rank（按班
+    competition ranking）。学生必须在合法 scope（否则 ValueError）。
+    空分行（无 raw/grade_score）不当作有效成绩。
+    """
+    from app.db.models import Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        label_for_student,
+    )
 
-    return {
-        "student_id": student_id,
-        "exam_id": exam_id,
-        "subjects": [_subject_score_payload(s) for s in subjects],
-        "totals": [{"total_type": t.total_type, "total_score": t.total_score, "xueji_rank": t.xueji_rank} for t in totals],
-    }
+    db = _db()
+    try:
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise ValueError("考试不存在")
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=None, grade=exam.grade,
+        )
+        if student_id not in ctx.member_ids:
+            raise ValueError(
+                f"学生 {student_id} 不在当前任教学科教学班成员范围内"
+            )
+        subject = ctx.subject
+        score = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == exam_id,
+                SubjectScore.student_id == student_id,
+                SubjectScore.subject == subject,
+            )
+            .first()
+        )
+        # subject_rank（按班 competition ranking）
+        rank_map, _rows = compute_subject_rank_contextual(
+            db, ctx, exam_id, exam_grade=exam.grade,
+        )
+        class_label, tc_id = label_for_student(ctx, student_id, return_tc_id=True)
+
+        use_grade_score = exam.grade in (2, 3) and subject in ELECTIVE_SUBJECTS
+        score_basis = "grade_score" if use_grade_score else "raw_score"
+
+        if score is None or not _has_subject_score(score):
+            return {
+                "teaching_subject": subject,
+                "teaching_class_id": tc_id,
+                "scope": "teaching_class" if tc_id is not None else "all",
+                "score_basis": score_basis,
+                "student_id": student_id,
+                "exam_id": exam_id,
+                "exam": {
+                    "id": exam.id, "name": exam.name,
+                    "grade": exam.grade, "exam_date": exam.exam_date,
+                },
+                "subject_score": None,
+                "subject_rank": rank_map.get(student_id),
+                "class_label": class_label,
+            }
+
+        payload = _subject_score_payload(score, exam)
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": tc_id,
+            "scope": "teaching_class" if tc_id is not None else "all",
+            "score_basis": score_basis,
+            "student_id": student_id,
+            "exam_id": exam_id,
+            "subject_score": {
+                "subject": score.subject,
+                "raw_score": score.raw_score,
+                "grade_score": score.grade_score,
+                "grade_percentile": score.grade_percentile,
+                "subject_rank": rank_map.get(student_id),
+            },
+            "subject_rank": rank_map.get(student_id),
+            "class_label": class_label,
+        }
+    finally:
+        db.close()
 
 
-def student_trend(student_id: str, total_type: str = "主三门", exam_ids: Optional[list[int]] = None) -> dict:
-    """跨次趋势。跨学年调用方应使用主三门。"""
-    from app.analysis.trends import compute_student_trend
-    from app.db.models import Exam, TotalScore
-    from app.db.models import get_db
+def student_trend(student_id: str, exam_ids: Optional[list[int]] = None) -> dict:
+    """某生当前学科跨次趋势（单学科化）。
 
-    db = next(get_db())
-    if exam_ids is None:
-        exam_ids = [
-            row[0]
-            for row in db.query(TotalScore.exam_id)
-            .join(Exam, Exam.id == TotalScore.exam_id)
-            .filter(TotalScore.student_id == student_id, TotalScore.total_type == total_type)
-            .order_by(Exam.grade, Exam.exam_date)
-            .distinct()
+    只生成当前任教学科历史，删除 total_type / main_total_trend。
+    每个 series 点含 raw_score / grade_score / grade_percentile / subject_rank。
+    学生必须在合法 scope（否则 ValueError）。高二/三选考用 grade_score 判断趋势，
+    其他单科用 percentile，沿用阶段3/4 既有规则。
+    """
+    from app.db.models import Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        label_for_student,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db)
+        ctx = resolve_single_subject_context(db)
+        if student_id not in ctx.member_ids:
+            raise ValueError(
+                f"学生 {student_id} 不在当前任教学科教学班成员范围内"
+            )
+        valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids)
+        if exam_ids:
+            selected = [eid for eid in exam_ids if eid in valid_ids]
+        else:
+            selected = sorted(valid_ids)
+        if not selected:
+            return {
+                "teaching_subject": subject,
+                "student_id": student_id,
+                "series": [],
+                "score_basis": "grade_score" if False else "raw_score",
+            }
+        exams = (
+            db.query(Exam)
+            .filter(Exam.id.in_(selected))
+            .order_by(Exam.grade, Exam.exam_date, Exam.id)
             .all()
-        ]
-    result = compute_student_trend(student_id, total_type, exam_ids, db)
-    db.close()
-    return result
+        )
+        # 判断 score_basis：用最后一场考试的年级/学科
+        last_exam = exams[-1]
+        use_grade_score = last_exam.grade in (2, 3) and subject in ELECTIVE_SUBJECTS
+        score_basis = "grade_score" if use_grade_score else "raw_score"
+
+        series = []
+        for exam in exams:
+            score = (
+                db.query(SubjectScore)
+                .filter(
+                    SubjectScore.exam_id == exam.id,
+                    SubjectScore.student_id == student_id,
+                    SubjectScore.subject == subject,
+                )
+                .first()
+            )
+            if score is None or not _has_subject_score(score):
+                continue
+            rank_map, _rows = compute_subject_rank_contextual(
+                db, ctx, exam.id, exam_grade=exam.grade,
+            )
+            class_label, tc_id = label_for_student(ctx, student_id, return_tc_id=True)
+            series.append({
+                "exam_id": exam.id,
+                "exam_name": exam.name,
+                "exam_date": exam.exam_date,
+                "grade": exam.grade,
+                "raw_score": score.raw_score,
+                "grade_score": score.grade_score,
+                "grade_percentile": score.grade_percentile,
+                "subject_rank": rank_map.get(student_id),
+                "class_label": class_label,
+            })
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": label_for_student(ctx, student_id, return_tc_id=True)[1],
+            "scope": "all",
+            "score_basis": score_basis,
+            "student_id": student_id,
+            "series": series,
+        }
+    finally:
+        db.close()
 
 
 def student_learning_profile(
@@ -228,531 +434,519 @@ def student_learning_profile(
     name: Optional[str] = None,
     subject_limit: int = 5,
 ) -> dict[str, Any]:
-    """学生整体学习画像：总分趋势、单科强弱项、进退步科目。"""
-    from collections import defaultdict
+    """学生当前学科学习画像（单学科化）。
 
-    from app.db.models import Exam, SubjectScore, TotalScore
-    from app.db.models import get_db
-
-    db = next(get_db())
-    students_query = db.query(SubjectScore.student_id, SubjectScore.name).distinct()
-    if student_id:
-        students_query = students_query.filter(SubjectScore.student_id == student_id)
-    if name:
-        students_query = students_query.filter(SubjectScore.name.like(f"%{name}%"))
-    students = students_query.limit(10).all()
-
-    if not students:
-        db.close()
-        return {"error": "未找到学生", "student_id": student_id, "name": name}
-    if len(students) > 1 and not student_id:
-        db.close()
-        return {
-            "error": "匹配到多个学生，请指定学号",
-            "candidates": [{"student_id": row[0], "name": row[1]} for row in students],
-        }
-
-    resolved_student_id = students[0][0]
-    resolved_name = students[0][1] or resolved_student_id
-
-    exam_rows = (
-        db.query(Exam)
-        .join(TotalScore, Exam.id == TotalScore.exam_id)
-        .filter(TotalScore.student_id == resolved_student_id)
-        .order_by(Exam.grade, Exam.exam_date, Exam.id)
-        .distinct()
-        .all()
+    只生成当前任教学科历史，删除 total_type / main_total_trend /
+    latest_subjects / strengths / weaknesses / progress_subjects /
+    regression_subjects（多学科强弱项）。
+    保留 series（当前学科跨次趋势，含 subject_rank）。
+    学生必须在合法 scope。
+    """
+    from app.db.models import Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        label_for_student,
+        valid_exam_ids_for_subject,
     )
-    exam_map = {exam.id: exam for exam in exam_rows}
+    from app.teaching.subject import resolve_teaching_subject
 
-    totals = (
-        db.query(TotalScore)
-        .filter(TotalScore.student_id == resolved_student_id)
-        .all()
-    )
-    totals_by_type: dict[str, list[TotalScore]] = defaultdict(list)
-    for total in totals:
-        totals_by_type[total.total_type].append(total)
-    for rows in totals_by_type.values():
-        rows.sort(key=lambda row: (exam_map.get(row.exam_id).grade if exam_map.get(row.exam_id) else 0,
-                                   exam_map.get(row.exam_id).exam_date if exam_map.get(row.exam_id) else "",
-                                   row.exam_id))
-
-    subjects = (
-        db.query(SubjectScore)
-        .filter(SubjectScore.student_id == resolved_student_id)
-        .all()
-    )
-    subjects_by_name: dict[str, list[SubjectScore]] = defaultdict(list)
-    subjects_by_exam: dict[int, dict[str, SubjectScore]] = defaultdict(dict)
-    for score in subjects:
-        subjects_by_name[score.subject].append(score)
-        subjects_by_exam[score.exam_id][score.subject] = score
-    for rows in subjects_by_name.values():
-        rows.sort(key=lambda row: (exam_map.get(row.exam_id).grade if exam_map.get(row.exam_id) else 0,
-                                   exam_map.get(row.exam_id).exam_date if exam_map.get(row.exam_id) else "",
-                                   row.exam_id))
-
-    def exam_payload(exam_id: int) -> dict[str, Any]:
-        exam = exam_map.get(exam_id)
-        if not exam:
-            return {"id": exam_id, "name": str(exam_id), "grade": None, "exam_date": None}
-        return {"id": exam.id, "name": exam.name, "grade": exam.grade, "exam_date": exam.exam_date}
-
-    def is_high23_elective(score: SubjectScore) -> bool:
-        exam = exam_map.get(score.exam_id)
-        return bool(exam and exam.grade in {2, 3} and score.subject in ELECTIVE_SUBJECTS)
-
-    def analysis_metric(score: SubjectScore) -> dict[str, Any]:
-        if not _has_subject_score(score):
-            return {
-                "metric_kind": "missing",
-                "value": None,
-                "lower_is_better": None,
-                "note": "未参考或无有效成绩",
-            }
-        if is_high23_elective(score):
-            return {
-                "metric_kind": "grade_score",
-                "value": score.grade_score,
-                "lower_is_better": False,
-                "note": "高二/高三加三选考单科用等级分判断趋势",
-            }
-        return {
-            "metric_kind": "grade_percentile",
-            "value": score.grade_percentile,
-            "lower_is_better": True,
-            "note": "高一单科和高二/高三语数英用年级百分位判断趋势，数值越小越靠前",
-        }
-
-    def subject_history_payload(score: SubjectScore) -> dict[str, Any]:
-        payload = _subject_score_payload(score, exam_map.get(score.exam_id))
-        payload["analysis_metric"] = analysis_metric(score)
-        return payload
-
-    def trend_change(first: SubjectScore, latest: SubjectScore) -> tuple[float | None, dict[str, Any]]:
-        first_metric = analysis_metric(first)
-        latest_metric = analysis_metric(latest)
-        if first_metric["metric_kind"] != latest_metric["metric_kind"]:
-            return None, {
-                "metric_kind": latest_metric["metric_kind"],
-                "value_field": latest_metric["metric_kind"],
-                "reason": "起止考试指标口径不同，不能直接计算趋势变化",
-            }
-        first_value = first_metric["value"]
-        latest_value = latest_metric["value"]
-        if first_value is None or latest_value is None:
-            return None, {
-                "metric_kind": latest_metric["metric_kind"],
-                "value_field": latest_metric["metric_kind"],
-                "reason": "有效趋势点不足",
-            }
-        if latest_metric["lower_is_better"]:
-            change = round(first_value - latest_value, 4)
-        else:
-            change = round(latest_value - first_value, 4)
-        return change, {
-            "metric_kind": latest_metric["metric_kind"],
-            "value_field": latest_metric["metric_kind"],
-            "lower_is_better": latest_metric["lower_is_better"],
-            "positive_means": "进步",
-        }
-
-    main_total_trend = []
-    for total in totals_by_type.get("主三门", []):
-        main_total_trend.append(
-            {
-                "exam": exam_payload(total.exam_id),
-                "total_score": total.total_score,
-                "xueji_rank": total.xueji_rank,
-                "grade_rank": total.grade_rank,
-                "grade_percentile": total.grade_percentile,
-            }
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db)
+        ctx = resolve_single_subject_context(db)
+        # 学生定位（限合法成员范围内、当前学科）
+        q = (
+            db.query(SubjectScore.student_id, SubjectScore.name)
+            .filter(
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(ctx.member_ids),
+            )
+            .distinct()
         )
-
-    subject_summaries = []
-    subject_history = {}
-    for subject, rows in subjects_by_name.items():
-        history = [subject_history_payload(score) for score in rows]
-        subject_history[subject] = history
-        valid_rows = [score for score in rows if _has_subject_score(score)]
-        if not valid_rows:
-            continue
-        latest = valid_rows[-1]
-        comparable_rows = [
-            score
-            for score in valid_rows
-            if analysis_metric(score)["metric_kind"] == analysis_metric(latest)["metric_kind"]
-        ]
-        first = comparable_rows[0] if comparable_rows else latest
-        raw_score_change = None
-        if first.raw_score is not None and latest.raw_score is not None:
-            raw_score_change = round(latest.raw_score - first.raw_score, 2)
-        metric_change, metric_meta = trend_change(first, latest)
-        subject_summaries.append(
-            {
-                "subject": subject,
-                "latest_raw_score": latest.raw_score,
-                "latest_grade_score": latest.grade_score,
-                "latest_grade_percentile": latest.grade_percentile,
-                "raw_score_change": raw_score_change,
-                "percentile_change": metric_change if metric_meta["metric_kind"] == "grade_percentile" else None,
-                "grade_score_change": metric_change if metric_meta["metric_kind"] == "grade_score" else None,
-                "trend_change": metric_change,
-                "trend_metric": metric_meta,
-                "exam_count": len(valid_rows),
+        if student_id:
+            q = q.filter(SubjectScore.student_id == student_id)
+        if name:
+            q = q.filter(SubjectScore.name.like(f"%{name}%"))
+        students = q.limit(10).all()
+        if not students:
+            return {"error": "未在当前任教学科范围内找到该学生",
+                    "student_id": student_id, "name": name,
+                    "teaching_subject": subject}
+        if len(students) > 1 and not student_id:
+            return {
+                "error": "匹配到多个学生，请指定学号",
+                "teaching_subject": subject,
+                "candidates": [{"student_id": r[0], "name": r[1]} for r in students],
             }
+        resolved_student_id = students[0][0]
+        resolved_name = students[0][1] or resolved_student_id
+
+        valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids)
+        exams = (
+            db.query(Exam)
+            .filter(Exam.id.in_(valid_ids))
+            .order_by(Exam.grade, Exam.exam_date, Exam.id)
+            .all()
         )
+        last_exam = exams[-1] if exams else None
+        use_grade_score = bool(last_exam and last_exam.grade in (2, 3)
+                               and subject in ELECTIVE_SUBJECTS)
+        score_basis = "grade_score" if use_grade_score else "raw_score"
 
-    latest_exam = exam_rows[-1] if exam_rows else None
-    latest_subjects = []
-    if latest_exam:
-        latest_subjects = [subject_history_payload(score) for score in subjects if score.exam_id == latest_exam.id and _has_subject_score(score)]
+        series = []
+        for exam in exams:
+            score = (
+                db.query(SubjectScore)
+                .filter(
+                    SubjectScore.exam_id == exam.id,
+                    SubjectScore.student_id == resolved_student_id,
+                    SubjectScore.subject == subject,
+                )
+                .first()
+            )
+            if score is None or not _has_subject_score(score):
+                continue
+            rank_map, _rows = compute_subject_rank_contextual(
+                db, ctx, exam.id, exam_grade=exam.grade,
+            )
+            class_label, tc_id = label_for_student(
+                ctx, resolved_student_id, return_tc_id=True,
+            )
+            series.append({
+                "exam_id": exam.id,
+                "exam_name": exam.name,
+                "exam_date": exam.exam_date,
+                "grade": exam.grade,
+                "raw_score": score.raw_score,
+                "grade_score": score.grade_score,
+                "grade_percentile": score.grade_percentile,
+                "subject_rank": rank_map.get(resolved_student_id),
+                "class_label": class_label,
+            })
 
-    exam_history = []
-    for exam in exam_rows:
-        score_map = subjects_by_exam.get(exam.id, {})
-        subject_payloads = {}
-        included_subjects = []
-        missing_subjects = []
-        for subject in ALL_SUBJECTS:
-            score = score_map.get(subject)
-            payload = subject_history_payload(score) if score else _missing_subject_payload(subject)
-            subject_payloads[subject] = payload
-            if payload["available"]:
-                included_subjects.append(subject)
+        # 趋势变化（首末点）
+        trend_change = None
+        if len(series) >= 2:
+            first, latest = series[0], series[-1]
+            if use_grade_score:
+                if first["grade_score"] is not None and latest["grade_score"] is not None:
+                    trend_change = round(latest["grade_score"] - first["grade_score"], 2)
             else:
-                missing_subjects.append(subject)
-        exam_history.append(
-            {
-                "exam": exam_payload(exam.id),
-                "subjects": subject_payloads,
-                "included_subjects": included_subjects,
-                "missing_subjects": missing_subjects,
-            }
-        )
+                if first["grade_percentile"] is not None and latest["grade_percentile"] is not None:
+                    # 百分位降低=进步
+                    trend_change = round(first["grade_percentile"] - latest["grade_percentile"], 4)
 
-    def latest_sort_score(row: dict[str, Any]) -> float | None:
-        metric = row.get("analysis_metric") or {}
-        value = metric.get("value")
-        if value is None:
-            return None
-        return value if metric.get("lower_is_better") else -value
-
-    latest_rankable = [row for row in latest_subjects if latest_sort_score(row) is not None]
-    strengths = sorted(latest_rankable, key=lambda row: latest_sort_score(row) or 0)[:subject_limit]
-    weaknesses = sorted(latest_rankable, key=lambda row: latest_sort_score(row) or 0, reverse=True)[:subject_limit]
-    progress_subjects = sorted(
-        [row for row in subject_summaries if row["trend_change"] is not None],
-        key=lambda row: row["trend_change"],
-        reverse=True,
-    )[:subject_limit]
-    regression_subjects = sorted(
-        [row for row in subject_summaries if row["trend_change"] is not None],
-        key=lambda row: row["trend_change"],
-    )[:subject_limit]
-
-    db.close()
-    return {
-        "student": {
-            "student_id": resolved_student_id,
-            "name": resolved_name,
-            "current_grade": latest_exam.grade if latest_exam else None,
-            "latest_exam": exam_payload(latest_exam.id) if latest_exam else None,
-        },
-        "available_exams": [exam_payload(exam.id) for exam in exam_rows],
-        "main_total_trend": main_total_trend,
-        "latest_subjects": latest_subjects,
-        "strengths": strengths,
-        "weaknesses": weaknesses,
-        "progress_subjects": progress_subjects,
-        "regression_subjects": regression_subjects,
-        "subject_history": subject_history,
-        "exam_history": exam_history,
-        "subject_scope_note": "加三学科指物理、化学、生物、政治、历史、地理六科的统称；高二/高三学生通常只在六科中选择三科考试。",
-        "metric_note": "available=false 表示未参考或无有效成绩，即使原始导入行里有百分位也不能当作成绩引用。grade_percentile 越小表示年级位置越靠前；高一单科和高二/高三语数英用 grade_percentile 判断趋势；高二/高三加三选考单科用 grade_score 判断趋势。trend_change 为正表示进步，为负表示退步；raw_score_change 只能作为辅助说明。",
-        "analysis_boundary": "仅基于已导入考试成绩，不能推断课堂表现、作业习惯或家庭因素。",
-    }
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": label_for_student(
+                ctx, resolved_student_id, return_tc_id=True,
+            )[1],
+            "scope": "all",
+            "score_basis": score_basis,
+            "student": {
+                "student_id": resolved_student_id,
+                "name": resolved_name,
+                "current_grade": last_exam.grade if last_exam else None,
+                "latest_exam": {
+                    "id": last_exam.id, "name": last_exam.name,
+                    "grade": last_exam.grade, "exam_date": last_exam.exam_date,
+                } if last_exam else None,
+            },
+            "series": series,
+            "trend_change": trend_change,
+            "metric_note": (
+                f"score_basis={score_basis}；高二/三选考学科用 grade_score 判断趋势，"
+                "其他单科用 grade_percentile（越小越靠前）。subject_rank 为按班 "
+                "competition ranking（同分同名次）。trend_change 为正表示进步。"
+            ),
+            "analysis_boundary": "仅基于已导入考试成绩，不能推断课堂表现、作业习惯或家庭因素。",
+        }
+    finally:
+        db.close()
 
 
 def class_trend(
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
-    metric: str = "主三门",
     exam_ids: Optional[list[int]] = None,
-) -> list[dict[str, Any]]:
-    """某教学班/行政班的均分时间序列。优先 teaching_class_id/class_label（教学班标签），
-    否则 class_num（行政班号）。metric 可以是总分类型或学科名。"""
-    from app.db.models import ClassAverage, Exam, TeachingClass, TotalScore
-    from sqlalchemy import or_
+) -> dict[str, Any]:
+    """教学班当前学科均分/排名时间序列（单学科化）。
+
+    不再读 ClassAverage.total_averages；按当前学科 subject_rank 均值或
+    raw_score 均值现算。teaching_class_id 可选（默认全部当前学科教学班）。
+    """
+    from app.db.models import Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        group_members_by_class,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
 
     db = _db()
     try:
-        # 解析目标标签（教学班）或行政班号
-        label = class_label.strip() if class_label else None
-        cn = int(class_num) if class_num is not None else None
-        if teaching_class_id is not None:
-            tc = db.query(TeachingClass).filter(TeachingClass.id == teaching_class_id).first()
-            if tc:
-                label = tc.label
-        # 若给的是教学班 label，尝试转成行政班号（数字 label）
-        if label is not None and cn is None and label.isdigit():
-            cn = int(label)
-
-        query = db.query(Exam).order_by(Exam.grade, Exam.exam_date)
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids)
+        q = db.query(Exam).filter(Exam.id.in_(valid_ids)).order_by(Exam.grade, Exam.exam_date, Exam.id)
         if exam_ids:
-            query = query.filter(Exam.id.in_(exam_ids))
-        exams = query.all()
+            q = q.filter(Exam.id.in_(exam_ids))
+        exams = q.all()
+
+        last_exam = exams[-1] if exams else None
+        use_grade_score = bool(last_exam and last_exam.grade in (2, 3)
+                               and subject in ELECTIVE_SUBJECTS)
+        score_basis = "grade_score" if use_grade_score else "raw_score"
 
         series = []
         for exam in exams:
-            avg = None
-            if label is not None:
-                avg = (
-                    db.query(ClassAverage)
-                    .filter(
-                        ClassAverage.exam_id == exam.id,
-                        or_(
-                            ClassAverage.class_label == label,
-                            (ClassAverage.class_label.is_(None)) & (ClassAverage.class_num == cn),
-                        ),
-                    )
-                    .first()
-                )
-            elif cn is not None:
-                avg = db.query(ClassAverage).filter(
-                    ClassAverage.exam_id == exam.id, ClassAverage.class_num == cn
-                ).first()
-            value = None
-            if avg:
-                if avg.total_averages:
-                    value = avg.total_averages.get(metric)
-                if value is None and avg.subject_averages:
-                    value = avg.subject_averages.get(metric)
-            elif teaching_class_id is not None:
-                # 无官方班均分时，用成员现算
-                from app.analysis.scope import members_of
-                members = members_of(db, teaching_class_id)
-                if members:
-                    rows = (
-                        db.query(TotalScore.total_score)
-                        .filter(
-                            TotalScore.exam_id == exam.id,
-                            TotalScore.student_id.in_(members),
-                            TotalScore.total_type == metric,
-                            TotalScore.total_score.isnot(None),
-                        ).all()
-                    )
-                    vs = [r[0] for r in rows]
-                    value = round(sum(vs) / len(vs), 1) if vs else None
-            series.append({"exam_id": exam.id, "exam_name": exam.name, "metric": metric, "value": value})
-        return series
+            rank_map, rows_by_sid = compute_subject_rank_contextual(
+                db, ctx, exam.id, exam_grade=exam.grade,
+            )
+            groups = group_members_by_class(ctx)
+            # 计算各班均分（score_basis）和均排名
+            class_values = {}
+            for tc_id, member_set in groups.items():
+                member_rows = [rows_by_sid[sid] for sid in member_set if sid in rows_by_sid]
+                if not member_rows:
+                    continue
+                ranks = [rank_map.get(sid) for sid in member_set if sid in rank_map]
+                if use_grade_score:
+                    vals = [r.grade_score for r in member_rows if r.grade_score is not None]
+                else:
+                    vals = [r.raw_score for r in member_rows if r.raw_score is not None]
+                avg_score = round(sum(vals) / len(vals), 1) if vals else None
+                avg_rank = round(sum(ranks) / len(ranks), 1) if ranks else None
+                class_values[ctx.class_labels.get(tc_id)] = {
+                    "avg_score": avg_score,
+                    "avg_rank": avg_rank,
+                    "count": len(member_rows),
+                }
+            series.append({
+                "exam_id": exam.id,
+                "exam_name": exam.name,
+                "exam_date": exam.exam_date,
+                "class_values": class_values,
+            })
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "score_basis": score_basis,
+            "series": series,
+        }
     finally:
         db.close()
 
 
 def compare_classes(
-    teaching_class_ids: Optional[list[int]] = None,
-    class_labels: Optional[list[str]] = None,
-    class_nums: Optional[list[int]] = None,
+    teaching_class_id: Optional[int] = None,
     exam_id: int = None,
-    metric: str = "主三门",
-) -> list[dict[str, Any]]:
-    """多班同次对比。优先 teaching_class_ids/class_labels（教学班标签），否则 class_nums。"""
-    from app.db.models import ClassAverage
-    from sqlalchemy import or_
+) -> dict[str, Any]:
+    """多班同次对比（单学科化）。
+
+    不再读 ClassAverage.total_averages；按当前学科按班均分/均排名现算。
+    teaching_class_id 可选；默认对比当前学科所有教学班。
+    """
+    from app.db.models import Exam
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        group_members_by_class,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
 
     db = _db()
     try:
-        labels = [s.strip() for s in (class_labels or []) if s and s.strip()]
-        if teaching_class_ids:
-            from app.db.models import TeachingClass
-            for tc in db.query(TeachingClass).filter(TeachingClass.id.in_(teaching_class_ids)).all():
-                if tc.label not in labels:
-                    labels.append(tc.label)
-        nums = [int(n) for n in (class_nums or []) if n is not None]
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise ValueError("考试不存在")
+        use_grade_score = exam.grade in (2, 3) and subject in ELECTIVE_SUBJECTS
+        score_basis = "grade_score" if use_grade_score else "raw_score"
 
-        q = db.query(ClassAverage).filter(ClassAverage.exam_id == exam_id)
+        rank_map, rows_by_sid = compute_subject_rank_contextual(
+            db, ctx, exam.id, exam_grade=exam.grade,
+        )
+        groups = group_members_by_class(ctx)
         rows = []
-        if labels:
-            avgs = q.filter(or_(ClassAverage.class_label.in_(labels), ClassAverage.class_num.in_(nums) if nums else ClassAverage.class_label.in_(labels))).all()
-        else:
-            avgs = q.filter(ClassAverage.class_num.in_(nums)).all() if nums else []
-        for avg in avgs:
-            value = None
-            if avg.total_averages:
-                value = avg.total_averages.get(metric)
-            if value is None and avg.subject_averages:
-                value = avg.subject_averages.get(metric)
-            rows.append({"class_label": avg.class_label or str(avg.class_num), "class_num": avg.class_num, "metric": metric, "value": value})
-        return rows
+        for tc_id, member_set in groups.items():
+            member_rows = [rows_by_sid[sid] for sid in member_set if sid in rows_by_sid]
+            if not member_rows:
+                continue
+            ranks = [rank_map.get(sid) for sid in member_set if sid in rank_map]
+            if use_grade_score:
+                vals = [r.grade_score for r in member_rows if r.grade_score is not None]
+            else:
+                vals = [r.raw_score for r in member_rows if r.raw_score is not None]
+            avg_score = round(sum(vals) / len(vals), 1) if vals else None
+            avg_rank = round(sum(ranks) / len(ranks), 1) if ranks else None
+            rows.append({
+                "teaching_class_id": tc_id,
+                "class_label": ctx.class_labels.get(tc_id),
+                "avg_score": avg_score,
+                "avg_rank": avg_rank,
+                "count": len(member_rows),
+            })
+        rows.sort(key=lambda r: (r["avg_rank"] is None, r["avg_rank"] or 0))
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "score_basis": score_basis,
+            "exam": {
+                "id": exam.id, "name": exam.name,
+                "grade": exam.grade, "exam_date": exam.exam_date,
+            },
+            "rows": rows,
+        }
     finally:
         db.close()
 
 
-def focus_list(exam_id: int, category: Optional[str] = None) -> list[dict[str, Any]]:
-    """重点关注名单。"""
-    from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF, get_band_config
-    from app.db.models import SubjectScore, TotalScore
-    from app.db.models import get_db
+def focus_list(
+    exam_id: int,
+    teaching_class_id: Optional[int] = None,
+    category: Optional[str] = None,
+) -> dict[str, Any]:
+    """重点关注名单（单学科化）。
 
-    db = next(get_db())
-    band_cfg = get_band_config(db)
-    totals = db.query(TotalScore).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门",
-    ).all()
-    rows = []
-    for total in totals:
-        rank = total.xueji_rank or total.grade_rank or 999999
-        subjects = db.query(SubjectScore).filter(
-            SubjectScore.exam_id == exam_id,
-            SubjectScore.student_id == total.student_id,
-        ).all()
-        name = next((s.name for s in subjects if s.name), total.student_id)
-        issues = []
-        if band_cfg["critical_min"] <= rank <= band_cfg["critical_max"]:
-            issues.append("临界段")
-        if rank >= band_cfg["weak_min"]:
-            issues.append("薄弱段")
-        if total.grade_percentile is not None:
-            for subject in subjects:
-                if subject.grade_percentile is not None and subject.grade_percentile - total.grade_percentile >= SUBJECT_WEAKNESS_PCT_DIFF:
-                    issues.append(f"严重偏科({subject.subject})")
-        if category:
-            issues = [issue for issue in issues if category in issue]
-        if issues:
-            rows.append({"student_id": total.student_id, "name": name, "xueji_rank": rank, "issues": issues})
-    db.close()
-    return sorted(rows, key=lambda row: row["xueji_rank"])[:50]
+    基于 subject_rank + band_config（临界段/薄弱段），不查 TotalScore、不偏科。
+    学生必须在合法 scope。
+    """
+    from app.db.models import Exam
+    from app.analysis.config import get_band_config
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        label_for_student,
+        band_classify,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
+
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id,
+        )
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise ValueError("考试不存在")
+        band_cfg = get_band_config(db)
+        rank_map, rows_by_sid = compute_subject_rank_contextual(
+            db, ctx, exam.id, exam_grade=exam.grade,
+        )
+        rows = []
+        for sid, sr in rank_map.items():
+            issues = band_classify(sr, band_cfg)
+            if category:
+                issues = [i for i in issues if category in i]
+            if not issues:
+                continue
+            r = rows_by_sid.get(sid)
+            class_label, tc_id = label_for_student(ctx, sid, return_tc_id=True)
+            rows.append({
+                "student_id": sid,
+                "name": r.name if r else sid,
+                "subject_rank": sr,
+                "issues": issues,
+                "class_label": class_label,
+                "teaching_class_id": tc_id,
+            })
+        rows.sort(key=lambda row: (row["subject_rank"], row["student_id"]))
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "exam_id": exam_id,
+            "focus_list": rows[:50],
+            "band_config": band_cfg,
+        }
+    finally:
+        db.close()
 
 
 def subject_weakness(
     exam_id: int,
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
-) -> list[dict[str, Any]]:
-    """本班/教学班单科薄弱清单。teaching_class_id/class_label 限定教学班成员，
-    class_num 限定行政班，都空=全年级。"""
-    from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF
-    from app.db.models import SubjectScore, TotalScore
-    from app.db.models import get_db
+) -> dict[str, Any]:
+    """当前学科薄弱名单（单学科化重定义）。
 
-    db = next(get_db())
-    allowed = _resolve_class_scope(
-        teaching_class_id=teaching_class_id, class_label=class_label,
-        class_num=class_num, exam_id=exam_id,
+    不再「单科百分位 vs 主三门百分位」差；改为当前学科 subject_rank 靠后
+    的学生（薄弱段，用 band_config.weak_min）。不查 TotalScore。
+    """
+    from app.db.models import Exam
+    from app.analysis.config import get_band_config
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        label_for_student,
     )
-    main_totals = db.query(TotalScore).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门",
-    ).all()
-    main_pct = {row.student_id: row.grade_percentile for row in main_totals if row.grade_percentile is not None}
-    subjects = db.query(SubjectScore).filter(
-        SubjectScore.exam_id == exam_id,
-    ).all()
-    rows = []
-    for subject in subjects:
-        if allowed is not None and subject.student_id not in allowed:
-            continue
-        base = main_pct.get(subject.student_id)
-        if base is None or subject.grade_percentile is None:
-            continue
-        diff = subject.grade_percentile - base
-        if diff >= SUBJECT_WEAKNESS_PCT_DIFF:
-            rows.append(
-                {
-                    "student_id": subject.student_id,
-                    "name": subject.name,
-                    "subject": subject.subject,
-                    "raw_score": subject.raw_score,
-                    "grade_percentile": subject.grade_percentile,
-                    "diff": round(diff, 3),
-                }
-            )
-    db.close()
-    return sorted(rows, key=lambda row: row["grade_percentile"])[:50]
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
+
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id,
+        )
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise ValueError("考试不存在")
+        band_cfg = get_band_config(db)
+        rank_map, rows_by_sid = compute_subject_rank_contextual(
+            db, ctx, exam.id, exam_grade=exam.grade,
+        )
+        rows = []
+        for sid, sr in rank_map.items():
+            if sr < band_cfg["weak_min"]:
+                continue
+            r = rows_by_sid.get(sid)
+            class_label, tc_id = label_for_student(ctx, sid, return_tc_id=True)
+            rows.append({
+                "student_id": sid,
+                "name": r.name if r else sid,
+                "subject_rank": sr,
+                "raw_score": r.raw_score if r else None,
+                "grade_score": r.grade_score if r else None,
+                "grade_percentile": r.grade_percentile if r else None,
+                "class_label": class_label,
+                "teaching_class_id": tc_id,
+            })
+        rows.sort(key=lambda row: (-row["subject_rank"], row["student_id"]))
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "exam_id": exam_id,
+            "subject_weakness": rows[:50],
+            "band_config": band_cfg,
+        }
+    finally:
+        db.close()
 
 
 def subject_progress_ranking(
     grade: int,
-    subject: str,
     start_exam_id: Optional[int] = None,
     end_exam_id: Optional[int] = None,
     limit: int = 10,
     direction: str = "progress",
+    teaching_class_id: Optional[int] = None,
 ) -> dict[str, Any]:
-    """按年级/学科查询跨考试进步最大的学生。"""
+    """当前学科跨考试进步/退步排行（单学科化）。
+
+    学科固定为当前任教学科，不接受 subject 参数。
+    学生限合法成员范围。高二/三选考用 grade_score，其他单科用 percentile，
+    沿用阶段3/4 既有规则。
+    """
     from app.db.models import Exam, SubjectScore
-    from app.db.models import get_db
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        label_for_student,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
 
-    db = next(get_db())
-    exams_query = db.query(Exam).filter(Exam.grade == grade).order_by(Exam.exam_date, Exam.id)
-    exams = exams_query.all()
-    if len(exams) < 2 and not (start_exam_id and end_exam_id):
-        db.close()
-        return {"error": "该年级可比较的考试少于2次", "grade": grade, "subject": subject, "rows": []}
+    db = _db()
+    try:
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id, grade=grade,
+        )
+        valid_ids = valid_exam_ids_for_subject(
+            db, subject, ctx.member_ids, grade=grade,
+        )
+        exams_query = (
+            db.query(Exam)
+            .filter(Exam.grade == grade, Exam.id.in_(valid_ids))
+            .order_by(Exam.exam_date, Exam.id)
+        )
+        exams = exams_query.all()
+        if len(exams) < 2 and not (start_exam_id and end_exam_id):
+            return {"error": "该年级可比较的考试少于2次",
+                    "grade": grade, "teaching_subject": subject, "rows": []}
 
-    exam_by_id = {exam.id: exam for exam in exams}
-    if start_exam_id is None:
-        start_exam = exams[0]
-    else:
-        start_exam = exam_by_id.get(start_exam_id) or db.query(Exam).filter(Exam.id == start_exam_id).first()
-    if end_exam_id is None:
-        end_exam = exams[-1]
-    else:
-        end_exam = exam_by_id.get(end_exam_id) or db.query(Exam).filter(Exam.id == end_exam_id).first()
+        exam_by_id = {exam.id: exam for exam in exams}
+        if start_exam_id is None:
+            start_exam = exams[0]
+        else:
+            start_exam = exam_by_id.get(start_exam_id)
+        if end_exam_id is None:
+            end_exam = exams[-1]
+        else:
+            end_exam = exam_by_id.get(end_exam_id)
 
-    if not start_exam or not end_exam:
-        db.close()
-        return {"error": "起止考试不存在", "grade": grade, "subject": subject, "rows": []}
-    if start_exam.id == end_exam.id:
-        db.close()
-        return {"error": "起止考试不能相同", "grade": grade, "subject": subject, "rows": []}
+        if not start_exam or not end_exam:
+            return {"error": "起止考试不存在",
+                    "grade": grade, "teaching_subject": subject, "rows": []}
+        if start_exam.id == end_exam.id:
+            return {"error": "起止考试不能相同",
+                    "grade": grade, "teaching_subject": subject, "rows": []}
 
-    start_scores = db.query(SubjectScore).filter(
-        SubjectScore.exam_id == start_exam.id,
-        SubjectScore.subject == subject,
-    ).all()
-    end_scores = db.query(SubjectScore).filter(
-        SubjectScore.exam_id == end_exam.id,
-        SubjectScore.subject == subject,
-    ).all()
+        start_scores = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == start_exam.id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(ctx.member_ids),
+            )
+            .all()
+        )
+        end_scores = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id == end_exam.id,
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(ctx.member_ids),
+            )
+            .all()
+        )
 
-    use_grade_score = start_exam.grade in {2, 3} and end_exam.grade in {2, 3} and subject in ELECTIVE_SUBJECTS
-    start_by_student = {score.student_id: score for score in start_scores}
-    rows = []
-    for end_score in end_scores:
-        start_score = start_by_student.get(end_score.student_id)
-        if not start_score:
-            continue
+        use_grade_score = start_exam.grade in {2, 3} and end_exam.grade in {2, 3} and subject in ELECTIVE_SUBJECTS
+        score_basis = "grade_score" if use_grade_score else "raw_score"
+        start_by_student = {score.student_id: score for score in start_scores}
+        rows = []
+        for end_score in end_scores:
+            start_score = start_by_student.get(end_score.student_id)
+            if not start_score:
+                continue
+            if not _has_subject_score(start_score) or not _has_subject_score(end_score):
+                continue
 
-        if not _has_subject_score(start_score) or not _has_subject_score(end_score):
-            continue
+            percentile_change = None
+            if start_score.grade_percentile is not None and end_score.grade_percentile is not None:
+                percentile_change = round(start_score.grade_percentile - end_score.grade_percentile, 4)
 
-        percentile_change = None
-        if start_score.grade_percentile is not None and end_score.grade_percentile is not None:
-            percentile_change = round(start_score.grade_percentile - end_score.grade_percentile, 4)
+            grade_score_change = None
+            if start_score.grade_score is not None and end_score.grade_score is not None:
+                grade_score_change = round(end_score.grade_score - start_score.grade_score, 2)
 
-        grade_score_change = None
-        if start_score.grade_score is not None and end_score.grade_score is not None:
-            grade_score_change = round(end_score.grade_score - start_score.grade_score, 2)
+            raw_score_change = None
+            if start_score.raw_score is not None and end_score.raw_score is not None:
+                raw_score_change = round(end_score.raw_score - start_score.raw_score, 2)
 
-        raw_score_change = None
-        if start_score.raw_score is not None and end_score.raw_score is not None:
-            raw_score_change = round(end_score.raw_score - start_score.raw_score, 2)
+            trend_change = grade_score_change if use_grade_score else percentile_change
+            if trend_change is None and raw_score_change is None:
+                continue
 
-        trend_change = grade_score_change if use_grade_score else percentile_change
-        if trend_change is None and raw_score_change is None:
-            continue
-
-        rows.append(
-            {
+            class_label, tc_id = label_for_student(ctx, end_score.student_id, return_tc_id=True)
+            rows.append({
                 "student_id": end_score.student_id,
                 "name": end_score.name or start_score.name,
-                "class_num": end_score.class_num or start_score.class_num,
+                "class_label": class_label,
+                "teaching_class_id": tc_id,
                 "start_raw_score": start_score.raw_score,
                 "end_raw_score": end_score.raw_score,
                 "raw_score_change": raw_score_change,
@@ -763,73 +957,62 @@ def subject_progress_ranking(
                 "end_grade_percentile": end_score.grade_percentile,
                 "percentile_change": percentile_change,
                 "trend_change": trend_change,
-            }
+            })
+
+        reverse = direction != "regression"
+        none_value = float("-inf") if reverse else float("inf")
+        rows.sort(
+            key=lambda row: (
+                row["trend_change"] if row["trend_change"] is not None else none_value,
+                row["raw_score_change"] if row["raw_score_change"] is not None else none_value,
+            ),
+            reverse=reverse,
         )
-
-    reverse = direction != "regression"
-    none_value = float("-inf") if reverse else float("inf")
-    rows.sort(
-        key=lambda row: (
-            row["trend_change"] if row["trend_change"] is not None else none_value,
-            row["raw_score_change"] if row["raw_score_change"] is not None else none_value,
-        ),
-        reverse=reverse,
-    )
-    db.close()
-
-    return {
-        "grade": grade,
-        "subject": subject,
-        "start_exam": {"id": start_exam.id, "name": start_exam.name, "exam_date": start_exam.exam_date},
-        "end_exam": {"id": end_exam.id, "name": end_exam.name, "exam_date": end_exam.exam_date},
-        "direction": direction,
-        "metric": (
-            "高二/高三加三学科用 grade_score_change/trend_change 判断进退步；"
-            "其他单科用 percentile_change/trend_change 判断进退步，正数表示进步，负数表示退步；"
-            "raw_score_change 为原始分变化，只作单点辅助。"
-        ),
-        "rows": rows[: max(1, min(limit, 50))],
-    }
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "score_basis": score_basis,
+            "grade": grade,
+            "subject": subject,
+            "start_exam": {"id": start_exam.id, "name": start_exam.name, "exam_date": start_exam.exam_date},
+            "end_exam": {"id": end_exam.id, "name": end_exam.name, "exam_date": end_exam.exam_date},
+            "direction": direction,
+            "metric": (
+                "高二/高三加三学科用 grade_score_change/trend_change 判断进退步；"
+                "其他单科用 percentile_change/trend_change 判断进退步，正数表示进步，负数表示退步；"
+                "raw_score_change 为原始分变化，只作单点辅助。"
+            ),
+            "rows": rows[: max(1, min(limit, 50))],
+        }
+    finally:
+        db.close()
 
 
 def multi_exam_progress_ranking(
     grade: int,
-    metrics: Optional[list[str]] = None,
     exam_ids: Optional[list[int]] = None,
     recent_count: int = 5,
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
     limit: int = 10,
     direction: str = "progress",
     min_points: int = 2,
 ) -> dict[str, Any]:
-    """多场考试合并判断进退步/趋势排行。"""
-    from app.db.models import Exam, SubjectScore, TotalScore
-    from app.db.models import get_db
+    """当前学科多场考试进退步/趋势排行（单学科化）。
 
-    total_types = {"主三门", "五门", "九门", "+3", "3+3"}
-    base_subjects = {"语文", "数学", "英语"}
-    elective_subjects = {"物理", "化学", "生物", "政治", "历史", "地理"}
-    all_subjects = base_subjects | elective_subjects
+    固定当前任教学科单一指标，不接受 metrics / total。学生限合法成员范围。
+    高二/三选考用 grade_score，其他单科用 percentile（沿用阶段3/4规则）。
+    """
+    from app.db.models import Exam, SubjectScore
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        label_for_student,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
 
-    def default_metrics_for_grade() -> list[str]:
-        if grade == 1:
-            return ["主三门", "五门", "语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理"]
-        return ["主三门", "3+3", "+3", "语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理"]
-
-    def clean_metrics(values: Optional[list[str]]) -> list[str]:
-        seen = set()
-        cleaned = []
-        for value in values or default_metrics_for_grade():
-            metric = str(value).strip()
-            if not metric or metric in seen:
-                continue
-            if metric not in total_types and metric not in all_subjects:
-                continue
-            seen.add(metric)
-            cleaned.append(metric)
-        return cleaned
+    _reject_legacy_class_params()
 
     def line_fit_change(values: list[float], lower_is_better: bool) -> float:
         n = len(values)
@@ -885,7 +1068,8 @@ def multi_exam_progress_ranking(
         return {
             "student_id": student_id,
             "name": profile.get("name") or student_id,
-            "class_num": profile.get("class_num"),
+            "class_label": profile.get("class_label"),
+            "teaching_class_id": profile.get("teaching_class_id"),
             "metric": metric,
             "metric_kind": metric_kind,
             "value_field": value_field,
@@ -900,26 +1084,35 @@ def multi_exam_progress_ranking(
             "series": points,
         }
 
-    db = next(get_db())
+    db = _db()
     try:
-        selected_metrics = clean_metrics(metrics)
-        if not selected_metrics:
-            return {"error": "没有可分析的指标", "grade": grade, "metrics": []}
-
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id, grade=grade,
+        )
+        valid_ids = valid_exam_ids_for_subject(
+            db, subject, ctx.member_ids, grade=grade,
+        )
         if exam_ids:
             exams = (
                 db.query(Exam)
-                .filter(Exam.id.in_(exam_ids), Exam.grade == grade)
+                .filter(Exam.id.in_(exam_ids), Exam.grade == grade, Exam.id.in_(valid_ids))
                 .order_by(Exam.exam_date, Exam.id)
                 .all()
             )
         else:
-            all_exams = db.query(Exam).filter(Exam.grade == grade).order_by(Exam.exam_date, Exam.id).all()
+            all_valid = (
+                db.query(Exam)
+                .filter(Exam.id.in_(valid_ids), Exam.grade == grade)
+                .order_by(Exam.exam_date, Exam.id)
+                .all()
+            )
             count = max(2, min(recent_count or 5, 12))
-            exams = all_exams[-count:]
+            exams = all_valid[-count:]
 
         if len(exams) < 2:
-            return {"error": "该年级可比较的考试少于2次", "grade": grade, "metrics": selected_metrics, "rows": []}
+            return {"error": "该年级可比较的考试少于2次",
+                    "grade": grade, "teaching_subject": subject, "rows": []}
 
         exam_ids_selected = [exam.id for exam in exams]
         exam_payload = [
@@ -928,121 +1121,79 @@ def multi_exam_progress_ranking(
         ]
         exam_name_by_id = {exam.id: exam.name for exam in exams}
 
-        subject_rows = db.query(SubjectScore).filter(SubjectScore.exam_id.in_(exam_ids_selected)).all()
-        allowed = _resolve_class_scope(
-            teaching_class_id=teaching_class_id, class_label=class_label,
-            class_num=class_num, grade=grade,
+        use_grade_score = grade in (2, 3) and subject in ELECTIVE_SUBJECTS
+        score_basis = "grade_score" if use_grade_score else "raw_score"
+        value_field = "grade_score" if use_grade_score else "grade_percentile"
+        lower_is_better = not use_grade_score
+
+        subject_rows = (
+            db.query(SubjectScore)
+            .filter(
+                SubjectScore.exam_id.in_(exam_ids_selected),
+                SubjectScore.subject == subject,
+                SubjectScore.student_id.in_(ctx.member_ids),
+            )
+            .all()
         )
-        profiles: dict[str, dict[str, Any]] = {}
+        # 按学生 + 考试构建趋势点
+        grouped: dict[str, list[dict[str, Any]]] = {}
         for row in subject_rows:
-            profile = profiles.setdefault(row.student_id, {"name": row.name, "class_num": row.class_num})
-            if row.name:
-                profile["name"] = row.name
-            if row.class_num is not None:
-                profile["class_num"] = row.class_num
+            value = row.grade_score if use_grade_score else row.grade_percentile
+            if value is None:
+                continue
+            grouped.setdefault(row.student_id, []).append({
+                "exam_id": row.exam_id,
+                "exam_name": exam_name_by_id.get(row.exam_id, str(row.exam_id)),
+                "value": value,
+                "value_field": value_field,
+                "raw_score": row.raw_score,
+                "grade_score": row.grade_score,
+                "grade_percentile": row.grade_percentile,
+            })
 
-        results = []
-        for metric in selected_metrics:
-            is_total = metric in total_types
-            metric_kind = "total" if is_total else "subject"
-            if is_total:
-                rows = (
-                    db.query(TotalScore)
-                    .filter(TotalScore.exam_id.in_(exam_ids_selected), TotalScore.total_type == metric)
-                    .all()
-                )
-                grouped: dict[str, list[dict[str, Any]]] = {}
-                value_field = "total_score" if metric == "+3" else "rank_or_percentile"
-                lower_is_better = metric != "+3"
-                for row in rows:
-                    if allowed is not None and row.student_id not in allowed:
-                        continue
-                    if metric == "+3":
-                        value = row.total_score
-                        current_field = "total_score"
-                    else:
-                        value = row.xueji_rank or row.grade_rank
-                        current_field = "rank"
-                        if value is None and row.grade_percentile is not None:
-                            value = row.grade_percentile
-                            current_field = "grade_percentile"
-                    if value is None:
-                        continue
-                    value_field = current_field if value_field == "rank_or_percentile" else value_field
-                    grouped.setdefault(row.student_id, []).append(
-                        {
-                            "exam_id": row.exam_id,
-                            "exam_name": exam_name_by_id.get(row.exam_id, str(row.exam_id)),
-                            "value": value,
-                            "value_field": current_field,
-                            "total_score": row.total_score,
-                            "xueji_rank": row.xueji_rank,
-                            "grade_rank": row.grade_rank,
-                            "grade_percentile": row.grade_percentile,
-                        }
-                    )
-            else:
-                rows = [row for row in subject_rows if row.subject == metric]
-                grouped = {}
-                lower_is_better = not (grade in {2, 3} and metric not in base_subjects)
-                value_field = "grade_score" if not lower_is_better else "grade_percentile"
-                for row in rows:
-                    if allowed is not None and row.student_id not in allowed:
-                        continue
-                    value = row.grade_score if value_field == "grade_score" else row.grade_percentile
-                    if value is None:
-                        continue
-                    grouped.setdefault(row.student_id, []).append(
-                        {
-                            "exam_id": row.exam_id,
-                            "exam_name": exam_name_by_id.get(row.exam_id, str(row.exam_id)),
-                            "value": value,
-                            "value_field": value_field,
-                            "raw_score": row.raw_score,
-                            "grade_score": row.grade_score,
-                            "grade_percentile": row.grade_percentile,
-                        }
-                    )
+        metric_rows = []
+        for student_id, points in grouped.items():
+            ordered_points = sorted(points, key=lambda point: exam_ids_selected.index(point["exam_id"]))
+            class_label, tc_id = label_for_student(ctx, student_id, return_tc_id=True)
+            # name 取自行
+            name = next((r.name for r in subject_rows if r.student_id == student_id), None)
+            profile = {
+                "name": name or student_id,
+                "class_label": class_label,
+                "teaching_class_id": tc_id,
+            }
+            row = build_row(student_id, subject, "subject", value_field, lower_is_better, ordered_points, profile)
+            if row:
+                metric_rows.append(row)
 
-            metric_rows = []
-            for student_id, points in grouped.items():
-                ordered_points = sorted(points, key=lambda point: exam_ids_selected.index(point["exam_id"]))
-                profile = profiles.get(student_id, {})
-                row = build_row(student_id, metric, metric_kind, value_field, lower_is_better, ordered_points, profile)
-                if row:
-                    metric_rows.append(row)
-
-            reverse = direction != "regression"
-            metric_rows.sort(
-                key=lambda row: (
-                    row["trend_score"],
-                    row["overall_change"],
-                    row["improvement_steps"] - row["regression_steps"],
-                ),
-                reverse=reverse,
-            )
-            results.append(
-                {
-                    "metric": metric,
-                    "metric_kind": metric_kind,
-                    "value_field": value_field,
-                    "lower_is_better": lower_is_better,
-                    "rows": metric_rows[: max(1, min(limit, 50))],
-                }
-            )
+        reverse = direction != "regression"
+        metric_rows.sort(
+            key=lambda row: (
+                row["trend_score"],
+                row["overall_change"],
+                row["improvement_steps"] - row["regression_steps"],
+            ),
+            reverse=reverse,
+        )
 
         return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "score_basis": score_basis,
             "grade": grade,
             "direction": direction,
-            "teaching_class_id": teaching_class_id,
-            "class_num": class_num,
             "exams": exam_payload,
             "recent_count": len(exams),
-            "metrics": results,
+            "metric": subject,
+            "metric_kind": "subject",
+            "value_field": value_field,
+            "lower_is_better": lower_is_better,
+            "rows": metric_rows[: max(1, min(limit, 50))],
             "metric_note": (
                 "trend_score 综合首末变化和多点线性趋势；正数表示进步，负数表示退步。"
-                "总分优先使用学籍/年级排名，其次年级百分位；高一单科和高二/三语数英用年级百分位；"
-                "高二/三选考单科用等级分。"
+                "高二/三选考单科用等级分（grade_score），其他单科用年级百分位"
+                "（grade_percentile，越小越靠前）。"
             ),
         }
     finally:
@@ -1052,52 +1203,81 @@ def multi_exam_progress_ranking(
 def band_trend(
     grade: int,
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
 ) -> dict[str, Any]:
-    """某年级历次考试的高分段/临界段/薄弱段人数趋势。teaching_class_id/class_label
-    限定教学班成员；class_num 限定行政班；都空=全年级。分段口径用当前 band_config。"""
+    """某年级历次考试当前学科高分段/临界段/薄弱段人数趋势（单学科化）。
+
+    基于 subject_rank + band_config（按班 competition ranking），不查 TotalScore。
+    分段口径用当前 band_config。
+    """
     from app.analysis.config import get_band_config
-    from app.db.models import Exam, TotalScore
-    from app.analysis.scope import members_of, my_class_labels, members_by_class_num
+    from app.db.models import Exam
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        group_members_by_class,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
 
     db = _db()
     try:
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id, grade=grade,
+        )
         cfg = get_band_config(db)
-        allowed = _resolve_class_scope(
-            teaching_class_id=teaching_class_id, class_label=class_label,
-            class_num=class_num, grade=grade,
+        valid_ids = valid_exam_ids_for_subject(
+            db, subject, ctx.member_ids, grade=grade,
         )
         exams = (
-            db.query(Exam).filter(Exam.grade == grade)
+            db.query(Exam)
+            .filter(Exam.grade == grade, Exam.id.in_(valid_ids))
             .order_by(Exam.grade, Exam.exam_date, Exam.id).all()
         )
         series = []
         for exam in exams:
-            totals = (
-                db.query(TotalScore)
-                .filter(TotalScore.exam_id == exam.id, TotalScore.total_type == "主三门")
-                .all()
+            rank_map, _rows = compute_subject_rank_contextual(
+                db, ctx, exam.id, exam_grade=exam.grade,
             )
+            groups = group_members_by_class(ctx)
             high = crit = weak = 0
-            for t in totals:
-                if allowed is not None and t.student_id not in allowed:
-                    continue
-                rank = t.xueji_rank or t.grade_rank
-                if rank is None:
-                    continue
-                if 1 <= rank <= cfg["high_score_max"]:
-                    high += 1
-                if cfg["critical_min"] <= rank <= cfg["critical_max"]:
-                    crit += 1
-                if rank >= cfg["weak_min"]:
-                    weak += 1
+            per_class = {}
+            for tc_id, member_set in groups.items():
+                ph = pc = pw = 0
+                for sid in member_set:
+                    sr = rank_map.get(sid)
+                    if sr is None:
+                        continue
+                    if 1 <= sr <= cfg["high_score_max"]:
+                        high += 1
+                        ph += 1
+                    if cfg["critical_min"] <= sr <= cfg["critical_max"]:
+                        crit += 1
+                        pc += 1
+                    if sr >= cfg["weak_min"]:
+                        weak += 1
+                        pw += 1
+                per_class[ctx.class_labels.get(tc_id)] = {
+                    "high_score": ph, "critical": pc, "weak": pw,
+                }
             series.append({
                 "exam_name": exam.name, "exam_date": exam.exam_date,
                 "high_score": high, "critical": crit, "weak": weak,
+                "per_class": per_class,
             })
-        return {"band_config": cfg, "teaching_class_id": teaching_class_id,
-                "class_num": class_num, "series": series}
+        return {
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "band_config": cfg,
+            "series": series,
+            "available_classes": [
+                {"teaching_class_id": tc_id, "label": ctx.class_labels.get(tc_id)}
+                for tc_id in group_members_by_class(ctx)
+            ],
+        }
     finally:
         db.close()
 
@@ -1106,17 +1286,26 @@ def custom_rank_band_trend(
     grade: int,
     rank_max: int,
     rank_min: int = 1,
-    total_type: str = "主三门",
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
 ) -> dict[str, Any]:
-    """按用户临时指定的排名区间统计历次考试人数变化。teaching_class_id/class_label 限定教学班。"""
+    """按用户临时指定的排名区间统计历次考试当前学科人数变化（单学科化）。
+
+    基于 subject_rank（按班 competition ranking），不查 TotalScore。
+    total_type 参数已移除（不再支持）。
+    """
     from datetime import date
 
-    from app.db.models import Exam, TotalScore
+    from app.db.models import Exam
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        compute_subject_rank_contextual,
+        valid_exam_ids_for_subject,
+    )
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
 
     def normalize_date(value: Optional[str], *, end: bool = False) -> Optional[date]:
         if not value:
@@ -1148,12 +1337,16 @@ def custom_rank_band_trend(
 
     db = _db()
     try:
-        allowed = _resolve_class_scope(
-            teaching_class_id=teaching_class_id, class_label=class_label,
-            class_num=class_num, grade=grade,
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id, grade=grade,
+        )
+        valid_ids = valid_exam_ids_for_subject(
+            db, subject, ctx.member_ids, grade=grade,
         )
         exams = (
-            db.query(Exam).filter(Exam.grade == grade)
+            db.query(Exam)
+            .filter(Exam.grade == grade, Exam.id.in_(valid_ids))
             .order_by(Exam.exam_date, Exam.id).all()
         )
         series = []
@@ -1163,18 +1356,10 @@ def custom_rank_band_trend(
                 continue
             if end and exam_date and exam_date > end:
                 continue
-            totals = (
-                db.query(TotalScore)
-                .filter(TotalScore.exam_id == exam.id, TotalScore.total_type == total_type)
-                .all()
+            rank_map, _rows = compute_subject_rank_contextual(
+                db, ctx, exam.id, exam_grade=exam.grade,
             )
-            ranks = []
-            for total in totals:
-                if allowed is not None and total.student_id not in allowed:
-                    continue
-                rank = total.xueji_rank or total.grade_rank
-                if rank is not None:
-                    ranks.append(rank)
+            ranks = [sr for sr in rank_map.values() if sr is not None]
             count = sum(1 for rank in ranks if rank_min <= rank <= rank_max)
             series.append({
                 "exam_id": exam.id, "exam_name": exam.name, "exam_date": exam.exam_date,
@@ -1183,10 +1368,13 @@ def custom_rank_band_trend(
                 "rank_max_observed": max(ranks) if ranks else None,
             })
         return {
-            "grade": grade, "teaching_class_id": teaching_class_id, "class_num": class_num,
-            "total_type": total_type, "rank_min": rank_min, "rank_max": rank_max,
+            "teaching_subject": subject,
+            "teaching_class_id": teaching_class_id,
+            "scope": "teaching_class" if teaching_class_id is not None else "all",
+            "grade": grade,
+            "rank_min": rank_min, "rank_max": rank_max,
             "start_date": start_date, "end_date": end_date,
-            "metric_note": "count 为该次考试中排名落在 rank_min 到 rank_max 内的人数；排名优先用 xueji_rank，无学籍排名时用 grade_rank。",
+            "metric_note": "count 为该次考试当前学科按班排名（competition ranking）落在 rank_min 到 rank_max 内的人数。",
             "series": series,
         }
     finally:
@@ -1199,19 +1387,21 @@ def rank_range_filter_tool(
     rank_min: int = 1,
     rank_max: int = 100,
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
 ) -> dict[str, Any]:
-    """单次考试按指标和年级排名区间筛选学生。teaching_class_id/class_label 限定教学班成员。"""
+    """单次考试按指标和年级排名区间筛选学生（单学科化）。
+
+    委托阶段4 rank_metrics.rank_range_filter。class_num/class_label 被拒绝。
+    metric 必须与教师任教科目一致。
+    """
     from app.analysis.rank_metrics import rank_range_filter
 
+    _reject_legacy_class_params()
     return rank_range_filter(
         exam_id=exam_id,
         metric=metric,
         rank_min=rank_min,
         rank_max=rank_max,
-        teaching_class_id=_resolve_tc_id(teaching_class_id, class_label, exam_id=exam_id),
-        class_num=class_num,
+        teaching_class_id=teaching_class_id,
     )
 
 
@@ -1220,19 +1410,21 @@ def rank_frequency_stat_tool(
     metric: str,
     exam_ids: Optional[list[int]] = None,
     teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
     recent_count: int = 5,
 ) -> dict[str, Any]:
-    """多场考试按排名/百分位/精确等级分统计学生频次。teaching_class_id/class_label 限定教学班成员。"""
+    """多场考试按排名/百分位/精确等级分统计学生频次（单学科化）。
+
+    委托阶段4 rank_metrics.rank_frequency_stats。class_num/class_label 被拒绝。
+    metric 必须与教师任教科目一致。
+    """
     from app.analysis.rank_metrics import rank_frequency_stats
 
+    _reject_legacy_class_params()
     return rank_frequency_stats(
         grade=grade,
         metric=metric,
         exam_ids=exam_ids,
-        teaching_class_id=_resolve_tc_id(teaching_class_id, class_label, grade=grade),
-        class_num=class_num,
+        teaching_class_id=teaching_class_id,
         recent_count=recent_count,
     )
 
@@ -1405,7 +1597,7 @@ def to_openai_tools(tools: list[dict]) -> list[dict]:
 TOOLS = [
     {
         "name": "list_exams",
-        "description": "罗列已建档考试",
+        "description": "罗列当前任教学科在教学班成员范围内有真实分数的考试（最近考试按日期倒序）。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1426,7 +1618,7 @@ TOOLS = [
     },
     {
         "name": "student_lookup",
-        "description": "按姓名/学号定位学生",
+        "description": "按姓名/学号定位学生（限当前任教学科教学班成员范围）。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1437,7 +1629,7 @@ TOOLS = [
     },
     {
         "name": "student_exam_detail",
-        "description": "某生某次考试的完整成绩",
+        "description": "某生某次考试的当前学科成绩（含按班 subject_rank）。学科由后端教师上下文解析，只返回一科。",
         "input_schema": {
             "type": "object",
             "properties": {
@@ -1449,12 +1641,11 @@ TOOLS = [
     },
     {
         "name": "student_trend",
-        "description": "跨次趋势（自动判断是否跨学年）",
+        "description": "某生当前学科跨次趋势（含 subject_rank），高二/三选考用 grade_score 判断。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "student_id": {"type": "string"},
-                "total_type": {"type": "string"},
                 "exam_ids": {"type": "array", "items": {"type": "integer"}},
             },
             "required": ["student_id"],
@@ -1462,107 +1653,95 @@ TOOLS = [
     },
     {
         "name": "student_learning_profile",
-        "description": "分析某个学生的整体学习情况，返回总分趋势、最新优势/薄弱科目、进步/退步科目、各科历史和按考试展开的完整成绩表。加三学科指物理、化学、生物、政治、历史、地理六科；available=false 表示未参考或无有效成绩。",
+        "description": "学生当前学科学习画像：跨次趋势序列（含 subject_rank）、首末趋势变化。学科由后端解析，不含总分或其他学科。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "student_id": {"type": "string", "description": "学号；如果当前页面上下文有 student_id，应优先使用"},
                 "name": {"type": "string", "description": "学生姓名；姓名不唯一时工具会返回候选学生"},
-                "subject_limit": {"type": "integer", "description": "优势/薄弱/进退步科目返回数量，默认5"},
+                "subject_limit": {"type": "integer", "description": "兼容保留，不再使用"},
             },
         },
     },
     {
         "name": "class_trend",
-        "description": "教学班/班级层的均分或排名时间序列。优先用 teaching_class_id/class_label 指定教学班；不填可用 class_num 指定行政班。",
+        "description": "教学班当前学科均分/排名时间序列。teaching_class_id 指定单班；不填=全部当前学科教学班。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 解析班名）"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1）"},
-                "class_num": {"type": "integer"},
-                "metric": {"type": "string"},
                 "exam_ids": {"type": "array", "items": {"type": "integer"}},
             },
         },
     },
     {
         "name": "compare_classes",
-        "description": "多班同次对比。优先用 teaching_class_ids/class_labels 指定教学班；class_nums 为行政班号回退。",
+        "description": "多班同次当前学科对比（均分/均排名）。teaching_class_id 可选；默认对比当前学科所有教学班。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "teaching_class_ids": {"type": "array", "items": {"type": "integer"}, "description": "教学班ID列表"},
-                "class_labels": {"type": "array", "items": {"type": "string"}, "description": "教学班名列表（如 ['物A1','1']）"},
-                "class_nums": {"type": "array", "items": {"type": "integer"}},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
                 "exam_id": {"type": "integer"},
-                "metric": {"type": "string"},
             },
+            "required": ["exam_id"],
         },
     },
     {
         "name": "focus_list",
-        "description": "拉某次考试的重点关注名单",
+        "description": "某次考试的当前学科重点关注名单（基于 subject_rank + band_config 的临界段/薄弱段）。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "exam_id": {"type": "integer"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
                 "category": {"type": "string"},
             },
+            "required": ["exam_id"],
         },
     },
     {
         "name": "subject_weakness",
-        "description": "某次考试的单科薄弱清单（单科百分位比主三门百分位低较多）。teaching_class_id/class_label 限定教学班成员，class_num 限定行政班，都空=全年级。",
+        "description": "当前学科薄弱名单（subject_rank 落在薄弱段的学生）。teaching_class_id 可选。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "exam_id": {"type": "integer"},
-                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 解析班名）"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1）"},
-                "class_num": {"type": "integer"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
             },
             "required": ["exam_id"],
         },
     },
     {
         "name": "subject_progress_ranking",
-        "description": "按年级和学科找跨考试进步或退步最大的学生，例如“高二语文进步最大的是谁”。默认比较该年级最早和最新考试。高一单科和高二/高三语数英按百分位，高二/高三加三学科（物理、化学、生物、政治、历史、地理）按等级分。",
+        "description": "当前学科跨考试进步或退步最大的学生排行。学科由后端解析，不接受 subject 参数。默认比较该年级最早和最新合法考试。高二/三选考按等级分，其他单科按百分位。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "subject": {"type": "string", "description": "学科名，如语文、数学、英语、物理、化学、生物、政治、历史、地理"},
-                "start_exam_id": {"type": "integer", "description": "起始考试ID；不填则使用该年级最早考试"},
-                "end_exam_id": {"type": "integer", "description": "结束考试ID；不填则使用该年级最新考试"},
+                "start_exam_id": {"type": "integer", "description": "起始考试ID；不填则使用该年级最早合法考试"},
+                "end_exam_id": {"type": "integer", "description": "结束考试ID；不填则使用该年级最新合法考试"},
                 "limit": {"type": "integer", "description": "返回人数，默认10，最多50"},
                 "direction": {"type": "string", "description": "progress=进步最大，regression=退步最大"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
             },
-            "required": ["grade", "subject"],
+            "required": ["grade"],
         },
     },
     {
         "name": "multi_exam_progress_ranking",
-        "description": "把最近N次或指定多场考试合起来，按单科/主三门/五门等指标分析全体学生进步、退步和趋势排行。适合回答“最近几次谁进步最大”“两次考试单科和总分进退步”“三门五门趋势最好的是谁”。",
+        "description": "把最近N次或指定多场考试合起来，按当前学科分析全体学生进步、退步和趋势排行。学科固定为当前任教学科，不接受 metrics/总分。高二/三选考用等级分，其他单科用年级百分位。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "metrics": {
-                    "type": "array",
-                    "items": {"type": "string"},
-                    "description": "要分析的指标，如['语文','数学','英语','主三门','五门']；加三学科指物理、化学、生物、政治、历史、地理六科；不填时按年级返回常用总分和全部学科",
-                },
                 "exam_ids": {
                     "type": "array",
                     "items": {"type": "integer"},
                     "description": "指定参与分析的考试ID；不填则使用最近 recent_count 次",
                 },
                 "recent_count": {"type": "integer", "description": "最近几次考试，默认5；用户说最近两次时传2"},
-                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全年级"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1），与 teaching_class_id 二选一"},
-                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
-                "limit": {"type": "integer", "description": "每个指标返回人数，默认10，最多50"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全部当前学科教学班"},
+                "limit": {"type": "integer", "description": "返回人数，默认10，最多50"},
                 "direction": {"type": "string", "description": "progress=进步趋势最大，regression=退步趋势最大"},
                 "min_points": {"type": "integer", "description": "每名学生至少需要几次有效记录，默认2；做多场趋势时可设3"},
             },
@@ -1571,32 +1750,27 @@ TOOLS = [
     },
     {
         "name": "band_trend",
-        "description": "某年级历次考试的高分段/临界段/薄弱段人数随时间变化趋势。回答“本班高分段人数怎么变”“临界段最近几次趋势”“薄弱段有没有减少”等关于名次段位人数走势的问题。分段口径使用用户当前自定义的设置，返回值含 band_config 说明区间。class_num 不填表示全年级。",
+        "description": "某年级历次考试当前学科的高分段/临界段/薄弱段人数随时间变化趋势（基于 subject_rank）。分段口径使用用户当前自定义的设置，返回值含 band_config 说明区间。teaching_class_id 不填表示全部当前学科教学班。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全年级"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1），与 teaching_class_id 二选一"},
-                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全部当前学科教学班"},
             },
             "required": ["grade"],
         },
     },
     {
         "name": "custom_rank_band_trend",
-        "description": "按用户临时指定的排名阈值或排名区间统计历次考试人数变化。适合回答“350名以内人数如何变化”“前200名有多少人”“300-450名之间人数趋势”等，不受高分段/临界段/薄弱段固定配置限制。",
+        "description": "按用户临时指定的排名区间统计历次考试当前学科人数变化（基于 subject_rank）。适合回答“班内前10名有多少人”“排名5-15名之间人数趋势”等，不受固定段位配置限制。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "rank_min": {"type": "integer", "description": "排名区间下界，默认1；例如前350名传1"},
-                "rank_max": {"type": "integer", "description": "排名区间上界；例如350名以内传350"},
-                "total_type": {"type": "string", "description": "总分类型，默认主三门；可传主三门、五门、九门、3+3等"},
-                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全年级"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1），与 teaching_class_id 二选一"},
-                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
-                "start_date": {"type": "string", "description": "起始日期，可传YYYY、YYYY-MM或YYYY-MM-DD；例如2026年以来传2026"},
+                "rank_min": {"type": "integer", "description": "排名区间下界，默认1"},
+                "rank_max": {"type": "integer", "description": "排名区间上界"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
+                "start_date": {"type": "string", "description": "起始日期，可传YYYY、YYYY-MM或YYYY-MM-DD"},
                 "end_date": {"type": "string", "description": "结束日期，可传YYYY、YYYY-MM或YYYY-MM-DD"},
             },
             "required": ["grade", "rank_max"],
@@ -1604,33 +1778,29 @@ TOOLS = [
     },
     {
         "name": "rank_range_filter",
-        "description": "按单次考试、指标和年级排名区间筛选学生。适合回答“这次考试数学年级前100有哪些人”“主三门排名300到350有哪些学生”。高一可查9门单科、主三门、五门；高二/高三可查语数英单科、主三门、3+3。metric格式如 subject:数学 或 total:主三门。",
+        "description": "按单次考试和当前学科按班排名区间筛选学生。学科由后端解析，metric 格式如 subject:数学（必须与任教科目一致）。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "exam_id": {"type": "integer", "description": "考试ID"},
-                "metric": {"type": "string", "description": "指标，格式如 subject:语文、total:主三门、total:五门、total:3+3"},
-                "rank_min": {"type": "integer", "description": "年级排名下界，默认1"},
-                "rank_max": {"type": "integer", "description": "年级排名上界，默认100"},
-                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全年级"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1），与 teaching_class_id 二选一"},
-                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+                "metric": {"type": "string", "description": "指标，格式如 subject:数学（必须与教师任教科目一致）"},
+                "rank_min": {"type": "integer", "description": "班内排名下界，默认1"},
+                "rank_max": {"type": "integer", "description": "班内排名上界，默认100"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
             },
             "required": ["exam_id", "metric"],
         },
     },
     {
         "name": "rank_frequency_stat",
-        "description": "统计多场考试里每名学生落入各排名区间/百分位区间/精确等级分的次数。适合回答“最近5次主三门排名频次”“语文前20%次数”“物理等级分频次”。高一9门单科按百分位，主三门/五门按40名一档；高二/高三语数英按百分位，+3选科用 subject_grade:物理 这类等级分指标，并按70、67、64、61、58、55、52、49、46、43、40精确等级分统计，主三门/3+3按40名一档。",
+        "description": "统计多场考试里每名学生当前学科落入各排名/百分位/精确等级分区间的次数。高二/三选考用 subject_grade:学科 按精确等级分统计，其他单科用 subject:学科 按百分位区间统计。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "metric": {"type": "string", "description": "指标，格式如 subject:语文、subject_grade:物理、total:主三门、total:五门、total:3+3"},
+                "metric": {"type": "string", "description": "指标，格式如 subject:数学 或 subject_grade:物理（必须与教师任教科目一致）"},
                 "exam_ids": {"type": "array", "items": {"type": "integer"}, "description": "参与统计的考试ID；不填则取最近 recent_count 次"},
-                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把『物A1班/1班』等名字解析成ID）；不填=全年级"},
-                "class_label": {"type": "string", "description": "教学班名（如 1、物A1），与 teaching_class_id 二选一"},
-                "class_num": {"type": "integer", "description": "只看某个班；不填表示全年级"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选）"},
                 "recent_count": {"type": "integer", "description": "未指定考试ID时取最近几次，默认5"},
             },
             "required": ["grade", "metric"],
@@ -1638,7 +1808,7 @@ TOOLS = [
     },
     {
         "name": "student_homework_summary",
-        "description": "某个学生本学期的作业（缺交）概况：缺交总次数、按科目分布、迟到/请假次数、当前连续缺交预警。回答“某某作业完成情况怎么样”“他缺交多吗”“作业和成绩有没有关系”时先用本工具拿作业侧数据，再结合 student_learning_profile 的成绩。作业数据仅含缺交/请假/迟到，不代表完成质量。",
+        "description": "某个学生本学期的作业（缺交）概况：缺交总次数、按作业种类分布、迟到/请假次数、当前连续缺交预警。回答“某某作业完成情况怎么样”“他缺交多吗”“作业和成绩有没有关系”时先用本工具拿作业侧数据，再结合 student_learning_profile 的成绩。作业数据仅含缺交/请假/迟到，不代表完成质量。",
         "input_schema": {
             "type": "object",
             "properties": {

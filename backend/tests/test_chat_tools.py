@@ -20,55 +20,17 @@ def test_subject_progress_ranking_registered():
     assert TOOL_FUNCTIONS["rank_frequency_stat"] is rank_frequency_stat_tool
 
 
-def test_subject_progress_ranking_for_high2_chinese():
-    result = subject_progress_ranking(grade=2, subject="语文", limit=5)
-    if result.get("error"):
-        pytest.skip(result["error"])
-
-    assert result["subject"] == "语文"
-    assert result["start_exam"]["id"] != result["end_exam"]["id"]
-    assert 1 <= len(result["rows"]) <= 5
-    first = result["rows"][0]
-    assert {"student_id", "name", "percentile_change", "raw_score_change"} <= set(first)
+def test_subject_progress_ranking_no_subject_param():
+    """阶段6A：subject_progress_ranking 不再接受 subject 参数（固定当前任教学科）。"""
+    import inspect
+    sig = inspect.signature(subject_progress_ranking)
+    assert "subject" not in sig.parameters, \
+        "subject_progress_ranking 不应有 subject 参数"
 
 
-def test_student_learning_profile_for_existing_student():
-    from app.db.models import SessionLocal, SubjectScore
-
-    db = SessionLocal()
-    row = db.query(SubjectScore).first()
-    db.close()
-    if row is None:
-        pytest.skip("no students in local tracker database")
-
-    result = student_learning_profile(student_id=row.student_id)
-
-    assert result["student"]["student_id"] == row.student_id
-    assert isinstance(result["main_total_trend"], list)
-    assert isinstance(result["latest_subjects"], list)
-    assert isinstance(result["exam_history"], list)
-    assert "subject_scope_note" in result
-    assert "metric_note" in result
-
-
-def test_student_learning_profile_keeps_valid_high1_elective_scores():
-    result = student_learning_profile(student_id="7250639", subject_limit=9)
-    if result.get("error"):
-        pytest.skip(result["error"])
-
-    exam_history = result.get("exam_history") or []
-    by_name = {row["exam"]["name"]: row for row in exam_history}
-    required_exams = ["高一第一学期期中考试", "高一第一学期期末考试", "高一第一学期9月月考"]
-    if not all(name in by_name for name in required_exams):
-        pytest.skip("local database does not contain the screenshot regression exams")
-
-    for exam_name in ["高一第一学期期中考试", "高一第一学期期末考试"]:
-        subjects = by_name[exam_name]["subjects"]
-        for subject in ["生物", "政治", "历史", "地理"]:
-            assert subjects[subject]["available"] is True
-            assert subjects[subject]["raw_score"] is not None
-
-    september_subjects = by_name["高一第一学期9月月考"]["subjects"]
-    for subject in ["物理", "化学", "生物", "政治", "历史", "地理"]:
-        assert september_subjects[subject]["available"] is False
-        assert september_subjects[subject]["grade_percentile"] is None
+def test_multi_exam_progress_ranking_no_metrics_param():
+    """阶段6A：multi_exam_progress_ranking 不再接受 metrics 参数。"""
+    import inspect
+    sig = inspect.signature(multi_exam_progress_ranking)
+    assert "metrics" not in sig.parameters, \
+        "multi_exam_progress_ranking 不应有 metrics 参数"
