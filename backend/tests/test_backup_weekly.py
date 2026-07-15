@@ -6,6 +6,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import seed_minimal_exam_scope
 
 
 @pytest.fixture
@@ -40,8 +41,10 @@ def test_restore_missing_file(client):
     assert r.status_code == 404
 
 
-def test_weekly_focus_shape(client):
+def test_weekly_focus_shape(client, request):
     # 单学科化：class_num 不再允许（400）；默认范围（全部教学班并集）
+    cleanup = seed_minimal_exam_scope()
+    request.addfinalizer(cleanup)
     r = client.get("/api/weekly-focus?class_num=6")
     assert r.status_code == 400
     r = client.get("/api/weekly-focus")

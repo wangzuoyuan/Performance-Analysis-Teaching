@@ -570,3 +570,454 @@ class TestElectiveGradeScoreBasis:
         data = _parse_stdout(proc)
         assert data["score_basis"] == "grade_score", \
             f"高二物理选考 score_basis 应为 grade_score: {data}"
+
+
+# ════════════════════════════════════════════════════════════════
+#  §7 阶段5独立审查返工 RED 测试（1 Blocker + 4 High）
+# ════════════════════════════════════════════════════════════════
+
+
+# ── §7.1 Dashboard exam-detail 契约（前端源码契约回归） ──
+
+class TestExamDetailContract:
+    """exam-detail 必须返回 stats.avg/max/min/total_students/score_basis
+    + 顶层 subject（而非 stats.avg_subject/max_subject/min_subject/count
+    或顶层 teaching_subject）。"""
+
+    def test_stats_keys_stable(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            r0 = client.get("/api/teaching/classes")
+            classes = r0.json().get("classes", [])
+            a_cls = [c for c in classes if c.get("label") == "A班"][0]
+            tc_id = a_cls["id"]
+            r = client.get("/api/exams?teaching_class_id=%s" % tc_id)
+            exams = r.json().get("exams", [])
+            assert exams, "应有考试"
+            latest = exams[0]
+            d = client.get("/api/exams/%s?teaching_class_id=%s" % (latest["id"], tc_id)).json()
+            stats = d.get("stats", {})
+            result = {
+                "has_avg": "avg" in stats,
+                "has_max": "max" in stats,
+                "has_min": "min" in stats,
+                "has_total_students": "total_students" in stats,
+                "has_score_basis": "score_basis" in stats,
+                "has_avg_subject": "avg_subject" in stats,
+                "has_max_subject": "max_subject" in stats,
+                "has_count": "count" in stats,
+                "has_subject_top": "subject" in d,
+                "has_teaching_subject_top": "teaching_subject" in d,
+                "avg": stats.get("avg"),
+                "max": stats.get("max"),
+                "min": stats.get("min"),
+                "total_students": stats.get("total_students"),
+                "score_basis": stats.get("score_basis"),
+                "subject_top": d.get("subject"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code)
+        data = _parse_stdout(proc)
+        # 稳定契约字段必须存在
+        for k in ("has_avg", "has_max", "has_min", "has_total_students", "has_score_basis"):
+            assert data[k], f"stats 应含 {k}: {data}"
+        # 旧错误字段不得存在
+        for k in ("has_avg_subject", "has_max_subject", "has_count"):
+            assert not data[k], f"stats 不应再有 {k}: {data}"
+        # 顶层 subject 必须存在
+        assert data["has_subject_top"], f"顶层应有 subject: {data}"
+        # 均分/最高/最低/有效人数 不得恒为空
+        assert data["avg"] is not None, f"avg 不得为空: {data}"
+        assert data["max"] is not None, f"max 不得为空: {data}"
+        assert data["min"] is not None, f"min 不得为空: {data}"
+        assert data["total_students"] is not None, f"total_students 不得为空: {data}"
+        assert data["score_basis"] in ("raw_score", "grade_score"), \
+            f"score_basis 必须有值: {data}"
+        assert data["subject_top"] == "数学", f"顶层 subject 应为数学: {data}"
+
+    def test_score_basis_label_raw(self, tmp_path):
+        """高一数学 score_basis 应为 raw_score（非空）。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json().get("exams", [])
+            assert exams
+            latest = exams[0]
+            d = client.get("/api/exams/%s" % latest["id"]).json()
+            print(json.dumps({"score_basis": d.get("stats", {}).get("score_basis")}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code)
+        data = _parse_stdout(proc)
+        assert data["score_basis"] == "raw_score", \
+            f"高二非选考数学 score_basis 应为 raw_score: {data}"
+
+
+# ── §7.2 Correlation 最近考试：按 exam_date DESC 而非 max(id) ──
+
+_SETUP_CORRELATION_DATE_ORDER = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster, HomeworkRecord,
+    )
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    tc = TeachingClass(grade=2, label="A班", subject="数学", kind="教学")
+    db.add(tc)
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+    db.commit()
+
+    # exam id=1 日期 2025-11（较晚）；exam id=2 日期 2025-09（较早）
+    exam1 = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam1)
+    db.flush()
+    exam2 = Exam(name="月考", grade=2, semester="上", exam_type="月考", exam_date="2025-09")
+    db.add(exam2)
+    db.flush()
+    # exam2.id 可能 < exam1.id（取决于 flush 顺序），但关键是 exam1 日期更晚
+
+    # exam1（id 较小但日期更晚）：s1=90, s2=80
+    for sid, sc in [("s1", 90), ("s2", 80)]:
+        db.add(SubjectScore(exam_id=exam1.id, student_id=sid, subject="数学",
+            raw_score=sc, grade_score=None, grade_percentile=0.5,
+            name=f"学{sid}", class_num=1, xueji=252000))
+    # exam2（id 较大但日期更早）：s1=60, s2=50
+    for sid, sc in [("s1", 60), ("s2", 50)]:
+        db.add(SubjectScore(exam_id=exam2.id, student_id=sid, subject="数学",
+            raw_score=sc, grade_score=None, grade_percentile=0.5,
+            name=f"学{sid}", class_num=1, xueji=252000))
+    db.commit()
+
+    for sid in ["s1", "s2"]:
+        db.add(ClassRoster(student_id=sid, name=f"学{sid}", class_num=1, excluded=0))
+    # s1 缺交，s2 不缺交
+    for _ in range(3):
+        db.add(HomeworkRecord(student_id="s1", date="2025-11-01",
+            subject="校本", submission_status="缺交"))
+    db.commit()
+    db.close()
+""")
+
+
+class TestCorrelationLatestExamByDate:
+    def test_default_picks_latest_by_date_not_max_id(self, tmp_path):
+        """默认必须选 exam_date 最晚的考试，而非 max(id)。
+        反例：exam1(id小, 2025-11) vs exam2(id大, 2025-09) → 必须选 exam1。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/homework/correlation")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            # 找到两个 exam id
+            r0 = client.get("/api/exams")
+            exams = {e["id"]: e for e in r0.json().get("exams", [])}
+            # exam_date 最晚的考试 id
+            latest_id = max(exams, key=lambda i: (exams[i]["exam_date"], i))
+            result = {"chosen_exam_id": data.get("exam_id"), "latest_by_date": latest_id}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_CORRELATION_DATE_ORDER, assert_code)
+        data = _parse_stdout(proc)
+        assert data["chosen_exam_id"] == data["latest_by_date"], \
+            f"correlation 默认应选日期最晚的考试，得到 {data}"
+
+    def test_explicit_out_of_scope_exam_id_returns_400(self, tmp_path):
+        """显式提供不属于当前教学班/学科/范围的 exam_id 必须 400，不得静默替换。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/homework/correlation?exam_id=99999")
+            result = {"status_code": r.status_code}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_CORRELATION_DATE_ORDER, assert_code)
+        data = _parse_stdout(proc)
+        assert data["status_code"] == 400, \
+            f"不合法的 exam_id 应 400，得到 {data['status_code']}"
+
+    def test_subjects_endpoint_also_latest_by_date(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/homework/correlation/subjects")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            r0 = client.get("/api/exams")
+            exams = {e["id"]: e for e in r0.json().get("exams", [])}
+            latest_id = max(exams, key=lambda i: (exams[i]["exam_date"], i))
+            result = {"chosen_exam_id": data.get("exam_id"), "latest_by_date": latest_id}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_CORRELATION_DATE_ORDER, assert_code)
+        data = _parse_stdout(proc)
+        assert data["chosen_exam_id"] == data["latest_by_date"], \
+            f"correlation/subjects 默认应选日期最晚的考试，得到 {data}"
+
+
+# ── §7.3 高二/三选考 correlation 排名 basis 必须用 grade_score ──
+
+_SETUP_ELECTIVE_BASIS_CONFLICT = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster, HomeworkRecord,
+    )
+
+    t = Teacher(subject="物理", name="物理老师")
+    db.add(t)
+    db.flush()
+    tc = TeachingClass(grade=2, label="A班", subject="物理", kind="教学")
+    db.add(tc)
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # s1: raw95/grade40/percentile=0.1（percentile 排名会得 rank1，但 grade_score 排名应得 rank2）
+    # s2: raw90/grade70/percentile=0.9（percentile 排名会得 rank2，但 grade_score 排名应得 rank1）
+    db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="物理",
+        raw_score=95, grade_score=40, grade_percentile=0.1, name="甲", class_num=1, xueji=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="物理",
+        raw_score=90, grade_score=70, grade_percentile=0.9, name="乙", class_num=1, xueji=2))
+    db.commit()
+
+    for sid in ["s1", "s2"]:
+        db.add(ClassRoster(student_id=sid, name=f"学{sid}", class_num=1, excluded=0))
+    db.commit()
+    db.close()
+""")
+
+
+class TestCorrelationElectiveGradeScoreBasis:
+    """高二物理 raw 与 grade_score 反向：必须按 grade_score 排名。
+    s1 raw95/grade40/percentile=0.1, s2 raw90/grade70/percentile=0.9。
+    percentile 模式会得 s1 rank1（错误）；grade_score 模式应得 s2 rank1。"""
+
+    def test_rank_uses_grade_score_not_raw(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/homework/correlation")
+            assert r.status_code == 200, r.text
+            rows = {row["student_id"]: row for row in r.json().get("rows", [])}
+            result = {
+                "s1_rank": rows.get("s1", {}).get("subject_rank"),
+                "s2_rank": rows.get("s2", {}).get("subject_rank"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_ELECTIVE_BASIS_CONFLICT, assert_code)
+        data = _parse_stdout(proc)
+        # s1 grade_score=40, s2 grade_score=70 → s2 rank1(small), s1 rank2
+        assert data["s2_rank"] == 1, f"s2 grade_score=70 应 rank1: {data}"
+        assert data["s1_rank"] == 2, f"s1 grade_score=40 应 rank2: {data}"
+
+    def test_subjects_endpoint_also_uses_grade_score(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/homework/correlation/subjects")
+            assert r.status_code == 200, r.text
+            # subjects 端点的 rankings 只返回 r/n，不直接给 rank；
+            # 但 exam_id 必须选中有 grade_score 的考试
+            result = {"has_data": len(r.json().get("rankings", [])) > 0}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_ELECTIVE_BASIS_CONFLICT, assert_code)
+        data = _parse_stdout(proc)
+        assert data["has_data"], f"subjects 端点应有数据: {data}"
+
+
+# ── §7.4 Compare overall_subject_avg 直接聚合 + competition ranking 精度 ──
+
+_SETUP_COMPARE_OVERALL = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster,
+    )
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    # A班: s1(40), s2(70) ; B班: s3..s10 各40
+    tc_a = TeachingClass(grade=2, label="A班", subject="数学", kind="教学")
+    tc_b = TeachingClass(grade=2, label="B班", subject="数学", kind="教学")
+    db.add_all([tc_a, tc_b])
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc_a.id, student_id=sid, source="manual"))
+    for sid in ["s3","s4","s5","s6","s7","s8","s9","s10"]:
+        db.add(TeachingClassMember(teaching_class_id=tc_b.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # A班: s1=40, s2=70 → 班均 55.0
+    db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="数学",
+        raw_score=40, grade_score=None, grade_percentile=0.5, name="甲", class_num=1, xueji=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="数学",
+        raw_score=70, grade_score=None, grade_percentile=0.5, name="乙", class_num=1, xueji=2))
+    # B班: 8人各40 → 班均 40.0
+    for i, sid in enumerate(["s3","s4","s5","s6","s7","s8","s9","s10"], 3):
+        db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="数学",
+            raw_score=40, grade_score=None, grade_percentile=0.5,
+            name=f"生{i}", class_num=2, xueji=i))
+    db.commit()
+    db.close()
+""")
+
+
+class TestCompareOverallAggregate:
+    def test_overall_is_student_aggregate_not_class_avg(self, tmp_path):
+        """overall_subject_avg 必须直接对全部 10 名唯一学生的 score 求均，
+        不得简单平均各班均分。
+        反例：A班2人40/70, B班8人40 → overall=43.0, 不是(55+40)/2=47.5。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/class/compare")
+            assert r.status_code == 200, r.text
+            exams = r.json().get("exams", [])
+            assert exams
+            result = {"overall_subject_avg": exams[0].get("overall_subject_avg")}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_COMPARE_OVERALL, assert_code)
+        data = _parse_stdout(proc)
+        # 10名学生：s1=40, s2=70, s3..s10=40×8 → 总和 40+70+320=430 / 10 = 43.0
+        assert abs(data["overall_subject_avg"] - 43.0) < 0.05, \
+            f"overall_subject_avg 应为 43.0（直接学生聚合），得到 {data}"
+
+
+# ── §7.4b Compare competition ranking 使用未舍入真实班均 ──
+
+_SETUP_COMPARE_RANKING_PRECISION = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster,
+    )
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    tc_a = TeachingClass(grade=2, label="A班", subject="数学", kind="教学")
+    tc_b = TeachingClass(grade=2, label="B班", subject="数学", kind="教学")
+    db.add_all([tc_a, tc_b])
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc_a.id, student_id=sid, source="manual"))
+    for sid in ["s3", "s4"]:
+        db.add(TeachingClassMember(teaching_class_id=tc_b.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # A班真实均分 = (80.04+80.04)/2 = 80.04 → round(1)=80.0
+    for sid in ["s1", "s2"]:
+        db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="数学",
+            raw_score=80.04, grade_score=None, grade_percentile=0.5,
+            name=f"甲{sid}", class_num=1, xueji=1))
+    # B班真实均分 = (79.96+79.96)/2 = 79.96 → round(1)=80.0
+    for sid in ["s3", "s4"]:
+        db.add(SubjectScore(exam_id=exam.id, student_id=sid, subject="数学",
+            raw_score=79.96, grade_score=None, grade_percentile=0.5,
+            name=f"乙{sid}", class_num=2, xueji=2))
+    db.commit()
+    db.close()
+""")
+
+
+class TestCompareRankingPrecision:
+    def test_unrounded_class_avg_for_ranking(self, tmp_path):
+        """competition ranking 必须使用未舍入真实班均；仅输出时 round(1)。
+        反例：A班80.04, B班79.96 → A rank1, B rank2（不得因都显示80.0 并列）。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/class/compare")
+            assert r.status_code == 200, r.text
+            exams = r.json().get("exams", [])
+            assert exams
+            classes = {c["class_label"]: c for c in exams[0].get("classes", [])}
+            result = {
+                "a_rank": classes.get("A班", {}).get("rank"),
+                "b_rank": classes.get("B班", {}).get("rank"),
+                "a_avg": classes.get("A班", {}).get("subject_avg"),
+                "b_avg": classes.get("B班", {}).get("subject_avg"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_COMPARE_RANKING_PRECISION, assert_code)
+        data = _parse_stdout(proc)
+        assert data["a_rank"] == 1, f"A班真实均分更高应 rank1: {data}"
+        assert data["b_rank"] == 2, f"B班真实均分更低应 rank2: {data}"
+
+
+# ── §7.5 WeeklyFocus 默认范围与匿名成员 ──
+
+_SETUP_WEEKLY_ANON = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster, HomeworkRecord, HomeworkSemester,
+    )
+
+    # 设置当前学期覆盖 2025-11（默认学期是 2026 年，会导致缺交记录被时间轴过滤）
+    db.add(HomeworkSemester(name="2025秋", start_date="2025-09-01",
+        end_date="2026-02-28", is_current=1))
+    db.commit()
+
+    t = Teacher(subject="物理", name="物理老师")
+    db.add(t)
+    db.flush()
+    tc = TeachingClass(grade=2, label="物理班", subject="物理", kind="教学")
+    db.add(tc)
+    db.flush()
+    # s1 真实学号成员；_anon 成员（花名册中仅姓名）
+    db.add(TeachingClassMember(teaching_class_id=tc.id, student_id="s1", source="manual"))
+    db.add(TeachingClassMember(teaching_class_id=tc.id, student_id="_anon:%d:李某" % tc.id, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # s1 有物理成绩；_anon 无成绩
+    db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="物理",
+        raw_score=88, grade_score=67, grade_percentile=0.6, name="甲", class_num=1, xueji=1))
+    db.commit()
+
+    # 花名册：s1 和 _anon 都是合法仅姓名教学班成员
+    for sid, name in [("s1", "学生s1"), ("_anon:%d:李某" % tc.id, "李某")]:
+        db.add(ClassRoster(student_id=sid, name=name, class_num=1, excluded=0))
+    # s1 连续缺交 2 次（不同日期）；_anon 也连续缺交 2 次（不同日期）
+    anon_id = "_anon:%d:李某" % tc.id
+    for day in ["2025-11-01", "2025-11-02"]:
+        db.add(HomeworkRecord(student_id="s1", date=day,
+            subject="校本", submission_status="缺交"))
+        db.add(HomeworkRecord(student_id=anon_id, date=day,
+            subject="校本", submission_status="缺交"))
+    db.commit()
+    db.close()
+""")
+
+
+class TestWeeklyAnonMember:
+    def test_anon_homework_streak_retained(self, tmp_path):
+        """匿名成员（花名册中合法仅姓名教学班成员）的作业缺交连续判定必须保留；
+        匿名成员应进入 Weekly 的缺交信号。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/weekly-focus")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            students = {s["student_id"]: s for s in data.get("students", [])}
+            anon_ids = [sid for sid in students if sid.startswith("_anon:")]
+            s1_reasons = students.get("s1", {}).get("reasons", [])
+            result = {
+                "anon_in_weekly": len(anon_ids) > 0,
+                "s1_has_streak": any("连续缺交" in r for r in s1_reasons),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_WEEKLY_ANON, assert_code)
+        data = _parse_stdout(proc)
+        assert data["anon_in_weekly"], \
+            f"匿名成员连续缺交应进入 Weekly: {data}"
+        assert data["s1_has_streak"], \
+            f"s1 连续缺交应进入 Weekly: {data}"

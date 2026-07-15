@@ -9,6 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
+from tests.conftest import seed_minimal_exam_scope
 
 
 @pytest.fixture
@@ -38,8 +39,10 @@ def test_warnings_shape(client):
     assert set(body.keys()) >= {"serious", "warning", "counts"}
 
 
-def test_correlation_shape(client):
+def test_correlation_shape(client, request):
     # 单学科化：class_num 不再允许（400）；默认范围（全部教学班并集）
+    cleanup = seed_minimal_exam_scope()
+    request.addfinalizer(cleanup)
     r = client.get("/api/homework/correlation?class_num=6")
     assert r.status_code == 400
     r = client.get("/api/homework/correlation")
@@ -49,8 +52,10 @@ def test_correlation_shape(client):
     assert body["y_field"] == "subject_rank"
 
 
-def test_correlation_subject_mode(client):
+def test_correlation_subject_mode(client, request):
     # subject 兼容但只允许等于当前任教学科；y_field 统一为 subject_rank
+    cleanup = seed_minimal_exam_scope()
+    request.addfinalizer(cleanup)
     r = client.get("/api/homework/correlation")
     assert r.status_code == 200
     body = r.json()
@@ -58,7 +63,9 @@ def test_correlation_subject_mode(client):
     assert "teaching_subject" in body
 
 
-def test_correlation_subjects_ranking(client):
+def test_correlation_subjects_ranking(client, request):
+    cleanup = seed_minimal_exam_scope()
+    request.addfinalizer(cleanup)
     r = client.get("/api/homework/correlation/subjects?class_num=6")
     assert r.status_code == 400
     r = client.get("/api/homework/correlation/subjects")

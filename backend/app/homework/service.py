@@ -754,6 +754,39 @@ def _pearson(xs, ys):
     return round(sxy / (sxx ** 0.5 * syy ** 0.5), 4)
 
 
+def _resolve_latest_exam(db, valid_ids, exam_id, request_param_name="exam_id"):
+    """在合法考试集合中解析最终使用的考试，返回 (exam_id, exam_grade)。
+
+    - 显式 exam_id 必须落在 valid_ids 内；否则 400（不静默替换）。
+    - 默认（exam_id is None）按 Exam.exam_date DESC, Exam.id DESC 选最近一场。
+    - 返回 exam_grade（Exam.grade），供 compute_subject_rank_contextual 使用，
+      禁止 None（高二/三选考必须按 grade_score 排名）。
+    """
+    from app.db.models import Exam
+    from fastapi import HTTPException
+
+    if exam_id is not None:
+        if exam_id not in valid_ids:
+            raise HTTPException(
+                400,
+                f"{request_param_name} 不在当前教学班/学科/范围内，请勿指定他班考试",
+            )
+        ex = db.query(Exam).filter(Exam.id == exam_id).first()
+        return exam_id, (ex.grade if ex else None)
+
+    if valid_ids:
+        latest = (
+            db.query(Exam)
+            .filter(Exam.id.in_(valid_ids))
+            .order_by(Exam.exam_date.desc(), Exam.id.desc())
+            .first()
+        )
+        if latest:
+            return latest.id, latest.grade
+
+    return None, None
+
+
 def grade_correlation(db, teaching_class_id=None, exam_id=None,
                       start=None, end=None, subject=None):
     """作业缺交 × 当前学科成绩相关性（单学科化）。
@@ -795,17 +828,14 @@ def grade_correlation(db, teaching_class_id=None, exam_id=None,
 
     # 合法考试：当前学科在该范围内有真实分数的考试
     valid_ids = valid_exam_ids_for_subject(db, teaching_subject, member_ids)
-    if exam_id is not None and exam_id not in valid_ids:
-        exam_id = None
-    if exam_id is None and valid_ids:
-        exam_id = max(valid_ids)
+    exam_id, exam_grade = _resolve_latest_exam(db, valid_ids, exam_id)
 
     # subject_rank（按班 competition ranking，越小越好）
     rank_map: dict[str, int] = {}
     if exam_id is not None:
         try:
             rm, _rows = compute_subject_rank_contextual(
-                db, ctx, exam_id, exam_grade=None,
+                db, ctx, exam_id, exam_grade=exam_grade,
             )
             rank_map = rm
         except Exception:
@@ -886,16 +916,13 @@ def subject_correlation_ranking(db, teaching_class_id=None, exam_id=None, start=
 
     member_ids = set(ctx.member_ids)
     valid_ids = valid_exam_ids_for_subject(db, teaching_subject, member_ids)
-    if exam_id is not None and exam_id not in valid_ids:
-        exam_id = None
-    if exam_id is None and valid_ids:
-        exam_id = max(valid_ids)
+    exam_id, exam_grade = _resolve_latest_exam(db, valid_ids, exam_id)
 
     rank_map: dict[str, int] = {}
     if exam_id is not None:
         try:
             rm, _rows = compute_subject_rank_contextual(
-                db, ctx, exam_id, exam_grade=None,
+                db, ctx, exam_id, exam_grade=exam_grade,
             )
             rank_map = rm
         except Exception:
@@ -981,11 +1008,15 @@ def weekly_focus(db, teaching_class_id=None, today=None):
     today = today or date.today().isoformat()
     week_start = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
 
-    # 花名册：限合法成员范围、非 excluded
+    # 花名册：限合法成员范围、非 excluded。
+    # 注意：member_ids（ctx）不含 _anon: 占位成员，但作业缺交跟踪需要保留仅姓名
+    # 教学班成员（先有名单、后有成绩）。这里用作业范围（含 anon）构建花名册，
+    # 保证匿名成员的缺交信号能进入 Weekly；成绩排名信号仍只用 ctx.member_ids。
+    hw_scope_ids = _scope_student_ids(db, teaching_class_id)
     roster = {
         r.student_id: r
         for r in db.query(ClassRoster)
-        .filter(ClassRoster.student_id.in_(member_ids), ClassRoster.excluded == 0)
+        .filter(ClassRoster.student_id.in_(hw_scope_ids), ClassRoster.excluded == 0)
         .all()
     }
     reasons: dict[str, list] = defaultdict(list)

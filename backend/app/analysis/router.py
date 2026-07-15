@@ -829,7 +829,11 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             "min": min(score_values) if score_values else None,
             "rank_min": min(rank_values) if rank_values else None,
             "rank_max": max(rank_values) if rank_values else None,
-            "score_basis": "grade_score" if any(s.get("grade_score") is not None for s in scored) else "raw_score",
+            "score_basis": (
+                "grade_score"
+                if (exam.grade in (2, 3) and subject in _ELECTIVE_SUBJECTS)
+                else "raw_score"
+            ),
         }
 
         # ── class_averages：范围隔离的当前学科现算均分 ──
@@ -1347,8 +1351,10 @@ async def compare_classes(exam_id: Optional[int] = None):
                 else "raw_score"
             )
             classes = []
-            overall_sum = 0.0
-            overall_count = 0
+            # overall_subject_avg：对合法教学班成员去重后的当前学科 score values
+            # 直接求均，不简单平均各班均分（避免重复成员重复计入、避免班级规模差异失真）
+            overall_vals = []
+            overall_seen = set()
             for tc in tc_rows:
                 if tc.grade != e.grade:
                     continue
@@ -1380,17 +1386,20 @@ async def compare_classes(exam_id: Optional[int] = None):
                             v = r.grade_score if score_basis == "grade_score" else r.raw_score
                             if v is not None:
                                 vals.append(float(v))
+                                # overall 去重收集
+                                if _sid not in overall_seen and _sid in members:
+                                    overall_seen.add(_sid)
+                                    overall_vals.append(float(v))
                         if vals:
-                            entry["subject_avg"] = round(sum(vals) / len(vals), 1)
+                            # 保留未舍入真实班均供 competition ranking，仅输出 round(1)
+                            entry["_raw_avg"] = sum(vals) / len(vals)
+                            entry["subject_avg"] = round(entry["_raw_avg"], 1)
                 entry["rank"] = None
                 classes.append(entry)
-                if entry["subject_avg"] is not None:
-                    overall_sum += entry["subject_avg"]
-                    overall_count += 1
 
-            # competition ranking 按 subject_avg 降序
-            scored = [(idx, c["subject_avg"]) for idx, c in enumerate(classes)
-                      if c["subject_avg"] is not None]
+            # competition ranking 按未舍入真实班均降序（仅显示时 round(1)）
+            scored = [(idx, c["_raw_avg"]) for idx, c in enumerate(classes)
+                      if c.get("_raw_avg") is not None]
             scored.sort(key=lambda x: x[1], reverse=True)
             prev_val = None
             prev_rank = 0
@@ -1402,7 +1411,11 @@ async def compare_classes(exam_id: Optional[int] = None):
                     prev_rank = i
                     prev_val = val
 
-            overall_avg = round(overall_sum / overall_count, 1) if overall_count else None
+            # 清理临时字段，输出只保留 round(1) 班均
+            for c in classes:
+                c.pop("_raw_avg", None)
+
+            overall_avg = round(sum(overall_vals) / len(overall_vals), 1) if overall_vals else None
 
             classes.sort(key=lambda c: (
                 c["rank"] if c["rank"] is not None else 10**9,

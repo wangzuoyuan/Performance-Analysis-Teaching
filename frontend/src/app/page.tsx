@@ -48,15 +48,16 @@ interface Exam {
 interface ExamDetailStats {
   rank_min?: number | null
   rank_max?: number | null
-  avg_subject?: number | null
-  max_subject?: number | null
-  min_subject?: number | null
-  count?: number | null
+  avg?: number | null
+  max?: number | null
+  min?: number | null
+  total_students?: number | null
+  score_basis?: string | null
 }
 
 interface ExamDetailResponse {
   stats?: ExamDetailStats
-  teaching_subject?: string | null
+  subject?: string | null
 }
 
 interface FocusStudent {
@@ -266,7 +267,7 @@ export default function Dashboard() {
     safeJson<ExamDetailResponse>(`/api/exams/${latestExam.id}${tidQuery}`).then((r) => {
       if (cancelled) return
       setScopeStats(r?.stats)
-      setTeachingSubject(r?.teaching_subject ?? null)
+      setTeachingSubject(r?.subject ?? null)
       setScopeStatsLoading(false)
     })
     return () => {
@@ -299,9 +300,8 @@ export default function Dashboard() {
   const focusSeries = useMemo(() => focusHistory.map((v) => ({ v })), [focusHistory])
 
   const subjectLabel = teachingSubject ?? '当前学科'
-  const scoreBasisLabel = scopeStats?.max_subject != null || scopeStats?.min_subject != null
-    ? '原始分'
-    : '原始分'
+  const scoreBasisLabel =
+    scopeStats?.score_basis === 'grade_score' ? '等级分' : '原始分'
   // 首次使用：无任何教学班 → 引导去配置
   const noClassesAtAll = !scopeLoading && scopeClasses.length === 0
 
@@ -400,17 +400,17 @@ export default function Dashboard() {
           <KpiCard
             title={`${subjectLabel}均分（${scoreBasisLabel}）`}
             icon={<ClipboardList className="h-4 w-4" />}
-            value={formatNumber(scopeStats?.avg_subject)}
+            value={formatNumber(scopeStats?.avg)}
             spark={examCountSeries}
           />
           <KpiCard
             title="最高·最低"
             icon={<School className="h-4 w-4" />}
             value={
-              scopeStats?.max_subject != null || scopeStats?.min_subject != null
-                ? `${formatNumber(scopeStats?.max_subject)} / ${formatNumber(scopeStats?.min_subject)}`
-                : formatNumber(scopeStats?.count) !== '—'
-                ? `${scopeStats?.count} 人`
+              scopeStats?.max != null || scopeStats?.min != null
+                ? `${formatNumber(scopeStats?.max)} / ${formatNumber(scopeStats?.min)}`
+                : scopeStats?.total_students != null
+                ? `${scopeStats.total_students} 人`
                 : '—'
             }
           />
@@ -545,7 +545,7 @@ export default function Dashboard() {
                         </div>
                         <div className="flex gap-2">
                           <Badge variant="outline" className="font-normal">
-                            {subjectLabel}均分 {formatNumber(examStatsById[exam.id]?.avg_subject)}
+                            {subjectLabel}均分 {formatNumber(examStatsById[exam.id]?.avg)}
                           </Badge>
                           <Badge variant="outline" className="font-normal">
                             班内名次 {formatRankRange(examStatsById[exam.id])}
