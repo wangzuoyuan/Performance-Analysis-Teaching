@@ -1,30 +1,17 @@
-from app.analysis.config import SUBJECT_WEAKNESS_PCT_DIFF, CRITICAL_RANGE, WEAK_RANGE
+"""[遗留兼容] 重点关注名单计算（早期抽象，当前无生产调用方）。
 
-def build_focus_list(exam_id: int, class_num: int, db) -> list:
-    """生成重点关注名单"""
-    from app.db.models import SubjectScore, TotalScore
-    from sqlalchemy import and_
+单学科化（阶段7）：原实现按总分表的学籍名次划分临界段/薄弱段。总分表已
+退役——新上传不再写入该表。本模块保留函数签名以兼容旧的测试级联引用，
+但不再查询总分表；调用将返回空结果（无可用段位数据）。生产关注名单由
+analysis/router.py 与 chat/tools.py 的单学科口径实时计算。
+"""
 
-    # 获取临界段学生（学籍排名400-500）
-    critical_students = db.query(TotalScore.student_id).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门",
-        TotalScore.xueji_rank >= CRITICAL_RANGE[0],
-        TotalScore.xueji_rank <= CRITICAL_RANGE[1]
-    ).all()
 
-    # 获取薄弱段学生（学籍排名>500）
-    weak_students = db.query(TotalScore.student_id).filter(
-        TotalScore.exam_id == exam_id,
-        TotalScore.total_type == "主三门",
-        TotalScore.xueji_rank > WEAK_RANGE[0]
-    ).all()
+def build_focus_list(exam_id: int, class_num: int, db) -> dict:
+    """[遗留] 生成重点关注名单。
 
-    # 获取严重偏科学生
-    # （偏科判定：单科年级百分位比主三门百分位差>=0.20）
-    # 具体实现待完成
-
-    return {
-        "critical": [s[0] for s in critical_students],
-        "weak": [s[0] for s in weak_students],
-    }
+    原实现依赖总分表（主三门学籍名次）划分临界段/薄弱段。总分表已退役，
+    不再有新数据写入，故本函数返回空结果。生产关注名单请使用
+    analysis/router.py 的单学科实时口径。
+    """
+    return {"critical": [], "weak": []}

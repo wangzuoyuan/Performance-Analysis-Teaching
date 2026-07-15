@@ -294,6 +294,7 @@ def sync_by_class_num(tc_id: int, db=Depends(get_db)):
     if tc.kind != "行政":
         raise HTTPException(400, "仅行政班（高一，label 为数字）支持按行政班号同步")
     count = service.sync_by_class_num(db, tc)
+    db.commit()
     return {"ok": True, "member_count": count, "members": _member_profile(db, tc_id)}
 
 

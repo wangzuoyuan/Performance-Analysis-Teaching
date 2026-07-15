@@ -259,8 +259,17 @@ def _place_id(db, tc, sid: str, name, upsert: bool, existing: set, by_name: dict
 
 
 def _ambiguous_entry(db, tc_grade: int, name: str) -> dict:
-    """构造同名消歧条目：候选含学号 / 行政班 / 最近主三门名次。"""
-    from app.db.models import Exam, SubjectScore, TotalScore
+    """构造同名消歧条目：候选含学号 / 行政班 / 最近任教学科成绩（不再用主三门名次）。
+
+    单学科化（阶段7）：不再查询 TotalScore。改用教师唯一任教学科的最近一次
+    合法成绩（raw_score / grade_score）辅助辨认同名。
+    """
+    from app.db.models import Exam, SubjectScore, Teacher
+
+    teacher_subj = None
+    teacher = db.query(Teacher).first()
+    if teacher:
+        teacher_subj = teacher.subject
 
     cands = []
     for sid in name_to_student_ids(db, name):
@@ -270,19 +279,27 @@ def _ambiguous_entry(db, tc_grade: int, name: str) -> dict:
             .filter(SubjectScore.student_id == sid, SubjectScore.class_num.isnot(None))
             .first()
         )
-        latest = (
-            db.query(TotalScore.xueji_rank, TotalScore.grade_rank)
-            .join(Exam, Exam.id == TotalScore.exam_id)
-            .filter(TotalScore.student_id == sid, TotalScore.total_type == "主三门")
-            .order_by(Exam.exam_date.desc(), TotalScore.id.desc())
-            .first()
-        )
+        latest_score = None
+        if teacher_subj:
+            latest = (
+                db.query(SubjectScore.raw_score, SubjectScore.grade_score)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.student_id == sid,
+                    SubjectScore.subject == teacher_subj,
+                )
+                .order_by(Exam.exam_date.desc(), SubjectScore.id.desc())
+                .first()
+            )
+            if latest:
+                latest_score = latest[0] if latest[0] is not None else latest[1]
         cands.append(
             {
                 "student_id": sid,
                 "name": nm,
                 "class_num": cls[0] if cls else None,
-                "latest_rank": (latest[0] or latest[1]) if latest else None,
+                "latest_rank": None,  # 保留字段名兼容前端；不再来自主三门名次
+                "latest_score": latest_score,
             }
         )
     return {"name": name, "candidates": cands}
@@ -617,7 +634,11 @@ def reassign_member_id(db, tc, old_sid: str, new_sid: str, name: str | None = No
 
 def sync_by_class_num(db, tc) -> int:
     """高一/行政班：按 int(label) 从成绩库重算成员（仅覆盖 source=class_num 行，
-    保留 manual/roster/parser）。返回成员总数。"""
+    保留 manual/roster/parser）。返回成员总数。
+
+    单学科化（阶段7）：不再内部 commit——由调用方（sync_members_after_upload /
+    parse_and_store）统一控制事务边界，保证上传的原子性。
+    """
     from app.db.models import Exam, SubjectScore, TeachingClassMember
 
     if tc.kind != "行政":
@@ -651,7 +672,6 @@ def sync_by_class_num(db, tc) -> int:
                 teaching_class_id=tc.id, student_id=sid, source="class_num"
             )
         )
-    db.commit()
     return db.query(TeachingClassMember).filter(
         TeachingClassMember.teaching_class_id == tc.id
     ).count()
@@ -659,13 +679,26 @@ def sync_by_class_num(db, tc) -> int:
 
 def sync_members_after_upload(db, exam) -> None:
     """上传新考试后：对 kind=行政 班按 class_num 重算成员；对成绩带 class_label
-    的，把对应学号补为 source=parser 成员（不覆盖已有 manual/roster）。"""
-    from app.db.models import SubjectScore, TeachingClass, TeachingClassMember
+    的，把对应学号补为 source=parser 成员（不覆盖已有 manual/roster）。
+
+    单学科化（阶段7）：只维护当前教师任教学科的 TeachingClass。行政班（无 subject）
+    仍按 class_num 同步；教学班只在 tc.subject == 教师任教学科 时维护，他科教学班
+    不被扫描。不再内部 commit——由调用方（parse_and_store）统一控制事务边界。
+    """
+    from app.db.models import SubjectScore, Teacher, TeachingClass, TeachingClassMember
+
+    teacher_subj = None
+    teacher = db.query(Teacher).first()
+    if teacher:
+        teacher_subj = teacher.subject
 
     classes = (
         db.query(TeachingClass).filter(TeachingClass.grade == exam.grade).all()
     )
     for tc in classes:
+        # §7：教学班只维护当前教师 subject 的班；行政班（无 subject）不受影响。
+        if tc.kind == "教学" and teacher_subj and tc.subject != teacher_subj:
+            continue
         if tc.kind == "行政":
             sync_by_class_num(db, tc)
         # parser 来源：本考试里 class_label 命中本班标签的学号自动加入
@@ -695,13 +728,28 @@ def sync_members_after_upload(db, exam) -> None:
                     )
                 )
                 existing.add(sid)
-    db.commit()
 
 
 def candidate_classes(db, grade: int) -> dict:
-    """扫出该年级可选的行政班号 + 教学班标签（建班向导预填用）。"""
-    from app.db.models import Exam, SubjectScore
+    """扫出该年级可选的行政班号 + 教学班标签（建班向导预填用）。
+
+    单学科化（阶段7）：只返回当前教师任教学科有真实分数（raw_score / grade_score
+    至少一个非空）的班号/教学班标签。旧库含他科 SubjectScore 行不得进入设置页。
+    """
+    from app.db.models import Exam, SubjectScore, Teacher
     from sqlalchemy import distinct
+
+    teacher_subj = None
+    teacher = db.query(Teacher).first()
+    if teacher:
+        teacher_subj = teacher.subject
+
+    subj_filter = []
+    if teacher_subj:
+        subj_filter.append(SubjectScore.subject == teacher_subj)
+        subj_filter.append(
+            (SubjectScore.raw_score.isnot(None)) | (SubjectScore.grade_score.isnot(None))
+        )
 
     class_nums = sorted(
         {
@@ -709,7 +757,7 @@ def candidate_classes(db, grade: int) -> dict:
             for r in (
                 db.query(distinct(SubjectScore.class_num))
                 .join(Exam, Exam.id == SubjectScore.exam_id)
-                .filter(Exam.grade == grade, SubjectScore.class_num.isnot(None))
+                .filter(Exam.grade == grade, SubjectScore.class_num.isnot(None), *subj_filter)
                 .all()
             )
         }
@@ -720,7 +768,7 @@ def candidate_classes(db, grade: int) -> dict:
             for r in (
                 db.query(distinct(SubjectScore.class_label))
                 .join(Exam, Exam.id == SubjectScore.exam_id)
-                .filter(Exam.grade == grade, SubjectScore.class_label.isnot(None))
+                .filter(Exam.grade == grade, SubjectScore.class_label.isnot(None), *subj_filter)
                 .all()
             )
         }

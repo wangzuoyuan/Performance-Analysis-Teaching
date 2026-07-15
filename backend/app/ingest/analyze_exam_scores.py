@@ -227,11 +227,15 @@ def inspect_files(paths: list[Path]) -> dict[str, Any]:
     }
 
 
-def parse_student_scores(path: Path, info: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+def parse_student_scores(path: Path, info: dict[str, Any]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """解析学生成绩明细表，返回 (students, score_long)。
+
+    单学科化（阶段7）：不再返回 totals（TotalScore 已退役）。旧 Excel 含总分列
+    仍可正常解析各单科成绩；总分列被忽略。
+    """
     wb = load_workbook(path, data_only=True, read_only=False)
     ws = wb[wb.sheetnames[0]]
     score_long: list[dict[str, Any]] = []
-    totals: list[dict[str, Any]] = []
     students: list[dict[str, Any]] = []
     exam = info["exam"]
     order = EXAM_ORDER.get(exam, 999)
@@ -269,28 +273,7 @@ def parse_student_scores(path: Path, info: dict[str, Any]) -> tuple[list[dict[st
                 "grade_percentile": pct,
                 "source_file": path.name,
             })
-        for total_type, (score_col, pct_col, xueji_rank_col, grade_rank_col) in TOTAL_COLS.items():
-            score = num(ws.cell(row_idx, score_col).value)
-            pct = num(ws.cell(row_idx, pct_col).value)
-            xueji_rank = intish(ws.cell(row_idx, xueji_rank_col).value)
-            grade_rank = intish(ws.cell(row_idx, grade_rank_col).value)
-            if score is None and pct is None and xueji_rank is None and grade_rank is None:
-                continue
-            totals.append({
-                "exam": exam,
-                "exam_order": order,
-                "student_id": student_id,
-                "class": class_name,
-                "xueji": xueji,
-                "name": name,
-                "total_type": total_type,
-                "total_score": score,
-                "grade_percentile": pct,
-                "xueji_rank": xueji_rank,
-                "grade_rank": grade_rank,
-                "source_file": path.name,
-            })
-    return students, score_long, totals
+    return students, score_long
 
 
 def parse_class_averages(path: Path, info: dict[str, Any]) -> list[dict[str, Any]]:
@@ -361,17 +344,15 @@ def parse_inputs(paths: list[Path]) -> dict[str, Any]:
     inspection = inspect_files(paths)
     students: list[dict[str, Any]] = []
     score_long: list[dict[str, Any]] = []
-    student_totals: list[dict[str, Any]] = []
     class_averages: list[dict[str, Any]] = []
     rank_bands: list[dict[str, Any]] = []
     warnings = list(inspection["warnings"])
     for info in inspection["files"]:
         path = Path(info["file"])
         if info["type"] == "student_scores":
-            file_students, file_scores, file_totals = parse_student_scores(path, info)
+            file_students, file_scores = parse_student_scores(path, info)
             students.extend(file_students)
             score_long.extend(file_scores)
-            student_totals.extend(file_totals)
         elif info["type"] == "class_averages":
             class_averages.extend(parse_class_averages(path, info))
         elif info["type"] == "rank_bands":
@@ -391,7 +372,6 @@ def parse_inputs(paths: list[Path]) -> dict[str, Any]:
         "warnings": warnings,
         "students": students,
         "score_long": score_long,
-        "student_totals": student_totals,
         "class_averages": class_averages,
         "rank_bands": rank_bands,
     }
@@ -954,7 +934,9 @@ def build_history_rows(class_overview: list[dict[str, Any]]) -> list[dict[str, A
 def build_analysis(parsed: dict[str, Any], target_class: str) -> dict[str, Any]:
     students = parsed["students"]
     score_long = parsed["score_long"]
-    student_totals = parsed["student_totals"]
+    # 单学科化（阶段7）：student_totals 已从 parse_inputs 退役；遗留 CLI 分析
+    # 管线接受空列表（趋势/分段等总分相关输出为空，不影响单科成绩）。
+    student_totals: list[dict[str, Any]] = []
     class_averages = parsed["class_averages"]
     rank_bands = parsed["rank_bands"]
     class_overview = build_class_overview(class_averages, target_class)
@@ -1000,7 +982,6 @@ def build_analysis(parsed: dict[str, Any], target_class: str) -> dict[str, Any]:
         "warnings": warnings,
         "students": students,
         "score_long": score_long,
-        "student_totals": student_totals,
         "class_averages": class_averages,
         "class_overview": class_overview,
         "parallel_comparison": parallel,
@@ -1226,7 +1207,6 @@ def write_data_package(out_dir: Path, analysis: dict[str, Any]) -> dict[str, str
     data_dir = out_dir / "data"
     outputs = {
         "score_long": data_dir / "score_long.csv",
-        "student_totals": data_dir / "student_totals.csv",
         "class_averages": data_dir / "class_averages.csv",
         "rank_bands": data_dir / "rank_bands.csv",
         "student_trends": data_dir / "student_trends.csv",
@@ -1234,7 +1214,6 @@ def write_data_package(out_dir: Path, analysis: dict[str, Any]) -> dict[str, str
         "subject_communication": data_dir / "subject_communication.csv",
     }
     write_csv(outputs["score_long"], analysis["score_long"])
-    write_csv(outputs["student_totals"], analysis["student_totals"])
     write_csv(outputs["class_averages"], analysis["class_averages"])
     write_csv(outputs["rank_bands"], analysis["rank_bands"])
     write_csv(outputs["student_trends"], analysis["student_trends"])

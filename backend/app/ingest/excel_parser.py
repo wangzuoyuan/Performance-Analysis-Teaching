@@ -101,7 +101,7 @@ def fill_merged_headers(values: list[str]) -> list[str]:
 
 
 def normalize_grade1_student_scores(file_path: Path, info: dict[str, Any]) -> dict:
-    students, subject_scores, total_scores = parse_student_scores(file_path, info)
+    students, subject_scores = parse_student_scores(file_path, info)
     return {
         "kind": "student_scores",
         "students": [
@@ -125,22 +125,10 @@ def normalize_grade1_student_scores(file_path: Path, info: dict[str, Any]) -> di
             }
             for row in subject_scores
         ],
-        "total_scores": [
-            {
-                "student_id": row["student_id"],
-                "total_type": row["total_type"],
-                "total_score": row.get("total_score"),
-                "grade_percentile": row.get("grade_percentile"),
-                "xueji_rank": row.get("xueji_rank"),
-                "grade_rank": row.get("grade_rank"),
-            }
-            for row in total_scores
-        ],
     }
 
 
 GRADE1_SUBJECTS = ["语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理"]
-GRADE1_TOTAL_TYPES = ["主三门", "五门", "九门"]
 
 
 def is_grade1_student_sheet(path: Path) -> bool:
@@ -159,7 +147,6 @@ def parse_excel_grade1_student_scores(path: Path) -> dict:
     sub_headers = [clean(ws.cell(3, col).value) for col in range(1, ws.max_column + 1)]
     class_label_col = detect_class_label_col(top_headers) or detect_class_label_col(sub_headers)
     subject_cols: dict[str, dict[str, int]] = {subject: {} for subject in GRADE1_SUBJECTS}
-    total_cols: dict[str, dict[str, int]] = {total_type: {} for total_type in GRADE1_TOTAL_TYPES}
 
     for col, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
         normalized_top = top.replace(" ", "")
@@ -169,19 +156,9 @@ def parse_excel_grade1_student_scores(path: Path) -> dict:
                 subject_cols[normalized_top]["score"] = col
             elif normalized_sub == "年级百分位":
                 subject_cols[normalized_top]["percentile"] = col
-        elif normalized_top in total_cols:
-            if normalized_sub == "总分":
-                total_cols[normalized_top]["score"] = col
-            elif normalized_sub == "年级百分位":
-                total_cols[normalized_top]["percentile"] = col
-            elif normalized_sub == "学籍排名":
-                total_cols[normalized_top]["xueji_rank"] = col
-            elif normalized_sub == "年级排名":
-                total_cols[normalized_top]["grade_rank"] = col
 
     students: list[dict[str, Any]] = []
     subject_scores: list[dict[str, Any]] = []
-    total_scores: list[dict[str, Any]] = []
 
     for row_idx in range(4, ws.max_row + 1):
         student_id = clean(ws.cell(row_idx, 1).value)
@@ -223,29 +200,10 @@ def parse_excel_grade1_student_scores(path: Path) -> dict:
                 }
             )
 
-        for total_type, cols in total_cols.items():
-            total_score = number(ws.cell(row_idx, cols["score"]).value) if cols.get("score") else None
-            grade_percentile = percentile(ws.cell(row_idx, cols["percentile"]).value) if cols.get("percentile") else None
-            xueji_rank = integer(ws.cell(row_idx, cols["xueji_rank"]).value) if cols.get("xueji_rank") else None
-            grade_rank = integer(ws.cell(row_idx, cols["grade_rank"]).value) if cols.get("grade_rank") else None
-            if total_score is None and grade_percentile is None and xueji_rank is None and grade_rank is None:
-                continue
-            total_scores.append(
-                {
-                    "student_id": student_id,
-                    "total_type": total_type,
-                    "total_score": total_score,
-                    "grade_percentile": grade_percentile,
-                    "xueji_rank": xueji_rank,
-                    "grade_rank": grade_rank,
-                }
-            )
-
     return {
         "kind": "student_scores",
         "students": students,
         "subject_scores": subject_scores,
-        "total_scores": total_scores,
     }
 
 
@@ -446,7 +404,6 @@ def parse_excel_grade23(file_path: str, grade: int) -> dict:
     class_label_col = detect_class_label_col(grade23_headers)
     students: list[dict[str, Any]] = []
     subject_scores: list[dict[str, Any]] = []
-    total_scores: list[dict[str, Any]] = []
 
     for row_idx in range(4, ws.max_row + 1):
         student_id = clean(ws.cell(row_idx, 1).value)
@@ -489,31 +446,8 @@ def parse_excel_grade23(file_path: str, grade: int) -> dict:
                 }
             )
 
-        total_specs = [
-            ("+3", 20, None, None),
-            ("主三门", 21, 22, 23),
-            ("3+3", 24, 25, 26),
-        ]
-        for total_type, score_col, pct_col, xueji_rank_col in total_specs:
-            total_score = number(ws.cell(row_idx, score_col).value)
-            grade_percentile = percentile(ws.cell(row_idx, pct_col).value) if pct_col else None
-            xueji_rank = integer(ws.cell(row_idx, xueji_rank_col).value) if xueji_rank_col else None
-            if total_score is None and grade_percentile is None and xueji_rank is None:
-                continue
-            total_scores.append(
-                {
-                    "student_id": student_id,
-                    "total_type": total_type,
-                    "total_score": total_score,
-                    "grade_percentile": grade_percentile,
-                    "xueji_rank": xueji_rank,
-                    "grade_rank": None,
-                }
-            )
-
     return {
         "kind": "student_scores",
         "students": students,
         "subject_scores": subject_scores,
-        "total_scores": total_scores,
     }

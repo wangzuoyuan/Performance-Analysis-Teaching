@@ -1,47 +1,16 @@
+"""[遗留兼容] 跨学年趋势计算（早期抽象，当前无生产调用方）。
+
+单学科化（阶段7）：原实现依赖总分表（主三门总分/学籍名次）构造跨学年
+总分趋势。总分表已退役——新上传不再写入该表。本模块保留函数签名以
+兼容旧的测试级联引用，但不再查询总分表；跨学年趋势的单学科口径由
+analysis/router.py（学科成绩表 + 教师任教学科）实时计算。
+"""
+
+
 def compute_cross_year_trend(student_id: str, db) -> dict:
-    """计算跨学年趋势（只用主三门+语数英）"""
-    from app.db.models import TotalScore, SubjectScore, Exam
+    """[遗留] 计算跨学年趋势（只用主三门+语数英）。
 
-    # 获取该生的所有考试（按年级分组）
-    exams = db.query(Exam).join(TotalScore, Exam.id == TotalScore.exam_id).filter(
-        TotalScore.student_id == student_id
-    ).order_by(Exam.grade, Exam.exam_date).all()
-
-    if not exams:
-        return {"message": "无跨学年数据"}
-
-    # 检测年级切换
-    grades = set(e.grade for e in exams)
-    has_cross_year = len(grades) > 1
-
-    # 只返回主三门趋势（跨学年时排除五门/九门/+3/3+3）
-    main_total_scores = db.query(TotalScore).join(Exam).filter(
-        TotalScore.student_id == student_id,
-        TotalScore.total_type == "主三门",
-        Exam.grade.in_(grades)
-    ).order_by(Exam.grade, Exam.exam_date).all()
-
-    # 语文数学英语单科
-    subject_scores = db.query(SubjectScore).join(Exam).filter(
-        SubjectScore.student_id == student_id,
-        SubjectScore.subject.in_(["语文", "数学", "英语"]),
-        Exam.grade.in_(grades)
-    ).order_by(Exam.grade, Exam.exam_date).all()
-
-    return {
-        "student_id": student_id,
-        "has_cross_year": has_cross_year,
-        "grades": list(grades),
-        "main_total_trend": [{
-            "exam_id": s.exam_id,
-            "exam_name": exams[[e.id for e in exams].index(s.exam_id)].name if s.exam_id in [e.id for e in exams] else str(s.exam_id),
-            "total_score": s.total_score,
-            "xueji_rank": s.xueji_rank,
-        } for s in main_total_scores],
-        "subject_trend": [{
-            "exam_id": s.exam_id,
-            "subject": s.subject,
-            "raw_score": s.raw_score,
-            "grade_percentile": s.grade_percentile,
-        } for s in subject_scores],
-    }
+    原实现依赖总分表。总分表已退役，本函数返回「无跨学年数据」。
+    生产跨学年趋势请使用 analysis/router.py 的单学科成绩口径。
+    """
+    return {"message": "无跨学年数据"}

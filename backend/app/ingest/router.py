@@ -73,10 +73,32 @@ def get_or_create_exam(db, parsed: dict, grade: int, file_path: str):
     return exam
 
 
+def _teacher_subject(db) -> str | None:
+    """读取教师唯一任教学科（单科教学领域边界）。未配置时返回 None。"""
+    from app.db.models import Teacher
+
+    teacher = db.query(Teacher).first()
+    return teacher.subject if teacher else None
+
+
 def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> dict:
     """解析单个 Excel 文件并写库。parsed 提供 semester/exam_type/sort_key/canonical_name。
-    返回 {result, detected_class, detected_grade}；调用方负责汇总。"""
-    from app.db.models import SessionLocal, Upload, SubjectScore, TotalScore, ClassAverage
+    返回 {result, detected_class, detected_grade}；调用方负责汇总。
+
+    单学科存储（阶段7）：新上传只持久化教师唯一任教学科的 SubjectScore；混合
+    多学科 Excel 中的其他学科与 TotalScore 不得入库。ClassAverage 只保留当前
+    subject 的 subject_averages 键，total_averages 不再写。
+
+    领域约束（§3–§9）：
+    - detected_class / detected_classes 只从 filtered SubjectScore rows（教师学科
+      且 raw_score/grade_score 至少一个非空）推导，不把他科班标签回传前端。
+    - raw_score 和 grade_score 均空的 percentile-only 残留行不得入库（§4）。
+    - ClassAverage 只写教师学科值真实存在的合法行；total_averages 恒 {}（§5）。
+    - Teacher.subject 未设置 或 文件无任教学科真实成绩 → 域错误拒绝 + rollback，
+      不创建空 Exam/Upload 业务数据（§6）。
+    - sync_members_after_upload 异常不静默吞错（§9）。
+    """
+    from app.db.models import SessionLocal, Upload, SubjectScore, ClassAverage
 
     out = {"result": None, "detected_class": None, "detected_grade": None}
 
@@ -100,28 +122,48 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
             result = parse_excel_grade23(file_path, grade)
 
         kind = result.get("kind")
-        parsed_ok = kind in {"student_scores", "class_averages"}
 
-        upload_record = Upload(
-            file_path=file_path,
-            file_hash=compute_hash(open(file_path, "rb").read()),
-            kind=kind or "unknown",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            parsed_ok=1 if parsed_ok else 0,
-            parse_log=result if not parsed_ok else None,
-        )
-        db.add(upload_record)
+        # 单学科领域边界：先读教师任教学科，据此过滤。
+        teacher_subj = _teacher_subject(db)
 
         if kind == "student_scores":
-            students = result.get("students", [])
             subject_scores = result.get("subject_scores", [])
-            total_scores = result.get("total_scores", [])
 
-            out["detected_class"] = detect_class_from_students(students)
+            # §3+§4：按教师学科过滤，并丢弃 raw_score/grade_score 均空的残留行。
+            if teacher_subj:
+                subject_scores = [
+                    ss for ss in subject_scores
+                    if ss.get("subject") == teacher_subj
+                    and (ss.get("raw_score") is not None or ss.get("grade_score") is not None)
+                ]
+            else:
+                subject_scores = []
+
+            # §6：教师学科未设置 或 文件无该学科真实成绩 → 域错误拒绝。
+            if not teacher_subj:
+                raise ValueError("未配置教师任教学科（Teacher.subject），无法确定单学科存储边界")
+            if not subject_scores:
+                raise ValueError(
+                    f"文件未包含任教学科「{teacher_subj}」的真实成绩"
+                    f"（raw_score / grade_score 至少需要一个非空）"
+                )
+
+            parsed_ok = True
+            upload_record = Upload(
+                file_path=file_path,
+                file_hash=compute_hash(open(file_path, "rb").read()),
+                kind=kind,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                parsed_ok=1,
+            )
+            db.add(upload_record)
+
+            # §3：detected_class / detected_classes 从 filtered rows 推导，
+            # 不把他科班标签（如物理科的教学班标签）回传前端。
+            out["detected_class"] = detect_class_from_students(subject_scores)
             out["detected_grade"] = grade
-            # 候选班（行政班号 + 教学班标签），供班级配置向导预填
-            class_nums = sorted({s.get("class_num") for s in students if s.get("class_num") is not None})
-            class_labels = sorted({s.get("class_label") for s in students if s.get("class_label")})
+            class_nums = sorted({ss.get("class_num") for ss in subject_scores if ss.get("class_num") is not None})
+            class_labels = sorted({ss.get("class_label") for ss in subject_scores if ss.get("class_label")})
             out["detected_classes"] = {"class_nums": class_nums, "class_labels": class_labels}
 
             exam = get_or_create_exam(db, parsed, grade, file_path)
@@ -141,63 +183,96 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
                     grade_percentile=ss.get("grade_percentile"),
                 ))
 
-            for ts in total_scores:
-                db.add(TotalScore(
-                    exam_id=exam.id,
-                    student_id=ts["student_id"],
-                    total_type=ts["total_type"],
-                    total_score=ts.get("total_score"),
-                    grade_percentile=ts.get("grade_percentile"),
-                    xueji_rank=ts.get("xueji_rank"),
-                    grade_rank=ts.get("grade_rank"),
-                ))
-
             db.commit()
-            # 上传钩子：按 class_num / class_label 自动维护教学班成员
-            try:
-                from app.teaching.service import sync_members_after_upload
-                sync_members_after_upload(db, exam)
-            except Exception:
-                pass
+            # §9：上传钩子异常不静默吞错——让事务 rollback，避免成绩已提交而
+            # 成员同步失败的半成品。sync_members_after_upload 内部不自 commit。
+            from app.teaching.service import sync_members_after_upload
+            sync_members_after_upload(db, exam)
+            db.commit()
             out["result"] = {
                 "filename": filename,
                 "parsed_ok": True,
-                "message": f"解析成功，检测到{len(students)}名学生 · 归入「{parsed['canonical_name']}」",
+                "message": f"解析成功，检测到{len(subject_scores)}条{teacher_subj}成绩 · 归入「{parsed['canonical_name']}」",
                 "kind": "student_scores",
                 "grade": grade,
                 "exam_name": parsed["canonical_name"],
+                "subject": teacher_subj,
+                "stored_count": len(subject_scores),
             }
 
         elif kind == "class_averages":
             class_avgs = result.get("class_averages", [])
+
+            # §5：ClassAverage 只保留教师学科值真实存在的合法行；
+            # total_averages 恒 {}。
+            if teacher_subj:
+                filtered_avgs = []
+                for ca in class_avgs:
+                    raw_subj_avgs = ca.get("subject_averages", {})
+                    subj_val = raw_subj_avgs.get(teacher_subj)
+                    if subj_val is None:
+                        continue  # 该班无教师学科真实均分 → 不写空壳行
+                    clabel = ca.get("class_label")
+                    if clabel is None and ca.get("class_num") is not None:
+                        clabel = str(ca["class_num"])
+                    filtered_avgs.append((ca, clabel, {teacher_subj: subj_val}))
+            else:
+                filtered_avgs = []
+
+            # §6：教师学科未设置 → 域错误拒绝。
+            if not teacher_subj:
+                raise ValueError("未配置教师任教学科（Teacher.subject），无法确定单学科存储边界")
+            if not filtered_avgs:
+                raise ValueError(
+                    f"均分表未包含任教学科「{teacher_subj}」的真实班级均分"
+                )
+
+            parsed_ok = True
+            upload_record = Upload(
+                file_path=file_path,
+                file_hash=compute_hash(open(file_path, "rb").read()),
+                kind=kind,
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                parsed_ok=1,
+            )
+            db.add(upload_record)
+
             exam = get_or_create_exam(db, parsed, grade, file_path)
             upload_record.exam_id = exam.id
 
-            for ca in class_avgs:
-                clabel = ca.get("class_label")
-                if clabel is None and ca.get("class_num") is not None:
-                    clabel = str(ca["class_num"])
+            for ca, clabel, subj_avgs in filtered_avgs:
                 db.add(ClassAverage(
                     exam_id=exam.id,
                     class_type=ca.get("class_type"),
                     class_num=ca.get("class_num"),
                     class_label=clabel,
                     teacher_name=ca.get("teacher_name"),
-                    subject_averages=ca.get("subject_averages", {}),
-                    total_averages=ca.get("total_averages", {}),
+                    subject_averages=subj_avgs,
+                    total_averages={},
                 ))
 
             db.commit()
             out["result"] = {
                 "filename": filename,
                 "parsed_ok": True,
-                "message": f"解析成功，检测到{len(class_avgs)}个班级均分 · 归入「{parsed['canonical_name']}」",
+                "message": f"解析成功，检测到{len(filtered_avgs)}个班级{teacher_subj}均分 · 归入「{parsed['canonical_name']}」",
                 "kind": "class_averages",
                 "grade": grade,
                 "exam_name": parsed["canonical_name"],
+                "subject": teacher_subj,
             }
 
         else:
+            parsed_ok = False
+            upload_record = Upload(
+                file_path=file_path,
+                file_hash=compute_hash(open(file_path, "rb").read()),
+                kind=kind or "unknown",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                parsed_ok=0,
+                parse_log=result,
+            )
+            db.add(upload_record)
             db.commit()
             out["result"] = {
                 "filename": filename,

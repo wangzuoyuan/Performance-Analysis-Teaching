@@ -53,22 +53,23 @@ def make_grade23_student_workbook(path: Path):
 
 
 def test_parse_grade23_sample_totals(tmp_path):
+    """阶段7：total_scores 已退役——解析器不再返回该键。
+    旧格式 Excel（含 +3/主三门/3+3 总分列）仍可正常解析各单科成绩。"""
     sample = tmp_path / "高二2025学年第二学期期中考试学生成绩明细表.xlsx"
     make_grade23_student_workbook(sample)
     result = parse_excel_grade23(str(sample), grade=2)
 
     assert result["kind"] == "student_scores"
     assert len(result["students"]) == 2
-
-    totals = {
-        row["total_type"]: row
-        for row in result["total_scores"]
+    # total_scores 键不再存在（TotalScore 退役）
+    assert "total_scores" not in result
+    # 各单科成绩仍可正常解析
+    subjects = {
+        row["subject"]: row
+        for row in result["subject_scores"]
         if row["student_id"] == "7240101"
     }
-    assert totals["主三门"]["total_score"] == 325.5
-    assert totals["+3"]["total_score"] == 174
-    assert totals["3+3"]["total_score"] == 499.5
-    assert totals["3+3"]["xueji_rank"] == 291
+    assert subjects["语文"]["raw_score"] == 97
 
 
 def test_parse_grade23_sample_subjects(tmp_path):
@@ -108,21 +109,15 @@ def test_parse_grade1_percentiles(tmp_path):
 
     result = parse_excel_grade1_student_scores(path)
 
+    # 阶段7：total_scores 已退役——解析器不再返回该键
+    assert "total_scores" not in result
     subjects = {
         row["subject"]: row
         for row in result["subject_scores"]
         if row["student_id"] == "7240101"
     }
-    totals = {
-        row["total_type"]: row
-        for row in result["total_scores"]
-        if row["student_id"] == "7240101"
-    }
     assert subjects["语文"]["grade_percentile"] == 0.4501
     assert subjects["数学"]["grade_percentile"] == 0.6684
-    assert totals["主三门"]["grade_percentile"] == 0.4788
-    assert totals["主三门"]["xueji_rank"] == 283
-    assert totals["主三门"]["grade_rank"] == 283
 
 
 def test_parse_grade23_class_average_workbook(tmp_path):

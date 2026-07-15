@@ -234,9 +234,18 @@ def unlink_alias(db, student_id: str) -> bool:
 
 
 def name_candidates(db, name: str, target_grade: int = 1) -> list[dict]:
-    """按姓名去某年级（默认高一）找候选人，附行政班/最近主三门名次/学号辅助辨认同名。
-    供配置向导「是同一人 / 是新学生」消歧。"""
-    from app.db.models import Exam, SubjectScore, TotalScore
+    """按姓名去某年级（默认高一）找候选人，附行政班/最近任教学科成绩/学号辅助辨认同名。
+    供配置向导「是同一人 / 是新学生」消歧。
+
+    单学科化（阶段7）：不再查询 TotalScore（主三门名次）。改用教师唯一任教
+    学科的最近一次合法成绩（raw_score / grade_score）+ 行政班号辅助辨识。
+    """
+    from app.db.models import Exam, SubjectScore, Teacher
+
+    teacher_subj = None
+    teacher = db.query(Teacher).first()
+    if teacher:
+        teacher_subj = teacher.subject
 
     rows = (
         db.query(SubjectScore.student_id, SubjectScore.class_num)
@@ -247,26 +256,31 @@ def name_candidates(db, name: str, target_grade: int = 1) -> list[dict]:
     )
     candidates = []
     for student_id, class_num in rows:
-        # 最近一次主三门名次
-        latest_rank = (
-            db.query(TotalScore.xueji_rank, TotalScore.grade_rank)
-            .join(Exam, Exam.id == TotalScore.exam_id)
-            .filter(
-                TotalScore.student_id == student_id,
-                Exam.grade == target_grade,
-                TotalScore.total_type == "主三门",
+        # 最近一次任教学科合法成绩（raw_score / grade_score 至少一个非空）
+        latest_score = None
+        if teacher_subj:
+            latest = (
+                db.query(SubjectScore.raw_score, SubjectScore.grade_score)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.student_id == student_id,
+                    Exam.grade == target_grade,
+                    SubjectScore.subject == teacher_subj,
+                )
+                .order_by(Exam.exam_date.desc(), SubjectScore.id.desc())
+                .first()
             )
-            .order_by(Exam.exam_date.desc(), TotalScore.id.desc())
-            .first()
-        )
-        rank = (latest_rank[0] or latest_rank[1]) if latest_rank else None
+            if latest:
+                latest_score = latest[0] if latest[0] is not None else latest[1]
         candidates.append(
             {
                 "student_id": student_id,
                 "name": name,
                 "class_num": class_num,
                 "grade": target_grade,
-                "latest_rank": rank,
+                "latest_rank": None,  # 保留字段名兼容前端；不再来自主三门名次
+                "latest_score": latest_score,
+                "teaching_subject": teacher_subj,
             }
         )
     return candidates
