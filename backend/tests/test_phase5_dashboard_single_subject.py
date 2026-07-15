@@ -651,6 +651,199 @@ class TestExamDetailContract:
             f"高二非选考数学 score_basis 应为 raw_score: {data}"
 
 
+# ── §7.1b Dashboard 默认 exam-detail 范围隔离（遗留他科班成员不得返回）──
+
+class TestExamDetailDefaultScopeIsolation:
+    """默认 exam-detail（无 teaching_class_id）必须只返回当前学科教学班成员，
+    不得混入教师遗留他科教学班成员（即使后者有当前学科的诱饵成绩）。"""
+
+    def test_default_excludes_legacy_class_members(self, tmp_path):
+        """_SETUP_MATH_WITH_LEGACY_PHYSICS: 数学 A/B 班 s1-s5 + 遗留物理 P 班 s6/s7。
+        s6/s7 在 exam1 有数学诱饵成绩(raw=99)。默认详情只返回 s1-s5。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json().get("exams", [])
+            assert exams, "应有考试"
+            latest = exams[0]
+            d = client.get("/api/exams/%s" % latest["id"]).json()
+            student_ids = sorted(s["student_id"] for s in d.get("students", []))
+            result = {"student_ids": student_ids,
+                      "total_students": d.get("stats", {}).get("total_students")}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code)
+        data = _parse_stdout(proc)
+        assert "s6" not in data["student_ids"], \
+            f"默认详情不得返回遗留物理班 s6: {data}"
+        assert "s7" not in data["student_ids"], \
+            f"默认详情不得返回遗留物理班 s7: {data}"
+        assert data["total_students"] == 5, \
+            f"默认详情学生数应为 5（A∪B），得到 {data}"
+
+    def test_explicit_class_still_subject_checked(self, tmp_path):
+        """显式 teaching_class_id 仍必须校验 subject/grade；遗留他科班 id 不能返回。"""
+        assert_code = textwrap.dedent("""\
+            r0 = client.get("/api/teaching/classes")
+            classes = r0.json().get("classes", [])
+            # 找 P 班（遗留物理）
+            p_cls = [c for c in classes if c.get("label") == "P班"]
+            r = client.get("/api/exams")
+            exams = r.json().get("exams", [])
+            latest = exams[0]["id"] if exams else 1
+            if p_cls:
+                d = client.get("/api/exams/%s?teaching_class_id=%s" % (latest, p_cls[0]["id"]))
+                result = {"status": d.status_code}
+            else:
+                result = {"status": "no_P_class"}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code)
+        data = _parse_stdout(proc)
+        # P 班 subject=物理 ≠ 教师 subject=数学 → 应 4xx
+        assert data["status"] in (400, 404, 409), \
+            f"显式他科班应被拒绝（subject 冲突），得到 {data}"
+
+
+# ── §7.1c Dashboard exam-detail 统一 basis（不得逐行混排）──
+
+_SETUP_EXAM_DETAIL_BASIS_CONFLICT = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster,
+    )
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    tc = TeachingClass(grade=2, label="A班", subject="数学", kind="教学")
+    db.add(tc)
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # 数学（非选考）→ score_basis=raw_score
+    # s1 raw95/grade40, s2 raw90/grade70
+    # 若逐行 grade_score 优先: s1=40, s2=70 → s2 rank1（错误）
+    # 统一 raw_score: s1=95 rank1, s2=90 rank2（正确），avg=92.5
+    db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="数学",
+        raw_score=95, grade_score=40, grade_percentile=0.1, name="甲", class_num=1, xueji=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="数学",
+        raw_score=90, grade_score=70, grade_percentile=0.9, name="乙", class_num=1, xueji=2))
+    db.commit()
+    db.close()
+""")
+
+
+class TestExamDetailUniformBasis:
+    """非选考学科 score_basis=raw_score，整个池统一用 raw_score 排名和统计，
+    不得逐行 grade_score 优先。"""
+
+    def test_raw_score_basis_rank_and_stats(self, tmp_path):
+        """s1 raw95/grade40, s2 raw90/grade70（数学非选考）。
+        score_basis=raw_score → s1 rank1, s2 rank2, avg=92.5, max=95, min=90。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json().get("exams", [])
+            assert exams
+            latest = exams[0]
+            d = client.get("/api/exams/%s" % latest["id"]).json()
+            students = {s["student_id"]: s for s in d.get("students", [])}
+            stats = d.get("stats", {})
+            result = {
+                "score_basis": stats.get("score_basis"),
+                "s1_rank": students.get("s1", {}).get("rank"),
+                "s2_rank": students.get("s2", {}).get("rank"),
+                "avg": stats.get("avg"),
+                "max": stats.get("max"),
+                "min": stats.get("min"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_EXAM_DETAIL_BASIS_CONFLICT, assert_code)
+        data = _parse_stdout(proc)
+        assert data["score_basis"] == "raw_score", \
+            f"数学非选考 score_basis 应为 raw_score: {data}"
+        assert data["s1_rank"] == 1, f"s1 raw=95 应 rank1: {data}"
+        assert data["s2_rank"] == 2, f"s2 raw=90 应 rank2: {data}"
+        assert abs(data["avg"] - 92.5) < 0.05, f"avg 应为 92.5: {data}"
+        assert data["max"] == 95, f"max 应为 95: {data}"
+        assert data["min"] == 90, f"min 应为 90: {data}"
+
+
+# ── §7.1d Dashboard exam-detail 选考学科反向用 grade_score ──
+
+_SETUP_EXAM_DETAIL_ELECTIVE_REVERSE = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster,
+    )
+
+    t = Teacher(subject="物理", name="物理老师")
+    db.add(t)
+    db.flush()
+    tc = TeachingClass(grade=2, label="A班", subject="物理", kind="教学")
+    db.add(tc)
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # 高二物理（选考）→ score_basis=grade_score
+    # s1 raw95/grade40, s2 raw90/grade70（raw 与 grade_score 反向）
+    # 统一 grade_score: s1=40, s2=70 → s2 rank1, s1 rank2
+    db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="物理",
+        raw_score=95, grade_score=40, grade_percentile=0.1, name="甲", class_num=1, xueji=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="物理",
+        raw_score=90, grade_score=70, grade_percentile=0.9, name="乙", class_num=1, xueji=2))
+    db.commit()
+    db.close()
+""")
+
+
+class TestExamDetailElectiveGradeScoreBasis:
+    """高二/高三选考学科 exam-detail 必须统一用 grade_score 排名和统计。"""
+
+    def test_grade_score_basis_rank_and_stats(self, tmp_path):
+        """s1 raw95/grade40, s2 raw90/grade70（高二物理选考，raw 与 grade 反向）。
+        score_basis=grade_score → s2 rank1(70), s1 rank2(40), avg=55.0。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/exams")
+            exams = r.json().get("exams", [])
+            assert exams
+            latest = exams[0]
+            d = client.get("/api/exams/%s" % latest["id"]).json()
+            students = {s["student_id"]: s for s in d.get("students", [])}
+            stats = d.get("stats", {})
+            result = {
+                "score_basis": stats.get("score_basis"),
+                "s1_rank": students.get("s1", {}).get("rank"),
+                "s2_rank": students.get("s2", {}).get("rank"),
+                "avg": stats.get("avg"),
+                "max": stats.get("max"),
+                "min": stats.get("min"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_EXAM_DETAIL_ELECTIVE_REVERSE, assert_code)
+        data = _parse_stdout(proc)
+        assert data["score_basis"] == "grade_score", \
+            f"高二物理选考 score_basis 应为 grade_score: {data}"
+        assert data["s2_rank"] == 1, f"s2 grade=70 应 rank1: {data}"
+        assert data["s1_rank"] == 2, f"s1 grade=40 应 rank2: {data}"
+        assert abs(data["avg"] - 55.0) < 0.05, f"avg 应为 55.0: {data}"
+        assert data["max"] == 70, f"max 应为 70: {data}"
+        assert data["min"] == 40, f"min 应为 40: {data}"
+
+
 # ── §7.2 Correlation 最近考试：按 exam_date DESC 而非 max(id) ──
 
 _SETUP_CORRELATION_DATE_ORDER = textwrap.dedent("""\
@@ -950,6 +1143,65 @@ class TestCompareRankingPrecision:
         assert data["b_rank"] == 2, f"B班真实均分更低应 rank2: {data}"
 
 
+# ── §7.4c Compare 重叠成员 overall 去重 ──
+
+_SETUP_COMPARE_OVERLAPPING_MEMBERS = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster,
+    )
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    # A班: s1, s2 ; B班: s2, s3 （s2 重叠）
+    tc_a = TeachingClass(grade=2, label="A班", subject="数学", kind="教学")
+    tc_b = TeachingClass(grade=2, label="B班", subject="数学", kind="教学")
+    db.add_all([tc_a, tc_b])
+    db.flush()
+    for sid in ["s1", "s2"]:
+        db.add(TeachingClassMember(teaching_class_id=tc_a.id, student_id=sid, source="manual"))
+    for sid in ["s2", "s3"]:
+        db.add(TeachingClassMember(teaching_class_id=tc_b.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # s1=60, s2=80(重叠), s3=60
+    db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="数学",
+        raw_score=60, grade_score=None, grade_percentile=0.5, name="甲", class_num=1, xueji=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="数学",
+        raw_score=80, grade_score=None, grade_percentile=0.5, name="乙", class_num=1, xueji=2))
+    db.add(SubjectScore(exam_id=exam.id, student_id="s3", subject="数学",
+        raw_score=60, grade_score=None, grade_percentile=0.5, name="丙", class_num=2, xueji=3))
+    db.commit()
+    db.close()
+""")
+
+
+class TestCompareOverlappingMembers:
+    """A={s1,s2}, B={s2,s3}（s2 重叠）。overall_subject_avg 必须只计 s2 一次。
+    唯一学生 {s1=60, s2=80, s3=60} → overall=(60+80+60)/3=66.67→round=66.7。
+    若不去重会得 (60+80+80+60)/4=70.0（错误）。"""
+
+    def test_overall_dedup_overlapping(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/class/compare")
+            assert r.status_code == 200, r.text
+            exams = r.json().get("exams", [])
+            assert exams
+            result = {"overall_subject_avg": exams[0].get("overall_subject_avg")}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_COMPARE_OVERLAPPING_MEMBERS, assert_code)
+        data = _parse_stdout(proc)
+        # 唯一学生 s1=60, s2=80, s3=60 → (60+80+60)/3 = 66.666... → round(1)=66.7
+        assert abs(data["overall_subject_avg"] - 66.7) < 0.05, \
+            f"overall 应去重重叠成员 s2（计一次），得到 {data}"
+
+
 # ── §7.5 WeeklyFocus 默认范围与匿名成员 ──
 
 _SETUP_WEEKLY_ANON = textwrap.dedent("""\
@@ -1021,3 +1273,145 @@ class TestWeeklyAnonMember:
             f"匿名成员连续缺交应进入 Weekly: {data}"
         assert data["s1_has_streak"], \
             f"s1 连续缺交应进入 Weekly: {data}"
+
+
+# ── §7.5b WeeklyFocus 默认范围必须先按当前学科过滤 ──
+
+_SETUP_WEEKLY_SUBJECT_FILTER = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster, HomeworkRecord, HomeworkSemester,
+    )
+
+    # 设置当前学期覆盖 2025-11
+    db.add(HomeworkSemester(name="2025秋", start_date="2025-09-01",
+        end_date="2026-02-28", is_current=1))
+    db.commit()
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    # 数学班 s1；遗留物理班 p1（他科教学班）
+    tc_math = TeachingClass(grade=2, label="数学班", subject="数学", kind="教学")
+    tc_phys = TeachingClass(grade=2, label="物理班", subject="物理", kind="教学")
+    db.add_all([tc_math, tc_phys])
+    db.flush()
+    db.add(TeachingClassMember(teaching_class_id=tc_math.id, student_id="s1", source="manual"))
+    db.add(TeachingClassMember(teaching_class_id=tc_phys.id, student_id="p1", source="manual"))
+    db.commit()
+
+    # 花名册：s1 和 p1 都是合法成员
+    for sid, name in [("s1", "学生s1"), ("p1", "学生p1")]:
+        db.add(ClassRoster(student_id=sid, name=name, class_num=1, excluded=0))
+    db.commit()
+
+    # s1 在数学班连续缺交 2 次
+    for day in ["2025-11-01", "2025-11-02"]:
+        db.add(HomeworkRecord(student_id="s1", date=day,
+            subject="校本", submission_status="缺交"))
+    # p1 在遗留物理班也连续缺交 2 次（不得进入数学老师的 Weekly）
+    for day in ["2025-11-01", "2025-11-02"]:
+        db.add(HomeworkRecord(student_id="p1", date=day,
+            subject="校本", submission_status="缺交"))
+    db.commit()
+    db.close()
+""")
+
+
+class TestWeeklySubjectScopeFilter:
+    """默认 Weekly 必须先按当前学科过滤；遗留他科教学班成员不得进入。"""
+
+    def test_default_excludes_legacy_subject_member(self, tmp_path):
+        """数学班 s1 连续缺交、遗留物理班 p1 也连续缺交。
+        默认 Weekly 只返回 s1，不得返回 p1。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/weekly-focus")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            student_ids = {s["student_id"] for s in data.get("students", [])}
+            result = {
+                "student_ids": sorted(student_ids),
+                "has_p1": "p1" in student_ids,
+                "teaching_subject": data.get("teaching_subject"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_WEEKLY_SUBJECT_FILTER, assert_code)
+        data = _parse_stdout(proc)
+        assert not data["has_p1"], \
+            f"默认 Weekly 不得返回遗留物理班 p1: {data}"
+        assert data["teaching_subject"] == "数学"
+
+    def test_other_class_does_not_pollute_timeline(self, tmp_path):
+        """他科班 p1 的缺交日期不得改变当前班 s1 的连续缺交日期轴。
+        验证：s1 的连续缺交次数为 2（不被 p1 的记录干扰）。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/weekly-focus")
+            assert r.status_code == 200, r.text
+            students = {s["student_id"]: s for s in r.json().get("students", [])}
+            s1 = students.get("s1", {})
+            streak_reasons = [r for r in s1.get("reasons", []) if "连续缺交" in r]
+            result = {"s1_has_streak_2": any("2次" in r for r in streak_reasons)}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_WEEKLY_SUBJECT_FILTER, assert_code)
+        data = _parse_stdout(proc)
+        assert data["s1_has_streak_2"], \
+            f"s1 连续缺交应为 2 次（不被他科班 p1 干扰）: {data}"
+
+
+# ── §7.5c WeeklyFocus 匿名成员在当前学科范围内仍保留 ──
+
+_SETUP_WEEKLY_ANON_SUBJECT_FILTER = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam,
+        SubjectScore, ClassRoster, HomeworkRecord, HomeworkSemester,
+    )
+
+    db.add(HomeworkSemester(name="2025秋", start_date="2025-09-01",
+        end_date="2026-02-28", is_current=1))
+    db.commit()
+
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    tc = TeachingClass(grade=2, label="数学班", subject="数学", kind="教学")
+    db.add(tc)
+    db.flush()
+    # 真实学号成员 s1；匿名成员
+    db.add(TeachingClassMember(teaching_class_id=tc.id, student_id="s1", source="manual"))
+    anon_id = "_anon:%d:张某" % tc.id
+    db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=anon_id, source="manual"))
+    db.commit()
+
+    for sid, name in [("s1", "学生s1"), (anon_id, "张某")]:
+        db.add(ClassRoster(student_id=sid, name=name, class_num=1, excluded=0))
+    # 匿名成员连续缺交 2 次
+    for day in ["2025-11-01", "2025-11-02"]:
+        db.add(HomeworkRecord(student_id=anon_id, date=day,
+            subject="校本", submission_status="缺交"))
+    db.commit()
+    db.close()
+""")
+
+
+class TestWeeklyAnonInCurrentSubject:
+    """匿名成员（当前学科教学班仅姓名占位）的缺交信号必须保留在 Weekly 中，
+    且成绩排名信号不含 anon。"""
+
+    def test_anon_retained_in_current_subject_scope(self, tmp_path):
+        """当前数学教学班的匿名成员连续缺交 → 必须进入 Weekly。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/weekly-focus")
+            assert r.status_code == 200, r.text
+            students = {s["student_id"]: s for s in r.json().get("students", [])}
+            anon_ids = [sid for sid in students if sid.startswith("_anon:")]
+            result = {"anon_count": len(anon_ids)}
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_WEEKLY_ANON_SUBJECT_FILTER, assert_code)
+        data = _parse_stdout(proc)
+        assert data["anon_count"] >= 1, \
+            f"当前学科匿名成员连续缺交应进入 Weekly: {data}"

@@ -697,19 +697,32 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
     from collections import Counter, defaultdict
 
     from app.db.models import SessionLocal, Exam, SubjectScore
-    from app.analysis.exam_context import (
-        resolve_exam_context,
-        SubjectNotConfiguredError,
-        NoTeachingScopeError,
+    from app.analysis.single_subject_metrics import (
+        resolve_single_subject_context,
+        _ELECTIVE_SUBJECTS,
     )
-    from app.teaching.subject import SubjectConflictError
+    from app.teaching.subject import (
+        SubjectNotConfiguredError,
+        SubjectConflictError,
+    )
+    from app.analysis.exam_context import NoTeachingScopeError
     from app.analysis.scope import student_class_map, my_class_labels
 
     db = SessionLocal()
     try:
-        # ── 解析学科 + 成员范围 ──
+        # ── 先加载考试，再用其年级解析当前学科教学班范围 ──
+        # 必须先拿到 exam.grade 才能用 resolve_single_subject_context 严格限定
+        # 到当前学科 + 该年级的教学班成员并集（resolve_exam_context 的 all-class
+        # 旁路会混入教师遗留的他科教学班成员）。
+        exam = db.query(Exam).filter(Exam.id == exam_id).first()
+        if not exam:
+            raise HTTPException(404, "考试不存在")
+
+        # ── 解析学科 + 成员范围（当前学科 + 该年级教学班成员并集）──
         try:
-            ctx = resolve_exam_context(db, teaching_class_id=teaching_class_id)
+            ctx = resolve_single_subject_context(
+                db, teaching_class_id=teaching_class_id, grade=exam.grade,
+            )
         except SubjectNotConfiguredError as e:
             raise HTTPException(409, str(e))
         except NoTeachingScopeError as e:
@@ -720,15 +733,11 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
         except SubjectConflictError as e:
             raise HTTPException(409, str(e))
         except ValueError as e:
-            # teaching_class_id 不存在
+            # teaching_class_id 不存在或跨年级
             raise HTTPException(404, str(e))
 
         member_ids = ctx.member_ids
         subject = ctx.subject
-
-        exam = db.query(Exam).filter(Exam.id == exam_id).first()
-        if not exam:
-            raise HTTPException(404, "考试不存在")
 
         # ── 只取当前任教学科 + 允许成员范围内的 SubjectScore ──
         # 排除 raw_score 与 grade_score 均为空的残留行（只有百分位/全空）。
@@ -746,21 +755,30 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             .all()
         )
 
-        # ── 单科排名基准：高二/高三选考优先用 grade_score，否则用 raw_score ──
-        # 高一 grade_score 为 None，自动回落 raw_score。
-        def _rank_value(row):
-            return row.grade_score if row.grade_score is not None else row.raw_score
+        # ── 统一排名基准：高二/高三选考学科用 grade_score，其他用 raw_score ──
+        # 整个池必须用同一量纲排名，禁止逐行选不同 basis 后放入同一排名池。
+        # 仅当前 basis 有值的行参与排名；仅另一 basis 有值的合法成员可保留学生行
+        # 但当前 basis 的 score/rank 为 null 且不进入统计。
+        score_basis = (
+            "grade_score"
+            if (exam.grade in (2, 3) and subject in _ELECTIVE_SUBJECTS)
+            else "raw_score"
+        )
+
+        def _basis_value(row):
+            """当前 basis 的排序值；另一 basis 有值但当前 basis 为 None → None。"""
+            return getattr(row, score_basis)
 
         # 计算每个学生在当前学科范围内的名次（值越大名次越靠前，1=最高）
         rows_with_rank = sorted(
-            (r for r in subject_rows if _rank_value(r) is not None),
-            key=lambda r: _rank_value(r),
+            (r for r in subject_rows if _basis_value(r) is not None),
+            key=lambda r: _basis_value(r),
             reverse=True,
         )
         rank_by_student: dict[str, int] = {}
         for idx, r in enumerate(rows_with_rank, 1):
             # 同分同名：与上一名同分则同名次
-            if idx > 1 and _rank_value(r) == _rank_value(rows_with_rank[idx - 2]):
+            if idx > 1 and _basis_value(r) == _basis_value(rows_with_rank[idx - 2]):
                 rank_by_student[r.student_id] = rank_by_student[rows_with_rank[idx - 2].student_id]
             else:
                 rank_by_student[r.student_id] = idx
@@ -816,9 +834,9 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             ),
         )
 
-        # ── 单科统计（基于 grade_score 优先，否则 raw_score）──
-        scored = [s for s in all_students if _rank_value_for_student(s) is not None]
-        score_values = [_rank_value_for_student(s) for s in scored]
+        # ── 单科统计（统一使用 score_basis 量纲）──
+        scored = [s for s in all_students if s.get(score_basis) is not None]
+        score_values = [float(s[score_basis]) for s in scored]
         rank_values = [s["rank"] for s in scored if s["rank"] is not None]
         avg_score = sum(score_values) / len(score_values) if score_values else None
 
@@ -829,11 +847,7 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
             "min": min(score_values) if score_values else None,
             "rank_min": min(rank_values) if rank_values else None,
             "rank_max": max(rank_values) if rank_values else None,
-            "score_basis": (
-                "grade_score"
-                if (exam.grade in (2, 3) and subject in _ELECTIVE_SUBJECTS)
-                else "raw_score"
-            ),
+            "score_basis": score_basis,
         }
 
         # ── class_averages：范围隔离的当前学科现算均分 ──
@@ -851,9 +865,9 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
 
         def _subject_avg_for(candidate_ids):
             vals = [
-                _rank_value(r)
+                _basis_value(r)
                 for r in subject_rows
-                if r.student_id in candidate_ids and _rank_value(r) is not None
+                if r.student_id in candidate_ids and _basis_value(r) is not None
             ]
             return round(sum(vals) / len(vals), 1) if vals else None
 
@@ -943,10 +957,6 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
     finally:
         db.close()
 
-
-def _rank_value_for_student(s: dict):
-    """学生明细里的单科排序值：grade_score 优先，否则 raw_score。"""
-    return s.get("grade_score") if s.get("grade_score") is not None else s.get("raw_score")
 
 @router.get("/focus-list/{exam_id}")
 async def get_focus_list(exam_id: int, teaching_class_id: Optional[int] = None, class_num: Optional[int] = None):

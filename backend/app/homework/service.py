@@ -114,8 +114,14 @@ def _miss_filters():
 
 
 def _base_miss_query(db, start, end, student=None, subject=None,
-                     respect_excluded=True, teaching_class_id=None, scoped=True):
-    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。"""
+                     respect_excluded=True, teaching_class_id=None, scoped=True,
+                     scope_ids=None):
+    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。
+
+    scope_ids: 显式成员集合（含 anon），优先于 teaching_class_id 的自动解析。
+    供 weekly_focus 等需要「当前学科范围」语义的调用方传递，避免
+    _scope_student_ids(None) 混入他科教学班成员。
+    """
     q = (
         db.query(HomeworkRecord, ClassRoster)
         .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
@@ -123,7 +129,10 @@ def _base_miss_query(db, start, end, student=None, subject=None,
     )
     if scoped:
         # excluded 的剔除交给下方 roster 层，保留「指定学生查询时不排除」的口径
-        ids = _scope_student_ids(db, teaching_class_id, include_excluded=True)
+        if scope_ids is not None:
+            ids = scope_ids
+        else:
+            ids = _scope_student_ids(db, teaching_class_id, include_excluded=True)
         q = q.filter(HomeworkRecord.student_id.in_(ids))
     if start and end:
         q = q.filter(HomeworkRecord.date >= start, HomeworkRecord.date <= end)
@@ -143,7 +152,12 @@ def _base_miss_query(db, start, end, student=None, subject=None,
 
 def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
     """作业范围：指定教学班＝该班成员；None＝我教的全部班成员并集。
-    尚未配置任何教学班时回落到全花名册（旧版口径），避免看板/录入整体失明。"""
+    尚未配置任何教学班时回落到全花名册（旧版口径），避免看板/录入整体失明。
+
+    注意：本函数的 None 路径取所有学科教学班成员并集（all_my_member_ids），
+    单学科化后仅供已明确传入 teaching_class_id 的调用使用。需要「默认＝当前
+    学科」语义的调用方（如 weekly_focus）应改用 _current_subject_hw_member_ids，
+    禁止把 None 当默认旁路。"""
     if teaching_class_id is not None:
         ids = members_of(db, int(teaching_class_id), include_anon=True)
     else:
@@ -157,6 +171,39 @@ def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
         .filter(ClassRoster.student_id.in_(ids), ClassRoster.excluded == 1).all()
     }
     return set(ids) - excluded
+
+
+def _current_subject_hw_member_ids(db, teaching_class_id=None) -> set[str]:
+    """当前任教学科教学班成员并集（含 _anon: 占位成员），供作业缺交跟踪使用。
+
+    与 _scope_student_ids(None) 的区别：后者取所有学科教学班成员并集，会混入
+    教师遗留的他科教学班成员；本函数严格限定到教师唯一 subject 匹配的教学班。
+
+    - 解析教师唯一 subject（resolve_teaching_subject）。
+    - 只查询 TeachingClass.subject == subject 的班级；显式 teaching_class_id
+      时进一步限定到该班，且校验其 subject/归属。
+    - 成员集合含 _anon:（仅姓名占位成员），因为作业缺交跟踪正是「先有名单、
+      后有成绩」的场景。
+    """
+    from app.analysis.scope import members_of
+    from app.teaching.subject import resolve_teaching_subject
+    from app.db.models import TeachingClassMember
+
+    subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+
+    if teaching_class_id is not None:
+        # 显式班：直接取该班成员（含 anon）；subject 一致性已由
+        # resolve_teaching_subject 校验（冲突会抛 SubjectConflictError）。
+        return members_of(db, int(teaching_class_id), include_anon=True)
+
+    # 默认：当前学科所有教学班成员并集（含 anon）
+    rows = (
+        db.query(TeachingClassMember.student_id)
+        .join(TeachingClass, TeachingClass.id == TeachingClassMember.teaching_class_id)
+        .filter(TeachingClass.subject == subject)
+        .all()
+    )
+    return {r[0] for r in rows if r[0]}
 
 
 def _labels_for(labels, student_id):
@@ -246,7 +293,7 @@ def rankings(db, start, end, student=None, subject=None, limit=10,
     }
 
 
-def warnings(db, start, end, teaching_class_id=None):
+def warnings(db, start, end, teaching_class_id=None, scope_ids=None):
     """同一种作业「当前正在进行」的连续缺交预警。
 
     时间轴 = 该种作业全班有人缺交的去重日期 ∪ 该生自身有记录的日期；从最近
@@ -254,8 +301,14 @@ def warnings(db, start, end, teaching_class_id=None):
     已结束）。本人一条「已交」会终结自己的连击，但其他学生的「已交」记录
     不影响本人。连续 2 次 → warning（黄），≥3 次 → serious（红）。
     排除 excluded 学生。
+
+    scope_ids: 显式成员集合（含 anon），优先于 teaching_class_id 的自动解析。
+    供 weekly_focus 传递当前学科范围，避免 _scope_student_ids(None) 混入他科成员。
     """
-    ids = _scope_student_ids(db, teaching_class_id)
+    if scope_ids is not None:
+        ids = scope_ids
+    else:
+        ids = _scope_student_ids(db, teaching_class_id)
     all_rows = (
         db.query(HomeworkRecord, ClassRoster)
         .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
@@ -1008,11 +1061,13 @@ def weekly_focus(db, teaching_class_id=None, today=None):
     today = today or date.today().isoformat()
     week_start = (date.fromisoformat(today) - timedelta(days=6)).isoformat()
 
-    # 花名册：限合法成员范围、非 excluded。
-    # 注意：member_ids（ctx）不含 _anon: 占位成员，但作业缺交跟踪需要保留仅姓名
-    # 教学班成员（先有名单、后有成绩）。这里用作业范围（含 anon）构建花名册，
-    # 保证匿名成员的缺交信号能进入 Weekly；成绩排名信号仍只用 ctx.member_ids。
-    hw_scope_ids = _scope_student_ids(db, teaching_class_id)
+    # 花名册：限当前学科教学班成员范围、非 excluded。
+    # member_ids（ctx）不含 _anon: 占位成员，但作业缺交跟踪需要保留仅姓名
+    # 教学班成员（先有名单、后有成绩）。这里用当前学科作业范围（含 anon）构建
+    # 花名册，保证匿名成员的缺交信号能进入 Weekly；成绩排名信号仍只用 ctx.member_ids。
+    # 禁止 _scope_student_ids(None) 或 all_my_member_ids() 成为默认旁路（会混入
+    # 教师遗留的他科教学班成员）。
+    hw_scope_ids = _current_subject_hw_member_ids(db, teaching_class_id)
     roster = {
         r.student_id: r
         for r in db.query(ClassRoster)
@@ -1026,7 +1081,7 @@ def weekly_focus(db, teaching_class_id=None, today=None):
             reasons[sid].append({"tag": tag, "weight": weight})
 
     # ① 连续缺交预警（限当前学科范围）
-    w = warnings(db, start, end, teaching_class_id=teaching_class_id)
+    w = warnings(db, start, end, scope_ids=hw_scope_ids)
     best = {}
     for item in w["serious"] + w["warning"]:
         sid = item.get("student_id")
@@ -1039,7 +1094,7 @@ def weekly_focus(db, teaching_class_id=None, today=None):
     # ② 本周缺交激增（限当前学科范围）
     miss_rows = _base_miss_query(
         db, start, end,
-        teaching_class_id=teaching_class_id,
+        scope_ids=hw_scope_ids,
         respect_excluded=True,
     ).all()
     total_by_sid = defaultdict(int)
