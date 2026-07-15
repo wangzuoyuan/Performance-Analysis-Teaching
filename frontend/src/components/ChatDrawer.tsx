@@ -15,6 +15,7 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
+import { useClassScope } from '@/lib/class-scope'
 import { cn } from '@/lib/utils'
 
 interface Message {
@@ -117,17 +118,19 @@ const markdownComponents: Components = {
   td: ({ children }) => <td className="border-b border-slate-100 px-2 py-1.5">{children}</td>,
 }
 
-function buildPageContext() {
+function buildPageContext(scopeMode: 'teaching_class' | 'all', teachingClassId: number | null) {
   if (typeof window === 'undefined') return {}
 
-  const { pathname, href } = window.location
+  const { pathname } = window.location
   const studentMatch = pathname.match(/^\/student\/([^/]+)/)
   const examMatch = pathname.match(/^\/exam\/([^/]+)/)
 
   return {
-    page: { pathname, href },
+    page: pathname,
     student_id: studentMatch ? decodeURIComponent(studentMatch[1]) : undefined,
     exam_id: examMatch ? Number(examMatch[1]) : undefined,
+    scope_mode: scopeMode,
+    teaching_class_id: teachingClassId,
   }
 }
 
@@ -141,6 +144,7 @@ export default function ChatDrawer() {
   const [isResizing, setIsResizing] = useState(false)
   const scrollRef = useRef<HTMLDivElement>(null)
   const resizeCleanupRef = useRef<(() => void) | null>(null)
+  const { current } = useClassScope()
 
   useEffect(() => {
     const handler = () => setOpen(true)
@@ -215,10 +219,12 @@ export default function ChatDrawer() {
       const isDev = process.env.NODE_ENV !== 'production'
       const chatHost = typeof window !== 'undefined' ? window.location.hostname : 'localhost'
       const chatBase = explicit ?? (isDev ? `http://${chatHost}:8000` : '')
+      const scopeMode: 'teaching_class' | 'all' = current === 'all' ? 'all' : 'teaching_class'
+      const teachingClassId: number | null = current === 'all' ? null : current
       const res = await fetch(`${chatBase}/api/chat`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messages: [...messages, userMsg], context: buildPageContext() }),
+        body: JSON.stringify({ messages: [...messages, userMsg], context: buildPageContext(scopeMode, teachingClassId) }),
       })
 
       const reader = res.body?.getReader()

@@ -52,107 +52,33 @@ def _reject_legacy_class_params(class_label=None, class_num=None):
         raise ValueError(_FORBIDDEN_CLASS_PARAMS_MSG)
 
 
-def _resolve_class_scope(
-    teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    class_num: Optional[int] = None,
-    grade: Optional[int] = None,
-    exam_id: Optional[int] = None,
-):
-    """把教学班参数解析成 (SingleSubjectContext, grade)。
-
-    始终基于 resolve_single_subject_context（当前教师唯一任教学科 + 合法教学班成员）。
-    class_label/class_num 非空 → ValueError（不再旁路）。
-    grade 为 None 且给了 exam_id 时用该考试年级解析。
-    """
-    from app.analysis.single_subject_metrics import resolve_single_subject_context
-    from app.db.models import Exam
-
-    _reject_legacy_class_params(class_label=class_label, class_num=class_num)
-
-    g = grade
-    if g is None and exam_id is not None:
-        db = _db()
-        try:
-            ex = db.query(Exam).filter(Exam.id == exam_id).first()
-            g = ex.grade if ex else None
-        finally:
-            db.close()
-
-    db = _db()
-    try:
-        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=g)
-        return ctx, g
-    finally:
-        db.close()
-
-
-def _resolve_class_scope_by_grade(
-    teaching_class_id: Optional[int],
-    grade: Optional[int],
-):
-    """范围解析（按 grade，不依赖 exam_id）。返回 SingleSubjectContext。"""
-    from app.analysis.single_subject_metrics import resolve_single_subject_context
-
-    db = _db()
-    try:
-        return resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=grade)
-    finally:
-        db.close()
-
-
 def _db():
     from app.db.models import SessionLocal
     return SessionLocal()
 
 
-def _resolve_tc_id(
-    teaching_class_id: Optional[int] = None,
-    class_label: Optional[str] = None,
-    grade: Optional[int] = None,
-    exam_id: Optional[int] = None,
-) -> Optional[int]:
-    """把 class_label（教学班名）解析成 teaching_class_id；已给 id 直接返回。
-    需要年级时优先用传入 grade，其次按 exam_id 反查。匹配不到返回 None。"""
-    if teaching_class_id is not None:
-        return teaching_class_id
-    if not class_label:
-        return None
-    from app.analysis.scope import my_class_labels
-    from app.db.models import Exam
-
-    g = grade
-    if g is None and exam_id is not None:
-        db = _db()
-        try:
-            ex = db.query(Exam).filter(Exam.id == exam_id).first()
-            g = ex.grade if ex else None
-        finally:
-            db.close()
-    db = _db()
-    try:
-        labels = my_class_labels(db, g) if g is not None else {}
-    finally:
-        db.close()
-    key = class_label.strip()
-    return labels.get(key) or labels.get(class_label)
-
-
 def list_my_classes(grade: Optional[int] = None) -> list[dict[str, Any]]:
-    """列出我配置的教学班（可限年级），供把『物A1班/1班』等名字解析成 teaching_class_id。"""
+    """列出我配置的教学班（可限年级），供把『物A1班/1班』等名字解析成 teaching_class_id。
+
+    单学科化：只返回当前教师唯一任教学科的教学班，不含遗留他科班。
+    """
     from app.analysis.scope import list_classes, members_of
+    from app.teaching.subject import resolve_teaching_subject
 
     db = _db()
     try:
+        subject = resolve_teaching_subject(db)
         out = []
         for tc in list_classes(db, grade):
+            if tc.subject != subject:
+                continue
             out.append({
                 "teaching_class_id": tc.id,
                 "grade": tc.grade,
                 "label": tc.label,
                 "subject": tc.subject,
                 "kind": tc.kind,
-                "member_count": len(members_of(db, tc.id)),
+                "member_count": len(members_of(db, tc.id, include_anon=True)),
             })
         return out
     finally:
@@ -191,11 +117,12 @@ def _missing_subject_payload(subject: str) -> dict[str, Any]:
         "available": False,
     }
 
-def list_exams(grade: Optional[int] = None, year_range: Optional[tuple] = None) -> list:
+def list_exams(grade: Optional[int] = None, teaching_class_id: Optional[int] = None) -> list:
     """列出当前任教学科在合法成员中有真实分数的考试。
 
     单学科化：只返回当前教师任教学科在教学班成员范围内有 raw_score 或
     grade_score 的考试；最近考试按 exam_date desc, id desc。
+    teaching_class_id 可选，进一步限定到某个具体教学班的成员范围。
     """
     from app.analysis.single_subject_metrics import (
         resolve_single_subject_context,
@@ -206,8 +133,8 @@ def list_exams(grade: Optional[int] = None, year_range: Optional[tuple] = None) 
 
     db = _db()
     try:
-        subject = resolve_teaching_subject(db)
-        ctx = resolve_single_subject_context(db, grade=grade)
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=grade)
         valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids, grade=grade)
         if not valid_ids:
             return []
@@ -227,21 +154,27 @@ def list_exams(grade: Optional[int] = None, year_range: Optional[tuple] = None) 
     finally:
         db.close()
 
-def student_lookup(name: Optional[str] = None, student_id: Optional[str] = None) -> list:
-    """按姓名/学号定位学生（限当前任教学科教学班成员范围）。"""
+def student_lookup(
+    name: Optional[str] = None,
+    student_id: Optional[str] = None,
+    teaching_class_id: Optional[int] = None,
+) -> list:
+    """按姓名/学号定位学生（限当前任教学科教学班成员范围）。
+
+    单学科化：只检索当前教师唯一任教学科的教学班成员，绝不混入遗留他科班。
+    teaching_class_id 可选，进一步限定到某个具体教学班。
+    """
     from app.db.models import SubjectScore
-    from app.analysis.scope import all_my_member_ids
-    from app.teaching.subject import resolve_teaching_subject
+    from app.analysis.single_subject_metrics import resolve_single_subject_context
 
     db = _db()
     try:
-        subject = resolve_teaching_subject(db)
-        member_ids = all_my_member_ids(db)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
         query = (
             db.query(SubjectScore.student_id, SubjectScore.name)
             .filter(
-                SubjectScore.subject == subject,
-                SubjectScore.student_id.in_(member_ids),
+                SubjectScore.subject == ctx.subject,
+                SubjectScore.student_id.in_(ctx.member_ids),
             )
             .distinct()
         )
@@ -257,11 +190,12 @@ def student_lookup(name: Optional[str] = None, student_id: Optional[str] = None)
     finally:
         db.close()
 
-def student_exam_detail(student_id: str, exam_id: int) -> dict:
+def student_exam_detail(student_id: str, exam_id: int, teaching_class_id: Optional[int] = None) -> dict:
     """某生某次考试的当前学科成绩（单学科化）。
 
     只返回当前任教学科一科，不含 totals/其他学科；附 subject_rank（按班
     competition ranking）。学生必须在合法 scope（否则 ValueError）。
+    teaching_class_id 可选，用于显式班 rank pool 和正确 class_label。
     空分行（无 raw/grade_score）不当作有效成绩。
     """
     from app.db.models import Exam, SubjectScore
@@ -270,14 +204,19 @@ def student_exam_detail(student_id: str, exam_id: int) -> dict:
         compute_subject_rank_contextual,
         label_for_student,
     )
+    from app.teaching.subject import resolve_teaching_subject
+
+    _reject_legacy_class_params()
 
     db = _db()
     try:
         exam = db.query(Exam).filter(Exam.id == exam_id).first()
         if not exam:
             raise ValueError("考试不存在")
+        # resolve_teaching_subject validates teaching_class_id belongs to current subject
+        resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
         ctx = resolve_single_subject_context(
-            db, teaching_class_id=None, grade=exam.grade,
+            db, teaching_class_id=teaching_class_id, grade=exam.grade,
         )
         if student_id not in ctx.member_ids:
             raise ValueError(
@@ -341,13 +280,14 @@ def student_exam_detail(student_id: str, exam_id: int) -> dict:
         db.close()
 
 
-def student_trend(student_id: str, exam_ids: Optional[list[int]] = None) -> dict:
+def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teaching_class_id: Optional[int] = None) -> dict:
     """某生当前学科跨次趋势（单学科化）。
 
     只生成当前任教学科历史，删除 total_type / main_total_trend。
     每个 series 点含 raw_score / grade_score / grade_percentile / subject_rank。
     学生必须在合法 scope（否则 ValueError）。高二/三选考用 grade_score 判断趋势，
     其他单科用 percentile，沿用阶段3/4 既有规则。
+    teaching_class_id 可选，用于验证学生属于该班并使用该班 rank pool。
     """
     from app.db.models import Exam, SubjectScore
     from app.analysis.single_subject_metrics import (
@@ -360,8 +300,8 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None) -> dict
 
     db = _db()
     try:
-        subject = resolve_teaching_subject(db)
-        ctx = resolve_single_subject_context(db)
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
         if student_id not in ctx.member_ids:
             raise ValueError(
                 f"学生 {student_id} 不在当前任教学科教学班成员范围内"
@@ -433,6 +373,7 @@ def student_learning_profile(
     student_id: Optional[str] = None,
     name: Optional[str] = None,
     subject_limit: int = 5,
+    teaching_class_id: Optional[int] = None,
 ) -> dict[str, Any]:
     """学生当前学科学习画像（单学科化）。
 
@@ -441,6 +382,7 @@ def student_learning_profile(
     regression_subjects（多学科强弱项）。
     保留 series（当前学科跨次趋势，含 subject_rank）。
     学生必须在合法 scope。
+    teaching_class_id 可选，用于在 scope 内按 name 解析学生并限定 rank pool。
     """
     from app.db.models import Exam, SubjectScore
     from app.analysis.single_subject_metrics import (
@@ -453,8 +395,8 @@ def student_learning_profile(
 
     db = _db()
     try:
-        subject = resolve_teaching_subject(db)
-        ctx = resolve_single_subject_context(db)
+        subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
         # 学生定位（限合法成员范围内、当前学科）
         q = (
             db.query(SubjectScore.student_id, SubjectScore.name)
@@ -1429,38 +1371,80 @@ def rank_frequency_stat_tool(
     )
 
 
-def student_homework_summary(student_id: Optional[str] = None, name: Optional[str] = None) -> dict[str, Any]:
-    """某生本学期作业概况：缺交总数、按科目分布、迟到/请假次数、当前连续缺交预警。"""
+def student_homework_summary(
+    student_id: Optional[str] = None,
+    name: Optional[str] = None,
+    teaching_class_id: Optional[int] = None,
+) -> dict[str, Any]:
+    """某生本学期作业概况：缺交总数、按科目分布、迟到/请假次数、当前连续缺交预警。
+
+    单学科化：学生必须在当前任教学科教学班成员范围内（显式班或默认去重并集），
+    他科班学生不得返回。teaching_class_id 可选，进一步限定具体班。
+    """
     from app.db.models import get_db
     from app.homework import service
+    from app.analysis.single_subject_metrics import resolve_single_subject_context
 
     db = next(get_db())
     try:
-        return service.student_summary(db, student_id=student_id, name=name)
+        # 先校验学生是否在当前学科合法范围内
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        if student_id and student_id not in ctx.member_ids:
+            return {"error": f"学生 {student_id} 不在当前任教学科教学班成员范围内",
+                    "teaching_subject": ctx.subject}
+        result = service.student_summary(db, student_id=student_id, name=name)
+        # 按名匹配时再校验候选都在范围内（过滤掉他科班同名）
+        if name and not student_id and "candidates" in result:
+            valid = [c for c in result["candidates"] if c["student_id"] in ctx.member_ids]
+            if not valid:
+                return {"error": "未在当前任教学科范围内找到该学生",
+                        "teaching_subject": ctx.subject}
+            result["candidates"] = valid
+        # 命中的学生也必须在范围内
+        if "student" in result and result["student"]["student_id"] not in ctx.member_ids:
+            return {"error": "该学生不在当前任教学科教学班成员范围内",
+                    "teaching_subject": ctx.subject}
+        result["teaching_subject"] = ctx.subject
+        return result
     finally:
         db.close()
 
 
-def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, limit: int = 20) -> dict[str, Any]:
+def student_notes(
+    student_id: Optional[str] = None,
+    name: Optional[str] = None,
+    limit: int = 20,
+    teaching_class_id: Optional[int] = None,
+) -> dict[str, Any]:
     """读取某生的成长/谈话档案（谈话、观察、家访、家长沟通、奖惩等班主任记录），
-    用于结合成绩与缺交起草谈话提纲或家长沟通稿。姓名多义时返回候选。"""
+    用于结合成绩与缺交起草谈话提纲或家长沟通稿。姓名多义时返回候选。
+
+    单学科化：学生必须在当前任教学科教学班成员范围内，他科班学生不得返回。
+    teaching_class_id 可选，进一步限定具体班。
+    """
     from app.db.models import ClassRoster, StudentNote, get_db
+    from app.analysis.single_subject_metrics import resolve_single_subject_context
 
     db = next(get_db())
     try:
-        roster_q = db.query(ClassRoster)
+        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        member_ids = ctx.member_ids
+        roster_q = db.query(ClassRoster).filter(ClassRoster.student_id.in_(member_ids))
         if student_id:
             roster_q = roster_q.filter(ClassRoster.student_id == student_id)
         elif name:
             roster_q = roster_q.filter(ClassRoster.name.like(f"%{name}%"))
         else:
-            return {"error": "需提供 student_id 或 name"}
+            return {"error": "需提供 student_id 或 name", "teaching_subject": ctx.subject}
         matches = roster_q.limit(10).all()
         if not matches:
-            return {"error": "未找到学生", "student_id": student_id, "name": name}
+            return {"error": "未在当前任教学科范围内找到该学生",
+                    "student_id": student_id, "name": name,
+                    "teaching_subject": ctx.subject}
         if len(matches) > 1 and not student_id:
             return {
                 "error": "匹配到多个学生，请指定学号",
+                "teaching_subject": ctx.subject,
                 "candidates": [{"student_id": m.student_id, "name": m.name} for m in matches],
             }
         roster = matches[0]
@@ -1472,6 +1456,7 @@ def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, 
             .all()
         )
         return {
+            "teaching_subject": ctx.subject,
             "student": {"student_id": roster.student_id, "name": roster.name},
             "notes": [
                 {
@@ -1490,27 +1475,44 @@ def student_notes(student_id: Optional[str] = None, name: Optional[str] = None, 
 
 
 def class_homework_ranking(
-    class_num: Optional[int] = None,
+    teaching_class_id: Optional[int] = None,
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     limit: int = 10,
 ) -> dict[str, Any]:
-    """班级缺交排行（排除被标记为不统计的学生）。不传日期时用当前学期区间。"""
+    """班级缺交排行（排除被标记为不统计的学生）。不传日期时用当前学期区间。
+
+    单学科化：teaching_class_id 必须属于当前任教学科（越权/跨学科拒绝）；
+    不传时默认当前学科所有教学班成员并集，绝不混入他科班。
+    """
     from app.db.models import get_db
     from app.homework import service
+    from app.teaching.subject import resolve_teaching_subject
 
+    _reject_legacy_class_params()
     db = next(get_db())
     try:
+        # 校验 teaching_class_id 属于当前学科（越权拒绝）
+        resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
         sem = service.get_semester(db)
         start = start_date or sem["semester_start"]
         end = end_date or sem["semester_end"]
-        result = service.rankings(db, start, end, limit=limit)
+        # 用当前学科范围解析成员（含 anon），避免 _scope_student_ids(None) 混入他科
+        scope_ids = service._current_subject_hw_member_ids(db, teaching_class_id)
+        result = service.rankings(
+            db, start, end, limit=limit, teaching_class_id=teaching_class_id,
+        )
+        # rankings 的 students 列表已按 teaching_class_id 过滤；再保险过滤一次
+        valid_students = [
+            s for s in result.get("students", [])
+            if s["student_id"] in scope_ids
+        ]
         return {
-            "class_num": class_num,
+            "teaching_class_id": teaching_class_id,
             "semester": {"start": start, "end": end},
             "rankings": [
-                {"name": n, "miss_count": c}
-                for n, c in zip(result["names"], result["counts"])
+                {"name": s["name"], "student_id": s["student_id"], "miss_count": s["count"]}
+                for s in valid_students
             ],
             "note": "miss_count 为该区间缺交次数；作业数据仅含缺交/请假/迟到，不代表完成质量。",
         }
@@ -1602,7 +1604,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "grade": {"type": "integer", "description": "年级(1=高一,2=高二,3=高三)"},
-                "year_range": {"type": "array", "items": {"type": "string"}, "description": "年份范围如['2024','2025']"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，限定到某个具体教学班的成员范围）"},
             },
         },
     },
@@ -1624,6 +1626,7 @@ TOOLS = [
             "properties": {
                 "name": {"type": "string"},
                 "student_id": {"type": "string"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，限定到某个具体教学班）"},
             },
         },
     },
@@ -1635,6 +1638,7 @@ TOOLS = [
             "properties": {
                 "student_id": {"type": "string"},
                 "exam_id": {"type": "integer"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，用于显式班 rank pool 和正确 class_label）"},
             },
             "required": ["student_id", "exam_id"],
         },
@@ -1647,6 +1651,7 @@ TOOLS = [
             "properties": {
                 "student_id": {"type": "string"},
                 "exam_ids": {"type": "array", "items": {"type": "integer"}},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，验证学生属于该班并使用该班 rank pool）"},
             },
             "required": ["student_id"],
         },
@@ -1660,6 +1665,7 @@ TOOLS = [
                 "student_id": {"type": "string", "description": "学号；如果当前页面上下文有 student_id，应优先使用"},
                 "name": {"type": "string", "description": "学生姓名；姓名不唯一时工具会返回候选学生"},
                 "subject_limit": {"type": "integer", "description": "兼容保留，不再使用"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，在 scope 内按 name 解析学生并限定 rank pool）"},
             },
         },
     },
@@ -1808,22 +1814,23 @@ TOOLS = [
     },
     {
         "name": "student_homework_summary",
-        "description": "某个学生本学期的作业（缺交）概况：缺交总次数、按作业种类分布、迟到/请假次数、当前连续缺交预警。回答“某某作业完成情况怎么样”“他缺交多吗”“作业和成绩有没有关系”时先用本工具拿作业侧数据，再结合 student_learning_profile 的成绩。作业数据仅含缺交/请假/迟到，不代表完成质量。",
+        "description": "某个学生本学期的作业（缺交）概况：缺交总次数、按作业种类分布、迟到/请假次数、当前连续缺交预警。回答“某某作业完成情况怎么样”“他缺交多吗”“作业和成绩有没有关系”时先用本工具拿作业侧数据，再结合 student_learning_profile 的成绩。作业数据仅含缺交/请假/迟到，不代表完成质量。学生必须在当前任教学科教学班成员范围内。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "student_id": {"type": "string", "description": "学号；页面上下文有 student_id 时优先使用"},
                 "name": {"type": "string", "description": "学生姓名；姓名不唯一时返回候选"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，限定到某个具体教学班）"},
             },
         },
     },
     {
         "name": "class_homework_ranking",
-        "description": "班级缺交排行榜，回答“这学期谁缺交最多”“缺交前几名是谁”。默认当前学期区间，已排除被标记为不统计的学生。",
+        "description": "班级缺交排行榜，回答“这学期谁缺交最多”“缺交前几名是谁”。默认当前学期区间，已排除被标记为不统计的学生。范围限定为当前任教学科教学班成员（teaching_class_id 指定单班；不填=全部当前学科教学班并集）。",
         "input_schema": {
             "type": "object",
             "properties": {
-                "class_num": {"type": "integer", "description": "行政班号；不填=我教的所有班并集（全花名册）"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（用 list_my_classes 把班名解析成ID）；不填=全部当前学科教学班"},
                 "start_date": {"type": "string", "description": "起始日期 YYYY-MM-DD；不填用学期开始"},
                 "end_date": {"type": "string", "description": "结束日期 YYYY-MM-DD；不填用学期结束"},
                 "limit": {"type": "integer", "description": "返回人数，默认10"},
@@ -1843,13 +1850,14 @@ TOOLS = [
     },
     {
         "name": "student_notes",
-        "description": "读取某个学生的成长/谈话档案（班主任记录的谈话、观察、家访、家长沟通、奖惩等）。当用户要『结合最近谈话/家访情况』『帮我准备和某某的谈话提纲』『写给某某家长的沟通稿』时调用，结合 student_learning_profile 与 student_homework_summary 一起用。内容为私密档案，措辞需稳妥尊重。",
+        "description": "读取某个学生的成长/谈话档案（班主任记录的谈话、观察、家访、家长沟通、奖惩等）。当用户要『结合最近谈话/家访情况』『帮我准备和某某的谈话提纲』『写给某某家长的沟通稿』时调用，结合 student_learning_profile 与 student_homework_summary 一起用。内容为私密档案，措辞需稳妥尊重。学生必须在当前任教学科教学班成员范围内。",
         "input_schema": {
             "type": "object",
             "properties": {
                 "student_id": {"type": "string", "description": "学号；页面上下文有 student_id 时优先使用"},
                 "name": {"type": "string", "description": "学生姓名；姓名不唯一时返回候选"},
                 "limit": {"type": "integer", "description": "返回最近几条，默认20"},
+                "teaching_class_id": {"type": "integer", "description": "教学班ID（可选，限定到某个具体教学班）"},
             },
         },
     },

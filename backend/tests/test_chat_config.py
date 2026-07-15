@@ -77,9 +77,24 @@ def test_system_prompt_includes_page_context():
     assert "7240115" in prompt
 
 
-def test_system_prompt_defines_plus_three_subject_scope():
+def test_system_prompt_single_subject_mouth():
+    """单学科化后，系统提示词必须明确说明围绕任教学科，不得出现多学科禁词。"""
     prompt = build_system_prompt()
 
-    assert "加三学科" in prompt
-    for subject in ["物理", "化学", "生物", "政治", "历史", "地理"]:
-        assert subject in prompt
+    assert "任教学科" in prompt
+    for phrase in ["总分", "主三门", "五门", "九门", "+3", "3+3", "全年级"]:
+        assert phrase not in prompt, f"系统提示词中不应出现「{phrase}」"
+
+
+def test_system_prompt_whitelist_only_known_fields():
+    """build_system_prompt 只允许白名单字段，未知字段丢弃。"""
+    prompt = build_system_prompt({
+        "student_id": "12345",
+        "teaching_class_id": 7,
+        "scope_mode": "teaching_class",
+        "rogue_field": "INJECT_ME",
+    })
+
+    assert "12345" in prompt
+    assert "teaching_class" in prompt
+    assert "INJECT_ME" not in prompt
