@@ -87,49 +87,61 @@ def rank_range_filter(
     teaching_class_id: Optional[int] = None,
     class_num: Optional[int] = None,
 ) -> dict[str, Any]:
-    """兼容入口：chat/tools.py 调用。委托 router 端点逻辑（单学科化）。"""
-    from app.db.models import SessionLocal
+    """兼容入口：chat/tools.py 调用。委托单学科 rank-range 逻辑。
+
+    与 HTTP 端点保持一致的校验（Blocker 6）：
+    - class_num 非空 → ValueError（不再支持）
+    - metric 必须与教师任教科目一致（total:* / 其他学科 → ValueError）
+    """
+    from app.db.models import SessionLocal, Exam
     from app.analysis.single_subject_metrics import (
         resolve_single_subject_context,
-        compute_subject_rank,
+        compute_subject_rank_contextual,
+        label_for_student,
+        validate_metric,
+        validate_metric_subject,
     )
-    from app.db.models import Exam, SubjectScore
-    from app.analysis.scope import student_class_map
+
+    if class_num is not None:
+        raise ValueError("请使用 teaching_class_id 参数，不再支持 class_num")
 
     db = SessionLocal()
     try:
-        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
-        subject = ctx.subject
-        member_ids = ctx.member_ids
+        base_ctx = resolve_single_subject_context(
+            db,
+            teaching_class_id=teaching_class_id,
+        )
+        validate_metric_subject(metric, base_ctx.subject)
 
         exam = db.query(Exam).filter(Exam.id == exam_id).first()
         if not exam:
             raise ValueError("考试不存在")
 
+        ctx = resolve_single_subject_context(
+            db,
+            teaching_class_id=teaching_class_id,
+            grade=exam.grade,
+        )
+        subject = ctx.subject
+        validate_metric(metric, subject, exam.grade, "range")
+
         rank_min = max(1, int(rank_min))
         rank_max = int(rank_max)
-        rank_map = compute_subject_rank(db, subject, exam_id, member_ids, exam_grade=exam.grade)
-        label_map = student_class_map(db, exam.grade)
-
-        subject_rows = (
-            db.query(SubjectScore)
-            .filter(
-                SubjectScore.exam_id == exam_id,
-                SubjectScore.subject == subject,
-                SubjectScore.student_id.in_(member_ids),
-                SubjectScore.raw_score.isnot(None) | SubjectScore.grade_score.isnot(None),
-            )
-            .all()
+        if rank_max < rank_min:
+            raise ValueError("排名区间上界不能小于下界")
+        rank_map, rows_by_sid = compute_subject_rank_contextual(
+            db, ctx, exam_id, exam_grade=exam.grade,
         )
+
         rows = []
-        for r in subject_rows:
-            sr = rank_map.get(r.student_id)
+        for sid, r in rows_by_sid.items():
+            sr = rank_map.get(sid)
             if sr is None or not (rank_min <= sr <= rank_max):
                 continue
-            label, _ = label_map.get(r.student_id, (None, None))
+            label = label_for_student(ctx, sid)
             rows.append({
-                "student_id": r.student_id,
-                "name": r.name or r.student_id,
+                "student_id": sid,
+                "name": r.name or sid,
                 "class_label": label,
                 "raw_score": r.raw_score,
                 "grade_score": r.grade_score,
@@ -160,22 +172,33 @@ def rank_frequency_stats(
     class_num: Optional[int] = None,
     recent_count: int = 5,
 ) -> dict[str, Any]:
-    """兼容入口：chat/tools.py 调用。委托单学科频次统计。"""
+    """兼容入口：chat/tools.py 调用。委托单学科频次统计。
+
+    与 HTTP 端点保持一致的校验（Blocker 6）：
+    - class_num 非空 → ValueError
+    - metric 必须与教师任教科目一致（total:* / 其他学科 → ValueError）
+    """
     from app.db.models import SessionLocal, Exam, SubjectScore
     from app.analysis.single_subject_metrics import (
         resolve_single_subject_context,
-        compute_subject_rank,
+        compute_subject_rank_contextual,
+        label_for_student,
         normalize_percentile,
         valid_exam_ids_for_subject,
-        _ELECTIVE_SUBJECTS,
+        validate_metric,
+        group_members_by_class,
     )
-    from app.analysis.scope import student_class_map
+
+    if class_num is not None:
+        raise ValueError("请使用 teaching_class_id 参数，不再支持 class_num")
 
     db = SessionLocal()
     try:
         ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id, grade=grade)
         subject = ctx.subject
         member_ids = ctx.member_ids
+
+        validate_metric(metric, subject, grade, "frequency")
 
         is_grade_score_mode = metric.startswith("subject_grade:")
 
@@ -194,10 +217,11 @@ def rank_frequency_stats(
             selected_ids = [e.id for e in all_valid[-n:]]
 
         exams = (
-            db.query(Exam).filter(Exam.id.in_(selected_ids)).order_by(Exam.exam_date, Exam.id).all()
+            db.query(Exam)
+            .filter(Exam.id.in_(selected_ids), Exam.grade == grade)
+            .order_by(Exam.exam_date, Exam.id)
+            .all()
         ) if selected_ids else []
-
-        label_map = student_class_map(db, grade)
 
         if is_grade_score_mode:
             bins = [{"key": b[0], "label": b[1], "separator_after": b[3]} for b in GRADE_SCORE_BINS]
@@ -206,19 +230,27 @@ def rank_frequency_stats(
 
         student_rows: dict[str, dict[str, Any]] = {}
         for exam in exams:
-            rows = (
-                db.query(SubjectScore)
-                .filter(
-                    SubjectScore.exam_id == exam.id,
-                    SubjectScore.subject == subject,
-                    SubjectScore.student_id.in_(member_ids),
-                    SubjectScore.raw_score.isnot(None) | SubjectScore.grade_score.isnot(None),
-                )
-                .all()
+            rank_map, rows_by_sid = compute_subject_rank_contextual(
+                db, ctx, exam.id, exam_grade=exam.grade,
             )
-            for r in rows:
-                sid = r.student_id
-                label, _ = label_map.get(sid, (None, None))
+            groups = group_members_by_class(ctx)
+            group_for_sid = {
+                sid: tc_id for tc_id, members in groups.items() for sid in members
+            }
+            ranked_size_by_group = {
+                tc_id: sum(1 for sid in members if sid in rank_map)
+                for tc_id, members in groups.items()
+            }
+            all_pct_by_group = {
+                tc_id: bool(ranked_size_by_group[tc_id]) and all(
+                    normalize_percentile(rows_by_sid[sid].grade_percentile) is not None
+                    for sid in members
+                    if sid in rank_map and sid in rows_by_sid
+                )
+                for tc_id, members in groups.items()
+            }
+            for sid, r in rows_by_sid.items():
+                label = label_for_student(ctx, sid)
                 entry = student_rows.setdefault(
                     sid,
                     {"student_id": sid, "name": r.name or sid, "class_label": label, "total_count": 0},
@@ -228,8 +260,18 @@ def rank_frequency_stats(
                 if is_grade_score_mode:
                     bin_key = _grade_score_bin(r.grade_score)
                 else:
-                    pct = normalize_percentile(r.grade_percentile)
-                    bin_key = _percentile_bin(pct) if pct is not None else None
+                    tc_id = group_for_sid.get(sid)
+                    if tc_id is not None and all_pct_by_group.get(tc_id, False):
+                        bin_key = _percentile_bin(
+                            normalize_percentile(r.grade_percentile)
+                        )
+                    else:
+                        rank = rank_map.get(sid)
+                        if tc_id is None:
+                            size = 0
+                        else:
+                            size = ranked_size_by_group.get(tc_id, 0)
+                        bin_key = _percentile_bin(rank / size) if rank and size else None
                 if bin_key:
                     entry[bin_key] = entry.get(bin_key, 0) + 1
                     entry["total_count"] += 1
@@ -249,6 +291,7 @@ def rank_frequency_stats(
             "teaching_subject": subject,
             "grade": grade,
             "metric": metric,
+            "metric_kind": "subject_grade_score" if is_grade_score_mode else "subject_percentile",
             "teaching_class_id": teaching_class_id,
             "exams": [{"id": e.id, "name": e.name, "exam_date": e.exam_date} for e in exams],
             "bins": bins,

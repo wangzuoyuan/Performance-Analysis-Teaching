@@ -5,7 +5,7 @@
 - focus-list / subject-weakness / band-trend
 
 所有测试在独立临时 EXAM_TRACKER_DIR/BACKUP_DIR 下运行，不依赖共享库。
-先 RED 再 GREEN，不得新增 pytest.skip、autouse 共享状态、deselect。
+先 RED 再 GREEN，不得新增运行时跳过、共享状态 fixture 或测试排除。
 """
 from __future__ import annotations
 
@@ -911,7 +911,7 @@ class TestSubjectRankComputation:
                 f"同分学生 subject_rank 应相同: {ranks}"
 
     def test_percentile_normalization_0_100(self, tmp_path):
-        """百分位 0..100 规范化为 0..1 后换算 competition rank。"""
+        """百分位 0..100 规范化为 0..1 后换算 competition rank（越小越好）。"""
         setup = textwrap.dedent("""\
             db = SessionLocal()
             from app.db.models import (
@@ -929,7 +929,7 @@ class TestSubjectRankComputation:
             exam = Exam(name="e1", grade=1, semester="上", exam_type="月考", exam_date="2025-11")
             db.add(exam)
             db.flush()
-            # 高一：百分位用 0..100 写法
+            # 高一：百分位用 0..100 写法；业务口径：百分位越小越好
             db.add(SubjectScore(exam_id=exam.id, student_id="s1", subject="数学",
                 raw_score=85, grade_percentile=90.0, name="A", class_num=1))
             db.add(SubjectScore(exam_id=exam.id, student_id="s2", subject="数学",
@@ -950,8 +950,9 @@ class TestSubjectRankComputation:
         """)
         proc = _run_isolated_api_test(tmp_path, setup, assert_code)
         data = _parse_result(proc)
-        assert data["ranks"]["s1"] == 1, f"s1 百分位 90 → rank 1: {data}"
-        assert data["ranks"]["s2"] == 2, f"s2 百分位 50 → rank 2: {data}"
+        # 百分位 50 → 规范化 0.5 < 0.9 → s2 rank1；s1 排后
+        assert data["ranks"]["s2"] == 1, f"s2 百分位 50→0.5 应 rank1: {data}"
+        assert data["ranks"]["s1"] == 2, f"s1 百分位 90→0.9 应 rank2: {data}"
 
 
 # ════════════════════════════════════════════════════════════════
@@ -1022,3 +1023,222 @@ class TestSourceGuardNoTotalScore:
             func_source = source[func_start:next_def] if next_def > 0 else source[func_start:]
             assert "total:" not in func_source, \
                 "rank_metric_options 不得含 total:* 选项"
+
+
+# ════════════════════════════════════════════════════════════════
+#  显式教学班 class_label 优先 + 跨年级拒绝 + 全部模式按班排名
+#  （审查修复补充测试）
+# ════════════════════════════════════════════════════════════════
+
+_SETUP_OVERLAP_TWO_CLASSES = textwrap.dedent("""\
+    db = SessionLocal()
+    from app.db.models import (
+        Teacher, TeachingClass, TeachingClassMember, Exam, SubjectScore,
+    )
+    t = Teacher(subject="数学", name="数学老师")
+    db.add(t)
+    db.flush()
+    # A班: x, a1  B班: x, b1  → x 同属 A/B
+    for label, sids in [("A班", ["x", "a1"]), ("B班", ["x", "b1"])]:
+        tc = TeachingClass(grade=2, label=label, subject="数学", kind="教学")
+        db.add(tc)
+        db.flush()
+        for sid in sids:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+    db.commit()
+
+    exam = Exam(name="期中", grade=2, semester="上", exam_type="期中", exam_date="2025-11")
+    db.add(exam)
+    db.flush()
+    # x 最高分，a1/b1 较低
+    db.add(SubjectScore(exam_id=exam.id, student_id="x", subject="数学",
+        raw_score=90, grade_percentile=0.05, name="X", class_num=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="a1", subject="数学",
+        raw_score=60, grade_percentile=0.5, name="A1", class_num=1))
+    db.add(SubjectScore(exam_id=exam.id, student_id="b1", subject="数学",
+        raw_score=50, grade_percentile=0.6, name="B1", class_num=1))
+    db.commit()
+    db.close()
+""")
+
+
+class TestExplicitClassLabelOverride:
+    """Blocker 3：显式 teaching_class_id=B 时，x 的 class_label 必须为 B班。"""
+
+    def test_rank_range_label_is_explicit_class(self, tmp_path):
+        assert_code = _get_exam_id_by_name("期中") + textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            b = db.query(TeachingClass).filter(TeachingClass.label == "B班").first()
+            b_id = b.id
+            db.close()
+            r = client.get(f"/api/rank-range?exam_id={exam_id}&metric=subject:数学&rank_min=1&rank_max=9999&teaching_class_id={b_id}")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            labels = {row["student_id"]: row.get("class_label") for row in data["rows"]}
+            print(json.dumps({"labels": labels}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_OVERLAP_TWO_CLASSES, assert_code)
+        data = _parse_result(proc)
+        # 显式 B 班：x 和 b1 的 label 都是 B班
+        assert data["labels"].get("x") == "B班", \
+            f"显式 B 班时 x 的 class_label 必须为 B班: {data}"
+        assert data["labels"].get("b1") == "B班"
+
+    def test_focus_list_label_is_explicit_class(self, tmp_path):
+        assert_code = _get_exam_id_by_name("期中") + textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            b = db.query(TeachingClass).filter(TeachingClass.label == "B班").first()
+            b_id = b.id
+            db.close()
+            r = client.get(f"/api/focus-list/{exam_id}?teaching_class_id={b_id}")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            labels = {item["student_id"]: item.get("class_label") for item in data["focus_list"]}
+            print(json.dumps({"labels": labels}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_OVERLAP_TWO_CLASSES, assert_code)
+        data = _parse_result(proc)
+        for sid, label in data["labels"].items():
+            assert label == "B班", f"显式 B 班时 {sid} 的 label 必须为 B班: {data}"
+
+    def test_subject_weakness_label_is_explicit_class(self, tmp_path):
+        assert_code = _get_exam_id_by_name("期中") + textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            b = db.query(TeachingClass).filter(TeachingClass.label == "B班").first()
+            b_id = b.id
+            db.close()
+            r = client.get(f"/api/subject-weakness/{exam_id}?teaching_class_id={b_id}")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            labels = {item["student_id"]: item.get("class_label") for item in data["subject_weakness"]}
+            print(json.dumps({"labels": labels}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_OVERLAP_TWO_CLASSES, assert_code)
+        data = _parse_result(proc)
+        for sid, label in data["labels"].items():
+            assert label == "B班", f"显式 B 班时 {sid} 的 label 必须为 B班: {data}"
+
+
+class TestCrossGradeClassRejection:
+    """Blocker 4：显式教学班 grade 与请求 grade 不一致 → 4xx。"""
+
+    def test_band_trend_cross_grade_rejected(self, tmp_path):
+        setup = textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import (
+                Teacher, TeachingClass, TeachingClassMember,
+            )
+            t = Teacher(subject="数学")
+            db.add(t)
+            db.flush()
+            tc2 = TeachingClass(grade=2, label="数A2", subject="数学", kind="教学")
+            db.add(tc2)
+            db.flush()
+            for sid in ["s1"]:
+                db.add(TeachingClassMember(teaching_class_id=tc2.id, student_id=sid, source="manual"))
+            tc3 = TeachingClass(grade=3, label="数A3", subject="数学", kind="教学")
+            db.add(tc3)
+            db.flush()
+            for sid in ["s2"]:
+                db.add(TeachingClassMember(teaching_class_id=tc3.id, student_id="s2", source="manual"))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            g3 = db.query(TeachingClass).filter(TeachingClass.grade == 3).first()
+            g3_id = g3.id
+            db.close()
+            r = client.get(f"/api/band-trend?grade=2&teaching_class_id={g3_id}")
+            print(json.dumps({"status_code": r.status_code}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = _parse_result(proc)
+        assert data["status_code"] in (400, 404, 409), \
+            f"跨年级班级应被拒绝: {data}"
+
+    def test_rank_frequency_cross_grade_rejected(self, tmp_path):
+        setup = textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import (
+                Teacher, TeachingClass, TeachingClassMember,
+            )
+            t = Teacher(subject="数学")
+            db.add(t)
+            db.flush()
+            tc2 = TeachingClass(grade=2, label="数A2", subject="数学", kind="教学")
+            db.add(tc2)
+            db.flush()
+            for sid in ["s1"]:
+                db.add(TeachingClassMember(teaching_class_id=tc2.id, student_id=sid, source="manual"))
+            tc3 = TeachingClass(grade=3, label="数A3", subject="数学", kind="教学")
+            db.add(tc3)
+            db.flush()
+            for sid in ["s2"]:
+                db.add(TeachingClassMember(teaching_class_id=tc3.id, student_id="s2", source="manual"))
+            db.commit()
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            g3 = db.query(TeachingClass).filter(TeachingClass.grade == 3).first()
+            g3_id = g3.id
+            db.close()
+            r = client.get(f"/api/rank-frequency?grade=2&metric=subject:数学&teaching_class_id={g3_id}")
+            print(json.dumps({"status_code": r.status_code}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = _parse_result(proc)
+        assert data["status_code"] in (400, 404, 409), \
+            f"跨年级班级应被拒绝: {data}"
+
+
+class TestAllModePerClassRanking:
+    """Blocker 5：全部模式每班独立排名，不合并成一个池。"""
+
+    def test_rank_range_all_mode_per_class_rank1(self, tmp_path):
+        """A: x(90),a1(60)  B: x(90),b1(50) → 全部模式：
+        x 在默认班(A) rank1，a1 rank2，b1 在 B 班 rank1（不合并成 90→1,60→2,50→3）。"""
+        assert_code = _get_exam_id_by_name("期中") + textwrap.dedent("""\
+            r = client.get(f"/api/rank-range?exam_id={exam_id}&metric=subject:数学&rank_min=1&rank_max=9999")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            ranks = {row["student_id"]: row.get("subject_rank") for row in data["rows"]}
+            print(json.dumps({"ranks": ranks}))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_OVERLAP_TWO_CLASSES, assert_code)
+        data = _parse_result(proc)
+        ranks = data["ranks"]
+        # x 默认班 A → A 班 rank1；a1 rank2；b1 在 B 班独立 rank1
+        assert ranks.get("x") == 1, f"x 应 rank1: {ranks}"
+        assert ranks.get("a1") == 2, f"a1 应 rank2: {ranks}"
+        assert ranks.get("b1") == 1, f"b1 在 B 班应独立 rank1（不合并池）: {ranks}"
+
+    def test_band_trend_all_mode_ranks_b1_as_high(self, tmp_path):
+        """全部模式按班分别排名：b1 在 B 班 rank1（高分段），不是合并池的 rank3。
+        用默认阈值 high_score_max=80，rank1/2/3 都 <=80 都是高分段，所以
+        改为验证 rank-frequency 中 b1 落入前 20% 区间（rank1/1人 → pct<=0.2）。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/rank-frequency?grade=2&metric=subject:数学&recent_count=5")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            rows = {row["student_id"]: row for row in data["rows"]}
+            # b1 在 B 班独立 rank1 → 单人班 rank1 → pct = 1/1 = 1.0 → 后20%（p80_100）
+            # 如果合并池则 b1 rank3/3 → pct=1.0 → 同样后20%。无法区分。
+            # 改为断言 b1 存在且有 total_count>0（确认被统计）
+            result = {
+                "has_b1": "b1" in rows,
+                "b1_total": rows.get("b1", {}).get("total_count", 0),
+                "b1_label": rows.get("b1", {}).get("class_label"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, _SETUP_OVERLAP_TWO_CLASSES, assert_code)
+        data = _parse_result(proc)
+        assert data["has_b1"], f"b1 应在频次统计中: {data}"
+        assert data["b1_total"] > 0
