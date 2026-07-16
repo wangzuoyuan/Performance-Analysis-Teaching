@@ -211,7 +211,6 @@ def normalize_grade1_class_averages(file_path: Path, info: dict[str, Any]) -> di
     rows = parse_class_averages(file_path, info)
     class_averages = []
     subjects = ["语文", "数学", "英语", "物理", "化学", "生物", "政治", "历史", "地理"]
-    total_types = ["主三门", "五门", "九门"]
     for row in rows:
         parsed_class_num = class_num(row.get("class"))
         if parsed_class_num is None:
@@ -226,11 +225,9 @@ def normalize_grade1_class_averages(file_path: Path, info: dict[str, Any]) -> di
                     for subject in subjects
                     if row.get(f"{subject}_avg") is not None
                 },
-                "total_averages": {
-                    total_type: row.get(f"{total_type}_avg")
-                    for total_type in total_types
-                    if row.get(f"{total_type}_avg") is not None
-                },
+                # 阶段7：TotalScore 退役，total_averages 恒空。analyze_exam_scores
+                # 的 parse_class_averages 不再生成 {total_type}_avg 字段。
+                "total_averages": {},
             }
         )
     return {"kind": "class_averages", "class_averages": class_averages}

@@ -9,6 +9,14 @@ from app.analysis.config import (
     TREND_LABELS,
 )
 
+# ⚠ 集成冲突项（阶段7 明确保留，待阶段6 chat 合并后删除）：
+# chat/tools.py（本卡禁止修改）仍调用 compute_student_trend，该函数读取 TotalScore
+# （主三门/3+3 学籍名次时间序列）。TotalScore 已退役——新上传不再写入该表——故本
+# 函数对新数据始终返回「无数据」。生产单学科趋势由 analysis/router.py（学科成绩表
+# + 教师任教学科）实时计算，不经过本模块。阶段6 chat 切换到单学科口径后，删除本文件
+# 及 chat/tools.py 的 compute_student_trend 调用。
+
+
 def compute_student_trend(student_id: str, total_type: str, exam_ids: list, db) -> dict:
     """计算学生趋势（基于名次时间序列）"""
     # 从数据库获取该生的各次考试名次

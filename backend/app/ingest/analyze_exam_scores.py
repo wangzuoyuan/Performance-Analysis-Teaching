@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Analyze class-6 exam score workbooks for class-teacher use."""
+"""Analyze exam score workbooks for class-teacher use (单学科化, 阶段7).
+
+TotalScore 已退役：本 CLI/辅助分析管线不再包含任何总分（主三门/五门/九门/3+3）
+相关的生成、参数、管线或 CSV/JSON 字段。只保留可工作的单科 score_long 与
+subject average 分析（学籍1科目均分估算、班级总览、本班历史科目均分趋势）。
+"""
 
 from __future__ import annotations
 
@@ -36,14 +41,6 @@ SUBJECT_COLS = {
     "地理": (21, 22),
 }
 
-TOTAL_COLS = {
-    "主三门": (23, 24, 25, 26),
-    "五门": (27, 28, 29, 30),
-    "九门": (31, 32, 33, 34),
-}
-
-TREND_TOTAL_TYPES = ("主三门", "五门")
-
 CLASS_AVG_SUBJECT_COLS = {
     "语文": 4,
     "数学": 5,
@@ -54,12 +51,6 @@ CLASS_AVG_SUBJECT_COLS = {
     "政治": 10,
     "历史": 11,
     "地理": 12,
-}
-
-CLASS_AVG_TOTAL_COLS = {
-    "主三门": (13, 14),
-    "五门": (15, 16),
-    "九门": (17, 18),
 }
 
 EXAM_ORDER = {
@@ -74,13 +65,7 @@ XUEJI_LABELS = {
     "4": "外省市体育生和复学学生",
 }
 
-PROGRESS_RANK_THRESHOLD = 80
-VOLATILITY_RANK_THRESHOLD = 120
 SUBJECT_PCT_THRESHOLD = 0.10
-HIGH_RANK_MAX = 80
-CRITICAL_RANK_MIN = 400
-CRITICAL_RANK_MAX = 500
-FOCUS_CATEGORIES = ["明显进步", "明显退步", "波动风险", "临界段", "严重偏科", "稳定优秀"]
 
 
 def clean(value: Any) -> str:
@@ -154,16 +139,6 @@ def canonical_exam_name(path: Path) -> str:
 
 def exam_sort_key(exam_name: str) -> tuple[int, str]:
     return (EXAM_ORDER.get(exam_name, 999), exam_name)
-
-
-def detect_total_type(text: str) -> str:
-    if "九门" in text:
-        return "九门"
-    if "五门" in text:
-        return "五门"
-    if "三门" in text or "主三" in text:
-        return "主三门"
-    return "主三门"
 
 
 def row_values(ws: Any, row_idx: int, max_col: int | None = None) -> list[str]:
@@ -277,6 +252,9 @@ def parse_student_scores(path: Path, info: dict[str, Any]) -> tuple[list[dict[st
 
 
 def parse_class_averages(path: Path, info: dict[str, Any]) -> list[dict[str, Any]]:
+    """解析班级均分表。单学科化（阶段7）：只解析单科均分列，不再解析
+    主三门/五门/九门总分均分与名次（CLASS_AVG_TOTAL_COLS 已删除）。
+    """
     wb = load_workbook(path, data_only=True, read_only=False)
     ws = wb[wb.sheetnames[0]]
     exam = info["exam"]
@@ -303,49 +281,20 @@ def parse_class_averages(path: Path, info: dict[str, Any]) -> list[dict[str, Any
         }
         for subject, col in CLASS_AVG_SUBJECT_COLS.items():
             row[f"{subject}_avg"] = num(ws.cell(row_idx, col).value)
-        for total_type, (score_col, rank_col) in CLASS_AVG_TOTAL_COLS.items():
-            row[f"{total_type}_avg"] = num(ws.cell(row_idx, score_col).value)
-            row[f"{total_type}_rank"] = intish(ws.cell(row_idx, rank_col).value)
         rows.append(row)
     return rows
 
 
-def parse_rank_bands(path: Path, info: dict[str, Any]) -> list[dict[str, Any]]:
-    wb = load_workbook(path, data_only=True, read_only=False)
-    ws = wb[wb.sheetnames[0]]
-    exam = info["exam"]
-    order = EXAM_ORDER.get(exam, 999)
-    total_type = detect_total_type(clean(ws.cell(1, 1).value) + path.name)
-    bands = [clean(ws.cell(2, col).value) for col in range(3, ws.max_column + 1)]
-    rows: list[dict[str, Any]] = []
-    for row_idx in range(3, ws.max_row + 1):
-        class_name = clean(ws.cell(row_idx, 1).value)
-        if not is_numeric_class(class_name):
-            continue
-        teacher = clean(ws.cell(row_idx, 2).value)
-        for offset, band in enumerate(bands, start=3):
-            if not band:
-                continue
-            rows.append({
-                "exam": exam,
-                "exam_order": order,
-                "total_type": total_type,
-                "rank_basis": "学籍排名",
-                "class": class_name,
-                "teacher": teacher,
-                "band": band,
-                "count": intish(ws.cell(row_idx, offset).value) or 0,
-                "source_file": path.name,
-            })
-    return rows
-
-
 def parse_inputs(paths: list[Path]) -> dict[str, Any]:
+    """解析输入文件集合。
+
+    单学科化（阶段7）：不再解析 rank_bands（名次段表口径依赖主三门/五门/九门
+    总分名次，§9 停止解析与输出）。旧名次段表文件可被识别但不产生跨学科包。
+    """
     inspection = inspect_files(paths)
     students: list[dict[str, Any]] = []
     score_long: list[dict[str, Any]] = []
     class_averages: list[dict[str, Any]] = []
-    rank_bands: list[dict[str, Any]] = []
     warnings = list(inspection["warnings"])
     for info in inspection["files"]:
         path = Path(info["file"])
@@ -355,25 +304,13 @@ def parse_inputs(paths: list[Path]) -> dict[str, Any]:
             score_long.extend(file_scores)
         elif info["type"] == "class_averages":
             class_averages.extend(parse_class_averages(path, info))
-        elif info["type"] == "rank_bands":
-            rank_bands.extend(parse_rank_bands(path, info))
-    for exam in sorted({row["exam"] for row in class_averages}, key=exam_sort_key):
-        for total_type in TOTAL_COLS:
-            actual_values = [
-                row.get(f"{total_type}_avg")
-                for row in class_averages
-                if row["exam"] == exam and row.get("is_actual_class")
-            ]
-            usable = [value for value in actual_values if value not in (None, 0)]
-            if actual_values and not usable:
-                warnings.append(f"{exam} 的 {total_type} 在班级均分表中不可用或全为0，趋势分析将跳过。")
+        # rank_bands 不再解析（总分名次段口径已退役，§9）
     return {
         "inspection": inspection,
         "warnings": warnings,
         "students": students,
         "score_long": score_long,
         "class_averages": class_averages,
-        "rank_bands": rank_bands,
     }
 
 
@@ -398,40 +335,6 @@ def previous_exam_name(exams: list[str], current: str | None) -> str | None:
     if idx == 0:
         return None
     return exams[idx - 1]
-
-
-def segment_for_rank(rank: int | None) -> str:
-    if rank is None:
-        return ""
-    if rank <= HIGH_RANK_MAX:
-        return "高分段"
-    if CRITICAL_RANK_MIN <= rank <= CRITICAL_RANK_MAX:
-        return "临界段"
-    if rank > CRITICAL_RANK_MAX:
-        return "薄弱段"
-    return "普通段"
-
-
-def trend_label(ranks: list[int]) -> str:
-    if len(ranks) < 2:
-        return "数据不足"
-    deltas = [prev - cur for prev, cur in zip(ranks, ranks[1:])]
-    rank_range = max(ranks) - min(ranks)
-    if rank_range >= VOLATILITY_RANK_THRESHOLD:
-        if len(deltas) >= 2 and deltas[-1] > 0 and deltas[-2] < 0:
-            return "回升且波动"
-        if len(deltas) >= 2 and deltas[-1] < 0 and deltas[-2] > 0:
-            return "回落且波动"
-        return "波动"
-    if all(delta > 0 for delta in deltas):
-        return "持续进步"
-    if all(delta < 0 for delta in deltas):
-        return "持续退步"
-    if deltas[-1] >= PROGRESS_RANK_THRESHOLD:
-        return "明显回升"
-    if deltas[-1] <= -PROGRESS_RANK_THRESHOLD:
-        return "明显回落"
-    return "稳定"
 
 
 def rows_by_key(rows: list[dict[str, Any]], *keys: str) -> dict[tuple[Any, ...], list[dict[str, Any]]]:
@@ -469,8 +372,12 @@ def recommended_subjects(
     score_long: list[dict[str, Any]],
     student_id: str,
     exam: str,
-    total_percentile: float | None,
 ) -> tuple[list[str], list[str]]:
+    """推荐关注科目：取百分位最弱的两科，附较上次退步幅度。
+
+    单学科化（阶段7）：不再接收 total_percentile 参数（总分百分位已退役），
+    偏科判断不再依赖「比总分百分位低」的口径。
+    """
     pcts = latest_subject_percentiles(score_long, student_id, exam)
     if not pcts:
         return [], []
@@ -479,8 +386,6 @@ def recommended_subjects(
     reasons: list[str] = []
     for subject, pct in weakest:
         reason_bits = [f"{subject}百分位{pct:.3f}"]
-        if total_percentile is not None and pct - total_percentile >= 0.20:
-            reason_bits.append(f"比总分百分位低{pct - total_percentile:.3f}")
         exam_order = EXAM_ORDER.get(exam, 999)
         prev_exam, prev_pct = previous_subject_percentiles(score_long, student_id, subject, exam_order)
         if prev_pct is not None and pct - prev_pct >= SUBJECT_PCT_THRESHOLD:
@@ -489,318 +394,22 @@ def recommended_subjects(
     return recommended, reasons
 
 
-def serious_subjects(
-    score_long: list[dict[str, Any]],
-    student_id: str,
-    exam: str,
-    total_percentile: float | None,
-) -> list[str]:
-    if total_percentile is None:
-        return []
-    pcts = latest_subject_percentiles(score_long, student_id, exam)
-    result: list[str] = []
-    for subject, pct in pcts.items():
-        if pct - total_percentile >= 0.20:
-            result.append(subject)
-    return sorted(result, key=lambda subject: pcts[subject], reverse=True)
-
-
-def build_student_trends(
-    student_totals: list[dict[str, Any]],
-    score_long: list[dict[str, Any]],
-    target_class: str,
-) -> list[dict[str, Any]]:
-    trends: list[dict[str, Any]] = []
-    target_totals = [
-        row
-        for row in student_totals
-        if row.get("class") == target_class
-        and row.get("xueji_rank") is not None
-        and row.get("total_type") in TREND_TOTAL_TYPES
-    ]
-    grouped = rows_by_key(target_totals, "student_id", "total_type")
-    for (student_id, total_type), rows in grouped.items():
-        rows.sort(key=lambda row: row.get("exam_order", 999))
-        ranks = [int(row["xueji_rank"]) for row in rows if row.get("xueji_rank") is not None]
-        if not ranks:
-            continue
-        latest = rows[-1]
-        previous = rows[-2] if len(rows) >= 2 else None
-        delta = None
-        if previous and previous.get("xueji_rank") is not None and latest.get("xueji_rank") is not None:
-            delta = int(previous["xueji_rank"]) - int(latest["xueji_rank"])
-        rank_range = max(ranks) - min(ranks) if len(ranks) >= 2 else 0
-        recommended, subject_reasons = recommended_subjects(
-            score_long,
-            student_id,
-            latest["exam"],
-            latest.get("grade_percentile"),
-        )
-        weak_subjects = serious_subjects(
-            score_long,
-            student_id,
-            latest["exam"],
-            latest.get("grade_percentile"),
-        )
-        trends.append({
-            "student_id": student_id,
-            "name": latest.get("name"),
-            "class": latest.get("class"),
-            "xueji": latest.get("xueji"),
-            "total_type": total_type,
-            "exam_count": len(rows),
-            "first_exam": rows[0]["exam"],
-            "latest_exam": latest["exam"],
-            "previous_exam": previous["exam"] if previous else "",
-            "first_xueji_rank": rows[0].get("xueji_rank"),
-            "previous_xueji_rank": previous.get("xueji_rank") if previous else None,
-            "latest_xueji_rank": latest.get("xueji_rank"),
-            "latest_grade_rank": latest.get("grade_rank"),
-            "latest_total_score": latest.get("total_score"),
-            "latest_grade_percentile": latest.get("grade_percentile"),
-            "adjacent_rank_delta": delta,
-            "rank_range": rank_range,
-            "trend_label": trend_label(ranks),
-            "latest_segment": segment_for_rank(latest.get("xueji_rank")),
-            "recommended_subjects": "、".join(recommended),
-            "subject_reasons": "；".join(subject_reasons),
-            "serious_subjects": "、".join(weak_subjects),
-        })
-    trends.sort(key=lambda row: (row["total_type"], row.get("latest_xueji_rank") or 99999))
-    return trends
-
-
-def severity_for_focus(category: str, row: dict[str, Any]) -> float:
-    delta = row.get("adjacent_rank_delta")
-    if category == "明显进步" and delta is not None:
-        return float(delta)
-    if category == "明显退步" and delta is not None:
-        return float(-delta)
-    if category == "波动风险":
-        return float(row.get("rank_range") or 0)
-    if category == "临界段":
-        rank = row.get("latest_xueji_rank") or 99999
-        return float(CRITICAL_RANK_MAX - abs(rank - ((CRITICAL_RANK_MIN + CRITICAL_RANK_MAX) / 2)))
-    if category == "稳定优秀":
-        return float(99999 - (row.get("latest_xueji_rank") or 99999))
-    if category == "严重偏科":
-        return float(len(clean(row.get("serious_subjects")).split("、")))
-    return 0.0
-
-
-def split_zh_list(value: Any) -> list[str]:
-    return [part for part in clean(value).split("、") if part]
-
-
-def add_unique(items: list[str], value: Any) -> None:
-    text = clean(value)
-    if text and text not in items:
-        items.append(text)
-
-
-def add_unique_many(items: list[str], values: Iterable[Any]) -> None:
-    for value in values:
-        add_unique(items, value)
-
-
-def format_rank_change(row: dict[str, Any]) -> str:
-    total_type = clean(row.get("total_type"))
-    previous_exam = clean(row.get("previous_exam")) or "上次"
-    previous_rank = row.get("previous_xueji_rank")
-    latest_rank = row.get("latest_xueji_rank")
-    delta = row.get("adjacent_rank_delta")
-    delta_text = ""
-    if delta is not None:
-        delta_text = f"，变化{int(delta):+d}名"
-    return (
-        f"{total_type}: {previous_exam} {previous_rank or '-'} -> "
-        f"{clean(row.get('latest_exam'))} {latest_rank or '-'}{delta_text}，"
-        f"区间波动{row.get('rank_range') or 0}名，{clean(row.get('latest_segment'))}"
-    )
-
-
-def category_evidence(category: str, row: dict[str, Any]) -> str:
-    total_type = clean(row.get("total_type"))
-    if category in {"明显进步", "明显退步"}:
-        return f"{category}: {format_rank_change(row)}"
-    if category == "波动风险":
-        return f"波动风险: {total_type} 学籍排名区间波动{row.get('rank_range') or 0}名"
-    if category == "临界段":
-        return f"临界段: {total_type} 最新学籍排名{row.get('latest_xueji_rank')}"
-    if category == "严重偏科":
-        subjects = clean(row.get("serious_subjects")) or clean(row.get("recommended_subjects"))
-        return f"严重偏科: {subjects}；{clean(row.get('subject_reasons'))}"
-    if category == "稳定优秀":
-        return f"稳定优秀: {total_type} 最新学籍排名{row.get('latest_xueji_rank')}，波动{row.get('rank_range') or 0}名"
-    return clean(row.get("trend_label"))
-
-
-def triggered_categories(row: dict[str, Any]) -> list[str]:
-    categories: list[str] = []
-    delta = row.get("adjacent_rank_delta")
-    if delta is not None and delta >= PROGRESS_RANK_THRESHOLD:
-        categories.append("明显进步")
-    if delta is not None and delta <= -PROGRESS_RANK_THRESHOLD:
-        categories.append("明显退步")
-    if row.get("exam_count", 0) >= 3 and (row.get("rank_range") or 0) >= VOLATILITY_RANK_THRESHOLD:
-        categories.append("波动风险")
-    if row.get("latest_segment") == "临界段":
-        categories.append("临界段")
-    if clean(row.get("serious_subjects")):
-        categories.append("严重偏科")
-    if row.get("latest_xueji_rank") is not None and row["latest_xueji_rank"] <= HIGH_RANK_MAX and (row.get("rank_range") or 0) < VOLATILITY_RANK_THRESHOLD:
-        categories.append("稳定优秀")
-    return categories
-
-
-def new_focus_item(row: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "student_id": clean(row.get("student_id")),
-        "name": row.get("name"),
-        "xueji": row.get("xueji"),
-        "_categories": [],
-        "_total_types": [],
-        "_latest_exams": [],
-        "_rank_summaries": [],
-        "_recommended_subjects": [],
-        "_serious_subjects": [],
-        "_evidence": [],
-        "_priority": 0.0,
-    }
-
-
-def build_focus_students(trends: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[str, dict[str, Any]] = {}
-    for row in trends:
-        if row.get("total_type") != "主三门":
-            continue
-        categories = triggered_categories(row)
-        if not categories:
-            continue
-        student_id = clean(row.get("student_id"))
-        item = merged.setdefault(student_id, new_focus_item(row))
-        for category in categories:
-            add_unique(item["_categories"], category)
-            add_unique(item["_evidence"], category_evidence(category, row))
-            item["_priority"] = max(item["_priority"], severity_for_focus(category, row))
-        add_unique(item["_total_types"], row.get("total_type"))
-        add_unique(item["_latest_exams"], row.get("latest_exam"))
-        add_unique(item["_rank_summaries"], format_rank_change(row))
-        add_unique_many(item["_recommended_subjects"], split_zh_list(row.get("recommended_subjects")))
-        add_unique_many(item["_serious_subjects"], split_zh_list(row.get("serious_subjects")))
-
-    # 五门只作为已入选学生的补充证据；不单独触发重点名单。
-    for row in trends:
-        if row.get("total_type") != "五门":
-            continue
-        student_id = clean(row.get("student_id"))
-        item = merged.get(student_id)
-        if item is None:
-            continue
-        add_unique(item["_total_types"], row.get("total_type"))
-        add_unique(item["_latest_exams"], row.get("latest_exam"))
-        add_unique(item["_rank_summaries"], format_rank_change(row))
-        add_unique(item["_evidence"], f"五门补充: {format_rank_change(row)}")
-        add_unique_many(item["_recommended_subjects"], split_zh_list(row.get("recommended_subjects")))
-        add_unique_many(item["_serious_subjects"], split_zh_list(row.get("serious_subjects")))
-
-    focus: list[dict[str, Any]] = []
-    for item in merged.values():
-        ordered_categories = [category for category in FOCUS_CATEGORIES if category in item["_categories"]]
-        focus.append({
-            "student_id": item["student_id"],
-            "name": item.get("name"),
-            "xueji": item.get("xueji"),
-            "categories": "、".join(ordered_categories),
-            "total_types": "、".join(item["_total_types"]),
-            "latest_exams": "、".join(item["_latest_exams"]),
-            "rank_summary": "；".join(item["_rank_summaries"]),
-            "recommended_subjects": "、".join(item["_recommended_subjects"]),
-            "serious_subjects": "、".join(item["_serious_subjects"]),
-            "evidence": "；".join(item["_evidence"]),
-            "priority_score": round(item["_priority"], 4),
-        })
-    focus.sort(key=lambda row: row.get("priority_score") or 0, reverse=True)
-    return focus
-
-
-def build_subject_communication(focus: list[dict[str, Any]], trends: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    for item in focus:
-        categories = split_zh_list(item.get("categories"))
-        communication_categories = [category for category in categories if category in {"明显退步", "临界段", "严重偏科", "波动风险"}]
-        if not communication_categories:
-            continue
-        subjects = clean(item.get("serious_subjects")) or clean(item.get("recommended_subjects"))
-        for subject in [part for part in subjects.split("、") if part]:
-            rows.append({
-                "subject": subject,
-                "categories": "、".join(communication_categories),
-                "student_id": item["student_id"],
-                "name": item["name"],
-                "xueji": item["xueji"],
-                "total_types": item["total_types"],
-                "latest_exams": item["latest_exams"],
-                "rank_summary": item["rank_summary"],
-                "evidence": item["evidence"],
-            })
-    rows.sort(key=lambda row: (row["subject"], row["categories"], row["name"]))
-    return rows
-
-
-def build_target_rank_bands(student_totals: list[dict[str, Any]], target_class: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    grouped = rows_by_key(
-        [row for row in student_totals if row.get("class") == target_class and row.get("xueji_rank") is not None],
-        "exam",
-        "total_type",
-    )
-    for (exam, total_type), items in grouped.items():
-        ranks = [int(row["xueji_rank"]) for row in items]
-        rows.append({
-            "exam": exam,
-            "exam_order": EXAM_ORDER.get(exam, 999),
-            "total_type": total_type,
-            "class": target_class,
-            "basis": "学生明细学籍排名精确计算",
-            "student_count": len(ranks),
-            "high_1_80": sum(1 for rank in ranks if rank <= HIGH_RANK_MAX),
-            "critical_400_500": sum(1 for rank in ranks if CRITICAL_RANK_MIN <= rank <= CRITICAL_RANK_MAX),
-            "weak_after_500": sum(1 for rank in ranks if rank > CRITICAL_RANK_MAX),
-        })
-    rows.sort(key=lambda row: (row["exam_order"], row["total_type"]))
-    return rows
-
-
-def aggregate_uploaded_rank_bands(rank_bands: list[dict[str, Any]], target_class: str) -> list[dict[str, Any]]:
-    rows: list[dict[str, Any]] = []
-    grouped = rows_by_key(rank_bands, "exam", "total_type", "class")
-    for (exam, total_type, class_name), items in grouped.items():
-        if class_name != target_class:
-            continue
-        counts = {item["band"]: item["count"] for item in items}
-        rows.append({
-            "exam": exam,
-            "exam_order": EXAM_ORDER.get(exam, 999),
-            "total_type": total_type,
-            "class": class_name,
-            "basis": "上传名次段表原始40名一段",
-            "raw_total": sum(counts.values()),
-            "high_1_80": counts.get("1-40", 0) + counts.get("41-80", 0),
-            "critical_raw_note": "原表为40名一段，400-500不精确；请看学生明细精确计算。",
-            "band_counts": json.dumps(counts, ensure_ascii=False),
-        })
-    rows.sort(key=lambda row: (row["exam_order"], row["total_type"]))
-    return rows
+def estimated_rank(value: float, comparators: Iterable[float | None]) -> int | None:
+    usable = [float(item) for item in comparators if item not in (None, 0)]
+    if not usable:
+        return None
+    return 1 + sum(1 for item in usable if item > value)
 
 
 def build_xueji1_analysis(
     students: list[dict[str, Any]],
     score_long: list[dict[str, Any]],
-    student_totals: list[dict[str, Any]],
     class_averages: list[dict[str, Any]],
     target_class: str,
 ) -> list[dict[str, Any]]:
+    """学籍1科目均分估算（单学科化，阶段7）：只按科目做均分估算排名，
+    不再做主三门/五门总分均分估算（TotalScore 已退役）。
+    """
     rows: list[dict[str, Any]] = []
     actual_class_rows = [row for row in class_averages if row.get("is_actual_class")]
     exams = available_exams(students)
@@ -846,54 +455,8 @@ def build_xueji1_analysis(
                 "estimated_grade_rank": estimated_rank(avg, grade_comparators),
                 "note": "本班学籍1均分与其他班现有均分比较，属于估算。",
             })
-        for total_type in TREND_TOTAL_TYPES:
-            values = [
-                row["total_score"]
-                for row in student_totals
-                if row["exam"] == exam
-                and row["student_id"] in target_student_ids
-                and row["total_type"] == total_type
-                and row.get("total_score") is not None
-            ]
-            if not values:
-                continue
-            avg = mean(values)
-            official_avg_key = f"{total_type}_avg"
-            official_rank_key = f"{total_type}_rank"
-            parallel_comparators = [
-                row.get(official_avg_key)
-                for row in exam_class_rows
-                if row.get("class_type") == "平行班" and row.get("class") != target_class
-            ]
-            grade_comparators = [
-                row.get(official_avg_key)
-                for row in exam_class_rows
-                if row.get("class") != target_class
-            ]
-            if not any(value not in (None, 0) for value in parallel_comparators + grade_comparators):
-                continue
-            rows.append({
-                "exam": exam,
-                "exam_order": EXAM_ORDER.get(exam, 999),
-                "metric": total_type,
-                "metric_type": "总分",
-                "xueji1_count": len(target_student_ids),
-                "xueji1_avg": round(avg, 2),
-                "official_class_avg": target_official.get(official_avg_key) if target_official else None,
-                "official_rank": target_official.get(official_rank_key) if target_official else None,
-                "estimated_parallel_rank": estimated_rank(avg, parallel_comparators),
-                "estimated_grade_rank": estimated_rank(avg, grade_comparators),
-                "note": "本班学籍1均分与其他班现有均分比较，属于估算，不是全年级精确重排。",
-            })
     rows.sort(key=lambda row: (row["exam_order"], row["metric_type"], row["metric"]))
     return rows
-
-
-def estimated_rank(value: float, comparators: Iterable[float | None]) -> int | None:
-    usable = [float(item) for item in comparators if item not in (None, 0)]
-    if not usable:
-        return None
-    return 1 + sum(1 for item in usable if item > value)
 
 
 def build_class_overview(class_averages: list[dict[str, Any]], target_class: str) -> list[dict[str, Any]]:
@@ -903,6 +466,9 @@ def build_class_overview(class_averages: list[dict[str, Any]], target_class: str
 
 
 def build_history_rows(class_overview: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """本班历史科目均分趋势（单学科化，阶段7）：只输出科目均分行，
+    不再输出主三门/五门总分均分行。
+    """
     rows: list[dict[str, Any]] = []
     for row in class_overview:
         for subject in SUBJECT_COLS:
@@ -916,60 +482,31 @@ def build_history_rows(class_overview: list[dict[str, Any]]) -> list[dict[str, A
                     "value": value,
                     "rank": "",
                 })
-        for total_type in TREND_TOTAL_TYPES:
-            value = row.get(f"{total_type}_avg")
-            rank = row.get(f"{total_type}_rank")
-            if value not in (None, 0):
-                rows.append({
-                    "exam": row["exam"],
-                    "exam_order": row["exam_order"],
-                    "metric_type": "总分均分",
-                    "metric": total_type,
-                    "value": value,
-                    "rank": rank,
-                })
     return rows
 
 
 def build_analysis(parsed: dict[str, Any], target_class: str) -> dict[str, Any]:
+    """构建分析结果（单学科化，阶段7）。
+
+    不再有 student_trends / focus_students / subject_communication /
+    target_rank_bands / uploaded_rank_band_summary（均依赖总分名次）。
+    只保留班级总览、平行班对比、学籍1科目均分估算、本班历史科目均分趋势。
+    """
     students = parsed["students"]
     score_long = parsed["score_long"]
-    # 单学科化（阶段7）：student_totals 已从 parse_inputs 退役；遗留 CLI 分析
-    # 管线接受空列表（趋势/分段等总分相关输出为空，不影响单科成绩）。
-    student_totals: list[dict[str, Any]] = []
     class_averages = parsed["class_averages"]
-    rank_bands = parsed["rank_bands"]
     class_overview = build_class_overview(class_averages, target_class)
-    student_trends = build_student_trends(student_totals, score_long, target_class)
-    focus_students = build_focus_students(student_trends)
-    subject_comm = build_subject_communication(focus_students, student_trends)
-    target_rank_bands = build_target_rank_bands(student_totals, target_class)
-    uploaded_rank_band_summary = aggregate_uploaded_rank_bands(rank_bands, target_class)
-    xueji1_analysis = build_xueji1_analysis(students, score_long, student_totals, class_averages, target_class)
+    xueji1_analysis = build_xueji1_analysis(students, score_long, class_averages, target_class)
     actual_class_averages = [row for row in class_averages if row.get("is_actual_class")]
     parallel = [row for row in actual_class_averages if row.get("class_type") == "平行班"]
     exams = available_exams(students + class_averages)
     latest = latest_exam(students + class_averages)
     previous = previous_exam_name(exams, latest)
     warnings = list(parsed["warnings"])
-    uploaded_count_by_exam_total = {
-        (row["exam"], row["total_type"]): row.get("raw_total")
-        for row in uploaded_rank_band_summary
-        if row.get("raw_total") is not None
-    }
-    for row in target_rank_bands:
-        uploaded_count = uploaded_count_by_exam_total.get((row["exam"], row["total_type"]))
-        if uploaded_count is not None and uploaded_count != row.get("student_count"):
-            warnings.append(
-                f"{row['exam']} {row['total_type']} 目标班学生明细可计算学籍排名人数为{row.get('student_count')}，"
-                f"上传名次段表人数为{uploaded_count}，请确认名次段表是否包含不同学籍口径。"
-            )
     if not students:
-        warnings.append("没有找到学生成绩表，学生趋势和重点名单不可用。")
+        warnings.append("没有找到学生成绩表，单科成绩分析不可用。")
     if not class_averages:
         warnings.append("没有找到班级均分表，班级对比不可用。")
-    if not rank_bands:
-        warnings.append("没有找到名次段表，只能用学生明细计算目标班名次段。")
     if class_overview and latest:
         latest_target = next((row for row in class_overview if row["exam"] == latest), None)
         if latest_target is None:
@@ -987,13 +524,7 @@ def build_analysis(parsed: dict[str, Any], target_class: str) -> dict[str, Any]:
         "parallel_comparison": parallel,
         "grade_reference": actual_class_averages,
         "history_rows": build_history_rows(class_overview),
-        "rank_bands": rank_bands,
-        "target_rank_bands": target_rank_bands,
-        "uploaded_rank_band_summary": uploaded_rank_band_summary,
         "xueji1_analysis": xueji1_analysis,
-        "student_trends": student_trends,
-        "focus_students": focus_students,
-        "subject_communication": subject_comm,
     }
 
 
@@ -1076,11 +607,8 @@ def make_notes_rows(analysis: dict[str, Any]) -> list[list[Any]]:
         ["项目", "说明"],
         ["目标班级", analysis["target_class"]],
         ["考试顺序", " -> ".join(analysis["exams"])],
-        ["总分进退步主指标", "学籍排名；排名数字变小为进步，变化>=80名为明显进退步。"],
-        ["波动风险", "三次及以上考试中学籍排名范围>=120名。"],
-        ["名次段", "高分段1-80；临界段400-500；均按学籍排名。"],
-        ["未考科目", "不记为0，不参与该科或该总分类型趋势。"],
-        ["学籍1估算", "本班学籍1均分与其他班现有均分比较，属于估算，不是全年级精确重排。"],
+        ["单科趋势", "按年级百分位判断，未考科目不参与比较；百分位降低为进步。"],
+        ["学籍1估算", "本班学籍1科目均分与其他班现有均分比较，属于估算，不是全年级精确重排。"],
         ["数据包", "CSV/JSON保留全量明细，支持后续聊天追问。"],
     ]
 
@@ -1095,17 +623,15 @@ def write_workbook(path: Path, analysis: dict[str, Any]) -> None:
     add_sheet(wb, "平行班对比", analysis["parallel_comparison"])
     add_sheet(wb, "全年级参考", analysis["grade_reference"])
     add_sheet(wb, "本班历史趋势", analysis["history_rows"])
-    rank_rows = analysis["target_rank_bands"] + analysis["uploaded_rank_band_summary"]
-    add_sheet(wb, "名次段分析", rank_rows)
     add_sheet(wb, "学籍1分析", analysis["xueji1_analysis"])
-    add_sheet(wb, "学生趋势明细", analysis["student_trends"])
-    add_sheet(wb, "重点关注名单", analysis["focus_students"])
-    add_sheet(wb, "科任沟通清单", analysis["subject_communication"])
     path.parent.mkdir(parents=True, exist_ok=True)
     wb.save(path)
 
 
 def summarize_class_change(class_overview: list[dict[str, Any]], latest: str | None, previous: str | None) -> list[str]:
+    """班级科目均分变化摘要（单学科化，阶段7）：只输出科目均分变化，
+    不再输出主三门/五门总分均分变化。
+    """
     if not latest:
         return ["未识别到最新考试。"]
     latest_row = next((row for row in class_overview if row["exam"] == latest), None)
@@ -1113,55 +639,32 @@ def summarize_class_change(class_overview: list[dict[str, Any]], latest: str | N
     if not latest_row:
         return [f"最新考试 {latest} 未找到目标班级均分。"]
     lines: list[str] = []
-    for total_type in TREND_TOTAL_TYPES:
-        avg = latest_row.get(f"{total_type}_avg")
-        rank = latest_row.get(f"{total_type}_rank")
+    for subject in SUBJECT_COLS:
+        avg = latest_row.get(f"{subject}_avg")
         if avg in (None, 0):
             continue
-        line = f"- {latest} {total_type}均分 {avg}，班级均分排名 {rank}"
-        if previous_row and previous_row.get(f"{total_type}_avg") not in (None, 0):
-            avg_delta = float(avg) - float(previous_row.get(f"{total_type}_avg"))
-            rank_prev = previous_row.get(f"{total_type}_rank")
-            if rank_prev not in (None, "") and rank not in (None, ""):
-                rank_delta = int(rank_prev) - int(rank)
-                line += f"，较{previous}均分变化 {avg_delta:.2f}，排名变化 {rank_delta:+d}"
-            else:
-                line += f"，较{previous}均分变化 {avg_delta:.2f}"
+        line = f"- {latest} {subject}均分 {avg}"
+        if previous_row and previous_row.get(f"{subject}_avg") not in (None, 0):
+            avg_delta = float(avg) - float(previous_row.get(f"{subject}_avg"))
+            line += f"，较{previous}变化 {avg_delta:.2f}"
         lines.append(line)
-    return lines or [f"{latest} 暂无可用总分均分。"]
-
-
-def top_focus_lines(focus: list[dict[str, Any]]) -> list[str]:
-    if not focus:
-        return ["暂无达到默认阈值的重点名单。"]
-    counts: Counter[str] = Counter()
-    for row in focus:
-        counts.update(split_zh_list(row.get("categories")))
-    lines = [f"- 重点名单合计: {len(focus)}人"]
-    lines.extend([f"- {category}: {counts[category]}人" for category in FOCUS_CATEGORIES if counts.get(category)])
-    for category in ["明显进步", "明显退步", "波动风险", "临界段", "严重偏科", "稳定优秀"]:
-        names = [
-            f"{row['name']}({row['total_types']})"
-            for row in focus
-            if category in split_zh_list(row.get("categories"))
-        ]
-        if names:
-            lines.append(f"- {category}名单: {'、'.join(names)}")
-    return lines
+    return lines or [f"{latest} 暂无可用科目均分。"]
 
 
 def summarize_xueji1(rows: list[dict[str, Any]], latest: str | None) -> list[str]:
+    """学籍1科目均分估算摘要（单学科化，阶段7）：只输出科目行，
+    不再输出主三门/五门总分行。
+    """
     if not latest:
         return ["无最新考试。"]
     latest_rows = [
         row
         for row in rows
         if row["exam"] == latest
-        and row["metric_type"] == "总分"
-        and row["metric"] in TREND_TOTAL_TYPES
+        and row["metric_type"] == "科目"
     ]
     if not latest_rows:
-        return ["最新考试暂无学籍1总分估算。"]
+        return ["最新考试暂无学籍1科目均分估算。"]
     lines = []
     for row in latest_rows:
         lines.append(
@@ -1186,16 +689,13 @@ def write_summary(path: Path, analysis: dict[str, Any]) -> None:
         lines.extend([f"- {warning}" for warning in analysis["warnings"]])
     else:
         lines.append("- 未发现关键数据质量问题。")
-    lines.extend(["", "## 班级总览"])
+    lines.extend(["", "## 班级科目均分"])
     lines.extend(summarize_class_change(analysis["class_overview"], latest, previous))
-    lines.extend(["", "## 学籍1估算"])
+    lines.extend(["", "## 学籍1科目估算"])
     lines.extend(summarize_xueji1(analysis["xueji1_analysis"], latest))
-    lines.extend(["", "## 重点名单概览"])
-    lines.extend(top_focus_lines(analysis["focus_students"]))
     lines.extend([
         "",
         "## 口径提醒",
-        "- 总分进退步按学籍排名判断，变化>=80名为明显进退步。",
         "- 单科趋势按年级百分位判断，未考科目不参与比较。",
         "- 学籍1排名变化是本班学籍1均分与其他班现有均分比较的估算，不是精确重排。",
     ])
@@ -1208,17 +708,9 @@ def write_data_package(out_dir: Path, analysis: dict[str, Any]) -> dict[str, str
     outputs = {
         "score_long": data_dir / "score_long.csv",
         "class_averages": data_dir / "class_averages.csv",
-        "rank_bands": data_dir / "rank_bands.csv",
-        "student_trends": data_dir / "student_trends.csv",
-        "focus_students": data_dir / "focus_students.csv",
-        "subject_communication": data_dir / "subject_communication.csv",
     }
     write_csv(outputs["score_long"], analysis["score_long"])
     write_csv(outputs["class_averages"], analysis["class_averages"])
-    write_csv(outputs["rank_bands"], analysis["rank_bands"])
-    write_csv(outputs["student_trends"], analysis["student_trends"])
-    write_csv(outputs["focus_students"], analysis["focus_students"])
-    write_csv(outputs["subject_communication"], analysis["subject_communication"])
     json_path = data_dir / "analysis.json"
     serializable = {
         key: value
@@ -1231,11 +723,7 @@ def write_data_package(out_dir: Path, analysis: dict[str, Any]) -> dict[str, str
             "previous_exam",
             "warnings",
             "class_overview",
-            "target_rank_bands",
             "xueji1_analysis",
-            "student_trends",
-            "focus_students",
-            "subject_communication",
         }
     }
     json_path.write_text(json.dumps(serializable, ensure_ascii=False, indent=2, default=str), encoding="utf-8")

@@ -970,6 +970,19 @@ def test_sync_members_exception_not_silently_swallowed(tmp_path):
         assert not out["result"].get("parsed_ok") or "sync" in (out["result"].get("message") or "").lower(), (
             f"sync异常不应被静默吞掉, 实际result={out['result']}"
         )
+        # §2：异常后新 Session 断言零残留——fresh DB 基线为 0。
+        # 不能只检查 parsed_ok False，必须确认事务回滚干净。
+        from app.db.models import Exam, Upload, SubjectScore, TeachingClassMember
+        db.expire_all()
+        exam_count = db.query(Exam).count()
+        upload_count = db.query(Upload).count()
+        score_count = db.query(SubjectScore).count()
+        member_count = db.query(TeachingClassMember).count()
+        db.close()
+        assert exam_count == 0, f"异常后不应残留Exam, 实际{exam_count}"
+        assert upload_count == 0, f"异常后不应残留Upload, 实际{upload_count}"
+        assert score_count == 0, f"异常后不应残留SubjectScore, 实际{score_count}"
+        assert member_count == 0, f"异常后不应残留TeachingClassMember, 实际{member_count}"
         print(json.dumps({"ok": True}))
     """)
 
@@ -982,26 +995,387 @@ def test_sync_members_exception_not_silently_swallowed(tmp_path):
 # ════════════════════════════════════════════════════════════════
 
 class TestLegacyAnalysisModulesCleaned:
-    """旧遗留 analysis 模块（无生产调用者）不得保留 TotalScore 业务查询。
+    """旧遗留 analysis 模块（无生产调用者）已彻底删除，不再以空壳/返回空 list
+    的方式保留旧契约。
 
     trends.py 是例外：chat/tools.py（本卡禁止修改）仍调用 compute_student_trend，
-    该函数读取 TotalScore，故 trends.py 暂保留；其余三个无生产调用者的模块
-    （focus_list / cross_year / class_compare）必须清除 TotalScore 引用。
+    该函数读取 TotalScore，故 trends.py 暂保留为明确的集成冲突项；待阶段6 chat
+    合并后一并删除。其余三个无生产调用者的模块（focus_list / cross_year /
+    class_compare）已从 app 生产树移除，analysis/__init__ 不再导入它们的符号。
     """
 
-    # 无生产调用者、可安全清除 TotalScore 的遗留模块
-    CLEAN_MODULES = [
+    # 已删除的空壳/多学科遗留模块
+    DELETED_MODULES = [
         "app/analysis/focus_list.py",
         "app/analysis/cross_year.py",
         "app/analysis/class_compare.py",
     ]
 
-    def test_no_totalscore_in_clean_legacy_modules(self):
-        import app.analysis.focus_list as m1
-        import app.analysis.cross_year as m2
-        import app.analysis.class_compare as m4
-        src_files = [m1.__file__, m2.__file__, m4.__file__]
-        for f in src_files:
-            with open(f) as fh:
-                src = fh.read()
-            assert "TotalScore" not in src, f"{f} 不得引用 TotalScore（已退役）"
+    def test_deleted_modules_no_longer_exist(self):
+        import os
+        import app.analysis as pkg
+
+        pkg_dir = os.path.dirname(pkg.__file__)
+        for rel in self.DELETED_MODULES:
+            path = os.path.join(os.path.dirname(pkg_dir), rel.replace("app/analysis/", ""))
+            assert not os.path.exists(path), f"{rel} 应已删除（空壳遗留模块）"
+
+    def test_init_no_longer_imports_deleted_symbols(self):
+        import importlib
+        import app.analysis as pkg
+
+        importlib.reload(pkg)
+        for sym in ("build_focus_list", "compute_cross_year_trend", "compute_class_compare"):
+            assert not hasattr(pkg, sym), (
+                f"app.analysis 不应再导出 {sym}（对应空壳模块已删除）"
+            )
+
+    def test_deleted_modules_not_importable(self):
+        for mod in ("app.analysis.focus_list", "app.analysis.cross_year", "app.analysis.class_compare"):
+            try:
+                __import__(mod)
+            except ModuleNotFoundError:
+                continue
+            raise AssertionError(f"{mod} 应已删除、不可导入")
+
+
+# ════════════════════════════════════════════════════════════════
+#  §8/§9 CLI/辅助管线 analyze_exam_scores 彻底删除总分标识/参数/输出
+# ════════════════════════════════════════════════════════════════
+
+class TestCliPipelineTotalScoreRemoved:
+    """analyze_exam_scores.py（CLI/辅助路径）按阶段7目标彻底删除总分相关
+    生成、参数、管线和 CSV/JSON 字段，不得通过传空 list 保留旧契约。
+    """
+
+    REMOVED_IDENTIFIERS = [
+        "TOTAL_COLS",
+        "TREND_TOTAL_TYPES",
+        "CLASS_AVG_TOTAL_COLS",
+        "detect_total_type",
+        "parse_rank_bands",
+        "segment_for_rank",
+        "trend_label",
+        "build_student_trends",
+        "build_focus_students",
+        "build_subject_communication",
+        "build_target_rank_bands",
+        "aggregate_uploaded_rank_bands",
+        "FOCUS_CATEGORIES",
+        "PROGRESS_RANK_THRESHOLD",
+        "VOLATILITY_RANK_THRESHOLD",
+        "HIGH_RANK_MAX",
+        "CRITICAL_RANK_MIN",
+        "CRITICAL_RANK_MAX",
+    ]
+
+    KEPT_IDENTIFIERS = [
+        "parse_student_scores",
+        "parse_class_averages",
+        "classify_workbook",
+        "build_xueji1_analysis",
+        "build_history_rows",
+        "build_class_overview",
+        "recommended_subjects",
+        "run_analysis",
+    ]
+
+    def test_removed_identifiers_gone(self):
+        import app.ingest.analyze_exam_scores as m
+        for sym in self.REMOVED_IDENTIFIERS:
+            assert not hasattr(m, sym), f"{sym} 应已从 analyze_exam_scores 删除"
+
+    def test_kept_identifiers_present(self):
+        import app.ingest.analyze_exam_scores as m
+        for sym in self.KEPT_IDENTIFIERS:
+            assert hasattr(m, sym), f"{sym} 应保留（单科分析仍需要）"
+
+    def test_no_total_score_references_in_source(self):
+        """源码不得出现 TotalScore 模型引用（文档注释中解释已删除的符号除外）。"""
+        import inspect
+        import app.ingest.analyze_exam_scores as m
+        src = inspect.getsource(m)
+        # 只禁止实际模型引用模式，允许文档/注释中提及符号名
+        for forbidden in ("import TotalScore", "TotalScore)", "TotalScore,", "TotalScore."):
+            assert forbidden not in src, f"analyze_exam_scores 源码不得出现 {forbidden}"
+
+    def test_parse_inputs_no_rank_bands_in_result(self):
+        """parse_inputs 结果不再包含 rank_bands 键（名次段表口径已退役）。"""
+        import app.ingest.analyze_exam_scores as m
+        result = m.parse_inputs([])
+        assert "rank_bands" not in result, (
+            f"parse_inputs 结果不应含 rank_bands 键, 实际 keys={list(result.keys())}"
+        )
+
+    def test_recommended_subjects_no_total_percentile_param(self):
+        """recommended_subjects 不再接收 total_percentile 参数（总分百分位退役）。"""
+        import inspect
+        import app.ingest.analyze_exam_scores as m
+        sig = inspect.signature(m.recommended_subjects)
+        assert "total_percentile" not in sig.parameters, (
+            "recommended_subjects 不应再有 total_percentile 参数"
+        )
+
+    def test_build_analysis_no_total_output_keys(self):
+        """build_analysis 结果不含 student_trends/focus_students/rank_bands 等总分输出键。"""
+        import app.ingest.analyze_exam_scores as m
+        from pathlib import Path
+        import tempfile
+        # 用空输入构造 parsed，build_analysis 应可工作且不含总分输出键
+        parsed = m.parse_inputs([])
+        if not parsed["students"]:
+            parsed["students"] = [{"exam": "test", "exam_order": 1, "student_id": "x",
+                                   "class": "1", "xueji": "1", "name": "n", "source_file": "f"}]
+        result = m.build_analysis(parsed, "1")
+        for key in ("student_trends", "focus_students", "subject_communication",
+                     "target_rank_bands", "uploaded_rank_band_summary", "rank_bands"):
+            assert key not in result, f"build_analysis 结果不应含 {key} 键"
+
+
+# ════════════════════════════════════════════════════════════════
+#  §5/§6 sync_by_class_num 与 candidate_classes 的单学科领域约束
+# ════════════════════════════════════════════════════════════════
+
+def test_sync_by_class_num_filters_by_teacher_subject(tmp_path):
+    """sync_by_class_num 只取教师任教学科 + 真实分数的学号；
+    旧库含他科行不得聚合进行政班成员。"""
+    setup = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import Teacher, Exam, SubjectScore, TeachingClass
+        t = Teacher(subject="数学"); db.add(t); db.flush()
+        e = Exam(name="考试", grade=1, semester="下", exam_type="期中", exam_date="2025-04")
+        db.add(e); db.flush()
+        # 数学真实分（s1）、物理真实分（s2，他科）、数学 percentile-only（s3，无真实分）
+        db.add(SubjectScore(exam_id=e.id, student_id="s1", subject="数学", raw_score=90, name="甲", class_num=1))
+        db.add(SubjectScore(exam_id=e.id, student_id="s2", subject="物理", raw_score=80, name="乙", class_num=1))
+        db.add(SubjectScore(exam_id=e.id, student_id="s3", subject="数学", grade_percentile=50.0, name="丙", class_num=1))
+        db.add(TeachingClass(grade=1, kind="行政", label="1"))
+        db.commit(); db.close()
+    """)
+
+    assert_code = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import TeachingClass, TeachingClassMember
+        from app.teaching.service import sync_by_class_num
+        tc = db.query(TeachingClass).filter(TeachingClass.label=="1", TeachingClass.kind=="行政").first()
+        count = sync_by_class_num(db, tc)
+        db.commit()
+        members = {m.student_id for m in db.query(TeachingClassMember).filter(TeachingClassMember.teaching_class_id==tc.id).all()}
+        db.close()
+        assert "s1" in members, f"数学真实分应入成员, 实际{members}"
+        assert "s2" not in members, f"物理他科不应入成员, 实际{members}"
+        assert "s3" not in members, f"percentile-only不应入成员, 实际{members}"
+        print(json.dumps({"ok": True}))
+    """)
+
+    proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+    _assert_ok(proc)
+
+
+def test_candidate_classes_raises_without_teacher_subject(tmp_path):
+    """candidate_classes 无 Teacher.subject 时领域错误，不退化为全学科。"""
+    setup = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import Exam, SubjectScore
+        e = Exam(name="考试", grade=2, semester="上", exam_type="月考", exam_date="2024-09")
+        db.add(e); db.flush()
+        db.add(SubjectScore(exam_id=e.id, student_id="s1", subject="数学", raw_score=90, name="甲", class_num=1))
+        db.add(SubjectScore(exam_id=e.id, student_id="s2", subject="物理", raw_score=80, name="乙", class_num=2))
+        db.commit(); db.close()
+    """)
+
+    assert_code = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.teaching.service import candidate_classes
+        try:
+            result = candidate_classes(db, grade=2)
+        except ValueError as e:
+            print(json.dumps({"ok": True, "error": str(e)}))
+        else:
+            raise AssertionError(f"无Teacher.subject应领域错误, 实际返回{result}")
+        finally:
+            db.close()
+    """)
+
+    proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+    _assert_ok(proc)
+
+
+# ════════════════════════════════════════════════════════════════
+#  §4 parser 成员查询只加教师学科 + 真实分数行
+# ════════════════════════════════════════════════════════════════
+
+def test_sync_parser_members_filter_subject_and_real_score(tmp_path):
+    """sync_members_after_upload 的 parser 成员只加教师学科 + 真实分数行；
+    旧他科 / percentile-only 行不加入教学班成员。"""
+    setup = _MAKE_GRADE23_XLSX + textwrap.dedent("""\
+        import os
+        from app.db.models import Teacher, TeachingClass, Exam, SubjectScore
+        db = SessionLocal()
+        t = Teacher(subject="数学", name="数学老师")
+        db.add(t); db.commit()
+        db.add(TeachingClass(grade=2, kind="教学", subject="数学", label="数A1"))
+        db.commit()
+        # 预置一场旧考试，含他科（物理）行和数学 percentile-only 行
+        old = Exam(name="旧考", grade=2, semester="上", exam_type="月考", exam_date="2024-09")
+        db.add(old); db.flush()
+        db.add(SubjectScore(exam_id=old.id, student_id="7240200", subject="物理", raw_score=70, name="旧他科", class_label="数A1"))
+        db.add(SubjectScore(exam_id=old.id, student_id="7240201", subject="数学", grade_percentile=50.0, name="残留", class_label="数A1"))
+        db.commit(); db.close()
+
+        raw_dir = os.path.join(os.environ["EXAM_TRACKER_DIR"], "raw")
+        os.makedirs(raw_dir, exist_ok=True)
+        xlsx_path = os.path.join(raw_dir, "高二2025学年第二学期期中考试学生成绩明细表.xlsx")
+        # 新上传：数学真实分，教学班标签 数A1
+        make_grade23_xlsx(xlsx_path, [
+            ["7240101","01","1","卞幻", 97,108,120, 48,52, None,None,
+             None,None,None,None,None,None,None,None,
+             174, 325.5,"25.08%",283, 499.5,"30.01%",291,
+             "75.08%","40.12%","35.45%", "数A1"],
+        ])
+    """)
+
+    assert_code = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import TeachingClass, TeachingClassMember
+        from app.ingest.router import parse_and_store
+
+        parsed = {"grade":2,"semester":"上","exam_type":"期中","sort_key":"2025-11","canonical_name":"高二2025学年第二学期期中考试"}
+        xlsx_path = os.path.join(os.environ["EXAM_TRACKER_DIR"], "raw", "高二2025学年第二学期期中考试学生成绩明细表.xlsx")
+        out = parse_and_store(xlsx_path, "f.xlsx", parsed, 2)
+        assert out["result"]["parsed_ok"], out["result"]
+
+        tc = db.query(TeachingClass).filter(TeachingClass.subject=="数学", TeachingClass.label=="数A1").first()
+        members = {m.student_id for m in db.query(TeachingClassMember).filter(TeachingClassMember.teaching_class_id==tc.id).all()}
+        db.close()
+        assert "7240101" in members, f"新上传数学真实分应入成员, 实际{members}"
+        assert "7240200" not in members, f"旧他科(物理)行不应入成员, 实际{members}"
+        assert "7240201" not in members, f"旧percentile-only行不应入成员, 实际{members}"
+        print(json.dumps({"ok": True}))
+    """)
+
+    proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+    _assert_ok(proc)
+
+
+# ════════════════════════════════════════════════════════════════
+#  §1 existing-exam 回滚：source_files 改动也回滚
+# ════════════════════════════════════════════════════════════════
+
+def test_existing_exam_source_files_rolled_back_on_sync_failure(tmp_path):
+    """已有 exam 的 source_files 追加在 sync 异常后也回滚（不残留半提交）。"""
+    setup = _MAKE_GRADE23_XLSX + textwrap.dedent("""\
+        import os
+        from app.db.models import Teacher, Exam, SubjectScore
+        db = SessionLocal()
+        db.add(Teacher(subject="数学", name="数学老师")); db.flush()
+        # 预置一场已有考试（一个 source_file）
+        e = Exam(name="高二2025学年第二学期期中考试", grade=2, semester="上",
+                 exam_type="期中", exam_date="2025-11", source_files=["/old/path.xlsx"])
+        db.add(e); db.flush()
+        db.add(SubjectScore(exam_id=e.id, student_id="7240099", subject="数学",
+                            raw_score=85, name="旧生", class_num=1, class_label="数A1"))
+        db.commit(); db.close()
+
+        raw_dir = os.path.join(os.environ["EXAM_TRACKER_DIR"], "raw")
+        os.makedirs(raw_dir, exist_ok=True)
+        xlsx_path = os.path.join(raw_dir, "高二2025学年第二学期期中考试学生成绩明细表.xlsx")
+        make_grade23_xlsx(xlsx_path, [
+            ["7240101","01","1","卞幻", 97,108,120, 48,52, None,None,
+             None,None,None,None,None,None,None,None,
+             174, 325.5,"25.08%",283, 499.5,"30.01%",291,
+             "75.08%","40.12%","35.45%", "数A1"],
+        ])
+    """)
+
+    assert_code = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import Exam, Upload, SubjectScore, TeachingClassMember
+        from app.ingest.router import parse_and_store
+        import app.teaching.service as svc
+
+        original = svc.sync_members_after_upload
+        svc.sync_members_after_upload = lambda d, e: (_ for _ in ()).throw(RuntimeError("sync boom"))
+        try:
+            parsed = {"grade":2,"semester":"上","exam_type":"期中","sort_key":"2025-11","canonical_name":"高二2025学年第二学期期中考试"}
+            xlsx_path = os.path.join(os.environ["EXAM_TRACKER_DIR"], "raw", "高二2025学年第二学期期中考试学生成绩明细表.xlsx")
+            out = parse_and_store(xlsx_path, "f.xlsx", parsed, 2)
+        finally:
+            svc.sync_members_after_upload = original
+
+        db.expire_all()
+        # 基线：旧 exam 仍在（1 条），source_files 不变（未追加新 path）
+        exam = db.query(Exam).first()
+        assert exam is not None, "旧 exam 应保留"
+        assert exam.source_files == ["/old/path.xlsx"], f"source_files 不应变, 实际{exam.source_files}"
+        # 新增的 Upload / SubjectScore / TeachingClassMember 应为 0（回滚干净）
+        upload_count = db.query(Upload).count()
+        score_count = db.query(SubjectScore).count()
+        member_count = db.query(TeachingClassMember).count()
+        db.close()
+        assert upload_count == 0, f"不应新增Upload, 实际{upload_count}"
+        assert score_count == 1, f"应有旧1行数学(基线), 实际{score_count}"
+        assert member_count == 0, f"不应残留TeachingClassMember, 实际{member_count}"
+        print(json.dumps({"ok": True}))
+    """)
+
+    proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+    _assert_ok(proc)
+
+
+# ════════════════════════════════════════════════════════════════
+#  §8/§9 行为：单学科输入仍可生成完整数据包（无总分输出）
+# ════════════════════════════════════════════════════════════════
+
+def test_single_subject_input_produces_data_package(tmp_path):
+    """单学科（数学）学生成绩明细表输入 run_analysis，仍应生成 workbook、
+    summary、score_long.csv、class_averages.csv、analysis.json，且 JSON 结果
+    不含任何总分输出键（student_trends/focus_students/rank_bands 等）。"""
+    from openpyxl import Workbook
+    from app.ingest.analyze_exam_scores import run_analysis
+
+    d = tmp_path / "inputs"
+    d.mkdir()
+    # 高二单科（数学）学生成绩明细表
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "学生成绩明细"
+    ws.cell(2, 1, "学号")
+    ws.cell(2, 2, "班级")
+    ws.cell(2, 3, "学籍")
+    ws.cell(2, 4, "姓名")
+    ws.cell(2, 7, "数学")  # SUBJECT_COLS: 数学=(7,8)
+    ws.cell(2, 30, "教学班")
+    ws.append([])
+    ws.append(["7240101", "01", "1", "卞幻", None, None, 97, None,
+               None, None, None, None, None, None, None, None, None, None,
+               None, None, None, None, None, None, None, None, None, None, None, "数A1"])
+    ws.append(["7240102", "01", "1", "李四", None, None, 85, None,
+               None, None, None, None, None, None, None, None, None, None,
+               None, None, None, None, None, None, None, None, None, None, None, "数A1"])
+    p1 = d / "高二2025学年第二学期期中考试学生成绩明细表.xlsx"
+    wb.save(p1)
+
+    out_dir = tmp_path / "out"
+    result = run_analysis([p1], out_dir, "1")
+
+    # 数据包核心产物存在
+    assert os.path.exists(result["workbook"]), "workbook 应生成"
+    assert os.path.exists(result["summary"]), "summary 应生成"
+    assert "score_long" in result["data"], "data 应含 score_long"
+    assert os.path.exists(result["data"]["score_long"]), "score_long.csv 应生成"
+    assert os.path.exists(result["data"]["analysis_json"]), "analysis.json 应生成"
+
+    # JSON 结果不含任何总分输出键
+    with open(result["data"]["analysis_json"]) as f:
+        analysis = json.load(f)
+    for key in ("student_trends", "focus_students", "subject_communication",
+                "target_rank_bands", "uploaded_rank_band_summary", "rank_bands"):
+        assert key not in analysis, f"analysis.json 不应含 {key}（总分输出已退役）"
+
+    # score_long.csv 含数学行（单科输入仍产出有效数据）
+    import csv
+    with open(result["data"]["score_long"], encoding="utf-8-sig") as f:
+        rows = list(csv.DictReader(f))
+    subjects = {r.get("subject") for r in rows}
+    assert "数学" in subjects, f"score_long 应含数学行, 实际 subjects={subjects}"

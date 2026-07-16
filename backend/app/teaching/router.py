@@ -293,7 +293,11 @@ def sync_by_class_num(tc_id: int, db=Depends(get_db)):
     tc = _get_or_404(db, TeachingClass, id=tc_id)
     if tc.kind != "行政":
         raise HTTPException(400, "仅行政班（高一，label 为数字）支持按行政班号同步")
-    count = service.sync_by_class_num(db, tc)
+    try:
+        count = service.sync_by_class_num(db, tc)
+    except ValueError as e:
+        # §5：无教师任教学科 → 409 域错误，不退化为全学科聚合。
+        raise HTTPException(409, str(e))
     db.commit()
     return {"ok": True, "member_count": count, "members": _member_profile(db, tc_id)}
 
@@ -302,7 +306,11 @@ def sync_by_class_num(tc_id: int, db=Depends(get_db)):
 
 @router.get("/candidate-classes")
 def candidate_classes(grade: int, db=Depends(get_db)):
-    return service.candidate_classes(db, grade)
+    try:
+        return service.candidate_classes(db, grade)
+    except ValueError as e:
+        # §6：无教师任教学科 → 409 域错误，不退化为全学科候选。
+        raise HTTPException(409, str(e))
 
 
 @router.get("/current")

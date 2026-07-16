@@ -182,10 +182,10 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
                     grade_score=ss.get("grade_score"),
                     grade_percentile=ss.get("grade_percentile"),
                 ))
-
-            db.commit()
-            # §9：上传钩子异常不静默吞错——让事务 rollback，避免成绩已提交而
-            # 成员同步失败的半成品。sync_members_after_upload 内部不自 commit。
+            # §1/§9：写库后只 flush（分配 id、暴露约束错误），不 commit。
+            # sync_members_after_upload 成功后才做唯一一次 commit。任何异常
+            # rollback 后 Exam/Upload/SubjectScore/TeachingClassMember 全部不留。
+            db.flush()
             from app.teaching.service import sync_members_after_upload
             sync_members_after_upload(db, exam)
             db.commit()
@@ -250,7 +250,8 @@ def parse_and_store(file_path: str, filename: str, parsed: dict, grade: int) -> 
                     subject_averages=subj_avgs,
                     total_averages={},
                 ))
-
+            # §1：写库后单一 commit；class_averages 路径无 sync 钩子，异常
+            # rollback 后 Exam/Upload/ClassAverage 全部不留（含 source_files 改动）。
             db.commit()
             out["result"] = {
                 "filename": filename,

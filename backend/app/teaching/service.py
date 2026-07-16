@@ -636,15 +636,29 @@ def sync_by_class_num(db, tc) -> int:
     """高一/行政班：按 int(label) 从成绩库重算成员（仅覆盖 source=class_num 行，
     保留 manual/roster/parser）。返回成员总数。
 
-    单学科化（阶段7）：不再内部 commit——由调用方（sync_members_after_upload /
-    parse_and_store）统一控制事务边界，保证上传的原子性。
+    单学科化（阶段7）：
+    - 不再内部 commit——由调用方（sync_members_after_upload / parse_and_store /
+      teaching router）统一控制事务边界。
+    - 成员查询按 **教师唯一任教学科**（Teacher.subject）过滤 SubjectScore，且只取
+      raw_score / grade_score 至少一个非空的真实分数行（§5）。旧库含他科 /
+      percentile-only 残留行不得聚合进来。无 Teacher.subject 时直接拒绝（不做
+      全学科聚合的退化）。
     """
-    from app.db.models import Exam, SubjectScore, TeachingClassMember
+    from app.db.models import Exam, SubjectScore, Teacher, TeachingClassMember
 
     if tc.kind != "行政":
         return db.query(TeachingClassMember).filter(
             TeachingClassMember.teaching_class_id == tc.id
         ).count()
+
+    teacher = db.query(Teacher).first()
+    teacher_subj = teacher.subject if teacher else None
+    if not teacher_subj:
+        # §5：无教师任教学科 → 拒绝，不得退化为全学科聚合。
+        raise ValueError(
+            "未配置教师任教学科（Teacher.subject），无法按行政班号同步单学科成员"
+        )
+
     try:
         cn = int(tc.label)
     except (TypeError, ValueError):
@@ -652,12 +666,19 @@ def sync_by_class_num(db, tc) -> int:
             TeachingClassMember.teaching_class_id == tc.id
         ).count()
 
+    # §5：只取教师任教学科 + 真实分数（raw/grade 至少一个非空）的学号，
+    # 不把旧库他科 / percentile-only 行聚合进来。
     ids = {
         r[0]
         for r in (
             db.query(SubjectScore.student_id)
             .join(Exam, Exam.id == SubjectScore.exam_id)
-            .filter(Exam.grade == tc.grade, SubjectScore.class_num == cn)
+            .filter(
+                Exam.grade == tc.grade,
+                SubjectScore.class_num == cn,
+                SubjectScore.subject == teacher_subj,
+                (SubjectScore.raw_score.isnot(None)) | (SubjectScore.grade_score.isnot(None)),
+            )
             .distinct()
             .all()
         )
@@ -681,9 +702,15 @@ def sync_members_after_upload(db, exam) -> None:
     """上传新考试后：对 kind=行政 班按 class_num 重算成员；对成绩带 class_label
     的，把对应学号补为 source=parser 成员（不覆盖已有 manual/roster）。
 
-    单学科化（阶段7）：只维护当前教师任教学科的 TeachingClass。行政班（无 subject）
-    仍按 class_num 同步；教学班只在 tc.subject == 教师任教学科 时维护，他科教学班
-    不被扫描。不再内部 commit——由调用方（parse_and_store）统一控制事务边界。
+    单学科化（阶段7）：
+    - 无 Teacher.subject → 直接领域错误（不得把 subject 为空/他科班当当前班）。
+    - 教学班只在 tc.subject == 教师任教学科 时维护，他科教学班不被扫描（§3）。
+    - 行政班（tc.subject=None）仍按 class_num 同步，但 sync_by_class_num 内部已按
+      Teacher.subject + 真实分数过滤，不会全学科聚合。
+    - parser 成员查询必须加 SubjectScore.subject == teacher.subject 且
+      raw_score/grade_score 至少一个非空（§4）；existing exam 里的旧他科 /
+      percentile-only 行不得加入成员。
+    - 不再内部 commit——由调用方（parse_and_store）统一控制事务边界。
     """
     from app.db.models import SubjectScore, Teacher, TeachingClass, TeachingClassMember
 
@@ -691,17 +718,23 @@ def sync_members_after_upload(db, exam) -> None:
     teacher = db.query(Teacher).first()
     if teacher:
         teacher_subj = teacher.subject
+    # §3：无教师任教学科 → 领域错误，不得退化为全学科聚合。
+    if not teacher_subj:
+        raise ValueError(
+            "未配置教师任教学科（Teacher.subject），无法确定单学科成员同步边界"
+        )
 
     classes = (
         db.query(TeachingClass).filter(TeachingClass.grade == exam.grade).all()
     )
     for tc in classes:
-        # §7：教学班只维护当前教师 subject 的班；行政班（无 subject）不受影响。
-        if tc.kind == "教学" and teacher_subj and tc.subject != teacher_subj:
+        # §3：教学班只维护当前教师 subject 的班；他科教学班跳过。
+        if tc.kind == "教学" and tc.subject != teacher_subj:
             continue
         if tc.kind == "行政":
             sync_by_class_num(db, tc)
-        # parser 来源：本考试里 class_label 命中本班标签的学号自动加入
+        # parser 来源：本考试里 class_label 命中本班标签、且为教师任教学科 +
+        # 真实分数的学号自动加入（§4）。旧他科/percentile-only 行不加入。
         existing = {
             r[0]
             for r in db.query(TeachingClassMember.student_id)
@@ -715,6 +748,8 @@ def sync_members_after_upload(db, exam) -> None:
                 .filter(
                     SubjectScore.exam_id == exam.id,
                     SubjectScore.class_label == tc.label,
+                    SubjectScore.subject == teacher_subj,
+                    (SubjectScore.raw_score.isnot(None)) | (SubjectScore.grade_score.isnot(None)),
                 )
                 .distinct()
                 .all()
@@ -735,6 +770,7 @@ def candidate_classes(db, grade: int) -> dict:
 
     单学科化（阶段7）：只返回当前教师任教学科有真实分数（raw_score / grade_score
     至少一个非空）的班号/教学班标签。旧库含他科 SubjectScore 行不得进入设置页。
+    无 Teacher.subject 时直接领域错误（§6），不得退化为全学科。
     """
     from app.db.models import Exam, SubjectScore, Teacher
     from sqlalchemy import distinct
@@ -743,13 +779,16 @@ def candidate_classes(db, grade: int) -> dict:
     teacher = db.query(Teacher).first()
     if teacher:
         teacher_subj = teacher.subject
-
-    subj_filter = []
-    if teacher_subj:
-        subj_filter.append(SubjectScore.subject == teacher_subj)
-        subj_filter.append(
-            (SubjectScore.raw_score.isnot(None)) | (SubjectScore.grade_score.isnot(None))
+    # §6：无教师任教学科 → 领域错误，不得 subj_filter=[] 退化为全学科。
+    if not teacher_subj:
+        raise ValueError(
+            "未配置教师任教学科（Teacher.subject），无法确定单学科候选班边界"
         )
+
+    subj_filter = [
+        SubjectScore.subject == teacher_subj,
+        (SubjectScore.raw_score.isnot(None)) | (SubjectScore.grade_score.isnot(None)),
+    ]
 
     class_nums = sorted(
         {
