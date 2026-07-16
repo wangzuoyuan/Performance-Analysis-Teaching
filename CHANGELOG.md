@@ -2,6 +2,25 @@
 
 本项目所有值得注意的变更记录于此。版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.0] - 2026-07-16
+
+### 破坏性变更
+- 应用从班主任多学科分析重构为**任课教师唯一学科、多教学班**分析；页面、API、导出、报告和 AI 工具不再提供总分、多学科矩阵或跨学科组合统计。
+- `teaching_class_id` 成为教学班硬边界；未指定时仅表示当前学科所有合法教学班成员的去重并集，不再退化为全年级。
+- 各教学班使用独立 competition ranking；高二/高三选考科目使用 `grade_score`，其他情况使用 `raw_score`。
+
+### 数据与兼容
+- 新上传只持久化教师当前任教学科，parser 不再生成 `total_scores`、`student_totals` 或 `total_averages` 契约。
+- `TotalScore` 仅保留旧 SQLite 启动、备份/恢复及整场考试删除兼容，不参与生产业务读写，也不会自动删除历史数据。
+- 上传与成员同步合并为单事务，失败后不残留 `Exam`、`Upload` 或 `SubjectScore` 半成品。
+
+### 范围与质量
+- Dashboard、教学班对比、WeeklyFocus、作业相关性、学生画像及 Chat 工具统一限制为当前学科和合法教学班成员；合法 `_anon:` 与无成绩成员在作业、档案和空画像中继续保留。
+- 新增教学班越权、跨学科诱饵、身份别名、空成绩成员、事务故障注入、旧库兼容和 parser 契约回归测试。
+- 更新 README、AGENTS 与 CLAUDE 开发说明；前端生产构建与完整后端回归已验证。
+
+[2.0.0]: https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases/tag/v2.0.0
+
 ## [1.0.4] - 2026-07-08
 
 ### 变更
