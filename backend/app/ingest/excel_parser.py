@@ -225,9 +225,6 @@ def normalize_grade1_class_averages(file_path: Path, info: dict[str, Any]) -> di
                     for subject in subjects
                     if row.get(f"{subject}_avg") is not None
                 },
-                # 阶段7：TotalScore 退役，total_averages 恒空。analyze_exam_scores
-                # 的 parse_class_averages 不再生成 {total_type}_avg 字段。
-                "total_averages": {},
             }
         )
     return {"kind": "class_averages", "class_averages": class_averages}
@@ -302,13 +299,11 @@ def parse_excel_grade23_class_averages(path: Path) -> dict:
     class_col = None
     teacher_col = None
     subject_cols: dict[str, int] = {}
-    total_cols: dict[str, int] = {}
 
     for col, (top, sub) in enumerate(zip(top_headers, sub_headers), start=1):
         normalized_top = top.replace(" ", "")
         normalized_sub = sub.replace(" ", "")
         normalized_sub_type = normalized_sub.removesuffix("分")
-        is_score_total_col = normalized_sub in {"", "分数", "原始分", "总分"}
 
         if normalized_top in {"班型", "班级类型"}:
             class_type_col = col
@@ -336,12 +331,6 @@ def parse_excel_grade23_class_averages(path: Path) -> dict:
         elif normalized_top in GRADE23_CLASS_AVG_ELECTIVE_SUBJECTS and normalized_sub_type in {"原始", "等级"}:
             subject = GRADE23_SHORT_SUBJECTS.get(normalized_top, normalized_top)
             subject_cols[f"{subject}_{normalized_sub_type}"] = col
-        elif normalized_top in {"加3同均分", "加三均分", "+3总分", "+3", "加3"} and is_score_total_col:
-            total_cols["+3"] = col
-        elif normalized_top in {"主三门", "主三门总分"} and is_score_total_col:
-            total_cols["主三门"] = col
-        elif ("3+3" in normalized_top or normalized_top.startswith("所有")) and is_score_total_col:
-            total_cols["3+3"] = col
 
     if class_col is None:
         return {"kind": "unknown", "message": "班级均分表缺少班级列"}
@@ -369,11 +358,6 @@ def parse_excel_grade23_class_averages(path: Path) -> dict:
             for subject, col in subject_cols.items()
             if (value := number(ws.cell(row_idx, col).value)) is not None
         }
-        total_averages = {
-            total_type: value
-            for total_type, col in total_cols.items()
-            if (value := number(ws.cell(row_idx, col).value)) is not None
-        }
 
         class_averages.append(
             {
@@ -382,7 +366,6 @@ def parse_excel_grade23_class_averages(path: Path) -> dict:
                 "class_label": row_class_label,
                 "teacher_name": clean(ws.cell(row_idx, teacher_col).value) if teacher_col else None,
                 "subject_averages": subject_averages,
-                "total_averages": total_averages,
             }
         )
 

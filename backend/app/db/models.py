@@ -81,9 +81,8 @@ class TotalScore(Base):
     该表/模型仅保留以兼容旧 SQLite 库（旧库含历史 total_score 行）与整场
     删除级联清理。新上传（ingest/router.parse_and_store）不再写入此表；
     生产业务分析（analysis/router.py）不再读取此表。
-    仍允许：ORM 模型定义、旧库启动建表、删除考试时级联清理旧关联行、
-    chat/tools.py（独立卡片，本卡不修改）的历史趋势查询。生产业务读写
-    不得新增对 TotalScore 的依赖。
+    仍允许：ORM 模型定义、旧库启动建表、备份/恢复与删除考试时级联清理
+    旧关联行。生产业务读写不得新增对 TotalScore 的依赖。
     """
     __tablename__ = "total_score"
     id = Column(Integer, primary_key=True)

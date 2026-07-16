@@ -580,6 +580,47 @@ def test_grade1_parser_result_has_no_total_scores_key(tmp_path):
     )
 
 
+def test_grade1_class_average_parser_omits_total_averages(monkeypatch, tmp_path):
+    """高一班均 parser 契约不再携带 total_averages，即使旧输入含总分字段。"""
+    from app.ingest import excel_parser
+
+    monkeypatch.setattr(
+        excel_parser,
+        "parse_class_averages",
+        lambda *_args, **_kwargs: [{
+            "class": 1,
+            "class_type": "平行",
+            "teacher": "王老师",
+            "数学_avg": 90,
+            "主三门_avg": 300,
+        }],
+    )
+    result = excel_parser.normalize_grade1_class_averages(tmp_path / "legacy.xlsx", {})
+    assert result["class_averages"]
+    assert "total_averages" not in result["class_averages"][0]
+
+
+def test_grade23_class_average_parser_omits_total_averages(tmp_path):
+    """高二/三旧班均表可含总分列，但 parser 只返回单科均分。"""
+    from openpyxl import Workbook
+    from app.ingest.excel_parser import parse_excel_grade23
+
+    path = tmp_path / "legacy_grade23_avg.xlsx"
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["班型", "班级", "班主任", "数学", "主三门"])
+    ws.append(["", "", "", "分数", "总分"])
+    ws.append(["平行", 1, "王老师", 90, 300])
+    wb.save(path)
+
+    result = parse_excel_grade23(str(path), 2)
+    assert result["kind"] == "class_averages"
+    assert result["class_averages"]
+    row = result["class_averages"][0]
+    assert row["subject_averages"] == {"数学": 90.0}
+    assert "total_averages" not in row
+
+
 # ════════════════════════════════════════════════════════════════
 #  §3 detected_class/detected_classes 只从教师任教学科 filtered rows 推导
 # ════════════════════════════════════════════════════════════════
