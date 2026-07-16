@@ -291,7 +291,7 @@ class TestStudentExamDetailSingleSubject:
             try:
                 data = student_exam_detail(student_id="s6", exam_id=eid)
                 result = {"error": data.get("error"), "has_data": "subject_score" in data}
-            except Exception as e:
+            except ValueError as e:
                 result = {"error": str(e), "has_data": False}
             print(json.dumps(result))
         """)
@@ -734,10 +734,11 @@ class TestCrossScopeRejection:
         """数学教师用物理班 teaching_class_id → 拒绝。"""
         assert_code = _math_a_class_id() + textwrap.dedent("""\
             from app.chat.tools import band_trend
+            from app.teaching.subject import SubjectConflictError
             try:
                 data = band_trend(grade=2, teaching_class_id=phy_id)
                 result = {"raised": False}
-            except Exception as e:
+            except SubjectConflictError as e:
                 result = {"raised": True}
             print(json.dumps(result))
         """)
@@ -752,7 +753,7 @@ class TestCrossScopeRejection:
             try:
                 data = band_trend(grade=2, teaching_class_id=g3_id)
                 result = {"raised": False}
-            except Exception as e:
+            except ValueError as e:
                 result = {"raised": True}
             print(json.dumps(result))
         """)
@@ -953,10 +954,11 @@ class TestHomeworkCorrelationScoped:
         """数学教师用物理班 teaching_class_id 调 correlation → 拒绝。"""
         assert_code = _math_a_class_id() + textwrap.dedent("""\
             from app.chat.tools import homework_grade_correlation
+            from app.teaching.subject import SubjectConflictError
             try:
                 data = homework_grade_correlation(teaching_class_id=phy_id)
                 result = {"raised": False}
-            except Exception as e:
+            except SubjectConflictError as e:
                 result = {"raised": True}
             print(json.dumps(result))
         """)
