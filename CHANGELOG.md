@@ -2,6 +2,16 @@
 
 本项目所有值得注意的变更记录于此。版本遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
+## [2.0.1] - 2026-07-16
+
+### 部署
+- 新增 GitHub Container Registry 自动发布流程，为 backend/frontend 提供 `linux/amd64`、`linux/arm64` 多架构公开镜像。
+- `docker-compose.yml` 默认支持按 `IMAGE_TAG` 直接拉取 GHCR 镜像，同时保留 `--build` 本地构建能力。
+- 新增 `compose.env.example`，README/DEPLOY 补充升级前备份、直接拉取、健康检查、回滚与离线导入步骤。
+- GitHub Actions 升级到当前 Node.js 24 运行时版本，并在 CI 中增加 `docker compose config` 校验。
+
+[2.0.1]: https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases/tag/v2.0.1
+
 ## [2.0.0] - 2026-07-16
 
 ### 破坏性变更

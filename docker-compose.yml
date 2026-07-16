@@ -3,6 +3,8 @@
 # backend/frontend 只在 compose 内网可见。
 services:
   backend:
+    # 默认拉取公开 GHCR 镜像；保留 build 供开发者执行 --build 本地构建。
+    image: ${BACKEND_IMAGE:-ghcr.io/wangzuoyuan/performance-analysis-teaching-backend}:${IMAGE_TAG:-latest}
     build:
       context: ./backend
       network: host            # 构建时借主机 DNS（容器桥接网下路由器 DNS 不应答）
@@ -18,6 +20,7 @@ services:
       - "8000"
 
   frontend:
+    image: ${FRONTEND_IMAGE:-ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend}:${IMAGE_TAG:-latest}
     build:
       context: ./frontend
       network: host            # 构建时借主机 DNS（npm 安装要连外网）

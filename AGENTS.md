@@ -25,7 +25,7 @@ cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 
 # 前端
 cd frontend && npm run dev          # localhost:3000
 npx tsc --noEmit                    # 类型检查
-npm run build                       # 生产构建（CI 没配，靠这个兜底）
+npm run build                       # 生产构建（CI 同样执行）
 
 # 后端测试
 cd backend && source .venv/bin/activate && pip install pytest && pytest tests/
@@ -38,7 +38,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 ## 部署（Docker / 群晖 NAS）
 
-同一套代码既能本地 `run.py` 跑，也能 Docker 部署。部署文件：根 `docker-compose.yml`（backend + frontend + caddy，项目名 `grade_tracker`）、`Caddyfile`（`:8080` 路径分流）、`backend/Dockerfile`、`frontend/Dockerfile`（Next standalone）、`DEPLOY.md`（NAS 手册）。部署特性**对本地开发无感、默认关闭**：
+同一套代码既能本地 `run.py` 跑，也能 Docker 部署。部署文件：根 `docker-compose.yml`（backend + frontend + caddy，项目名 `grade_tracker`）、`compose.env.example`（GHCR 镜像与版本）、`Caddyfile`、两个 Dockerfile、`DEPLOY.md`。`.github/workflows/docker.yml` 发布 amd64/arm64 镜像；Compose 默认拉 GHCR，`--build` 时仍使用本地源码。部署特性**对本地开发无感、默认关闭**：
 
 - **登录鉴权**（`backend/app/auth.py` + `auth_router.py` + 前端 `AuthGate.tsx`）：仅当设了 `APP_PASSWORD` 且 Host 命中 `PUBLIC_HOST` 时要求登录；内网 / 本地 dev / 未设密码放行。中间件在 `main.py`。
 - **数据目录**：`backend/app/paths.py` 的 `DATA_DIR`/`BACKUP_DIR` 读 `EXAM_TRACKER_DIR`/`EXAM_TRACKER_BACKUP_DIR`，缺省回落 `~/.exam-tracker`；Docker 内为 `/data`。

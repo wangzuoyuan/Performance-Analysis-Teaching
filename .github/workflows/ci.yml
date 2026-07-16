@@ -23,10 +23,10 @@ jobs:
       EXAM_TRACKER_DIR: ${{ github.workspace }}/.ci/exam-data
       EXAM_TRACKER_BACKUP_DIR: ${{ github.workspace }}/.ci/exam-backups
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.11"
           cache: pip
@@ -51,10 +51,10 @@ jobs:
       run:
         working-directory: frontend
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: 安装 Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: "20"
           cache: npm
@@ -68,3 +68,17 @@ jobs:
 
       - name: 生产构建
         run: npm run build
+
+  compose:
+    name: Docker Compose 配置校验
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: 准备示例配置
+        run: |
+          cp compose.env.example .env
+          cp backend/.env.example backend/.env
+
+      - name: 校验 Compose
+        run: docker compose -p grade_tracker config --quiet

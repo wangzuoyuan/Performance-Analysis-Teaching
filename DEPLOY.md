@@ -29,7 +29,7 @@ DSM 反向代理（TLS, synology.me 证书）    │
 ## 一、前置确认
 
 1. 群晖型号支持 **Container Manager**（套件中心能搜到即可，绝大多数 Plus 系列都行）。
-2. 内存建议 ≥ 2GB。若是低端 ARM / 内存紧张机型，前端镜像在 NAS 上构建可能失败 —— 改在 Mac 上构建后导入（见文末「附：低配机型」）。
+2. 安装 Docker Compose v2（命令为 `docker compose`）。官方 GHCR 镜像同时支持 `linux/amd64` 与 `linux/arm64`，NAS 无需本地编译前端。
 
 ## 二、放代码 + 数据
 
@@ -44,7 +44,13 @@ DSM 反向代理（TLS, synology.me 证书）    │
 
 ## 三、填密钥与密码
 
-复制 `backend/.env.example` 为 `backend/.env`，填：
+先复制 Compose 镜像配置：
+
+```bash
+cp compose.env.example .env
+```
+
+根目录 `.env` 默认固定 `IMAGE_TAG=2.0.1`，比 `latest` 更容易审计和回滚。然后复制 `backend/.env.example` 为 `backend/.env`，填：
 
 ```env
 CHAT_PROVIDER=...            # 你现在用的（如 GLM 走 openai 兼容）
@@ -59,10 +65,10 @@ PUBLIC_HOST=xxx.synology.me   # ← 你的 DDNS 域名，必填
 
 > `backend/.env` 含密码与 key，**不要提交到任何代码仓库**（已在 .gitignore）。
 
-## 四、起服务（Container Manager）
+## 四、首次启动（直接拉取 GHCR 镜像）
 
-1. Container Manager → **项目** → 新增 → 选择项目根目录的 `docker-compose.yml` → 构建。
-2. 首次构建前端镜像需要几分钟（npm 安装 + 构建），耐心等。
+1. Container Manager → **项目** → 新增 → 选择项目根目录的 `docker-compose.yml`。
+2. backend/frontend 会从公开 GHCR 直接拉取，Caddy 从 Docker Hub 拉取，不在 NAS 上编译源码。
 3. 起来后，**在家**用电脑浏览器开 `http://NAS局域网IP:8080`：
    - 能看到看板、且**不需要密码** → 内网链路通。
    - 数据是你导入的那份 → 卷挂载正确。
@@ -70,10 +76,14 @@ PUBLIC_HOST=xxx.synology.me   # ← 你的 DDNS 域名，必填
 命令行等价（SSH 到 NAS，在项目根目录）：
 
 ```bash
-sudo docker compose up -d --build
+sudo docker compose -p grade_tracker pull
+sudo docker compose -p grade_tracker up -d --remove-orphans
+curl -f http://127.0.0.1:8080/api/health
 sudo docker compose logs -f        # 看日志
-sudo docker compose down           # 停
+sudo docker compose -p grade_tracker down   # 停
 ```
+
+GHCR 镜像为公开包，无需 `docker login`。开发者如需包含本地源码改动，改用 `sudo docker compose -p grade_tracker up -d --build`。
 
 ## 五、DDNS + 证书（DSM）
 
@@ -114,20 +124,46 @@ sudo docker compose down           # 停
 
 ## 日常维护
 
-- **改了代码**：重新 `docker compose up -d --build`。
+- **直接升级官方镜像**：先按下节备份，再修改根目录 `.env` 的 `IMAGE_TAG`，执行 `docker compose pull` 和 `up -d`。
+- **本地改了代码**：执行 `docker compose -p grade_tracker up -d --build`，Compose 会保留同名镜像标签供本机运行。
 - **数据备份**：`data/` 目录就是全部数据，纳入群晖 Hyper Backup / 快照即可；应用内「数据备份」生成的 zip 在 `data/backups/`。
 - **换密码**：改 `backend/.env` 的 `APP_PASSWORD`，重启 backend 容器。
 
-## 附：低配 / ARM 机型（NAS 上构建前端失败时）
+## 升级与回滚
 
-在 Mac 上构建好镜像再导入 NAS：
+升级不会覆盖数据库，因为 backend 的 `/data` 映射到项目目录的 `./data`。但 2.0.0 是破坏性业务升级，必须先备份：
 
 ```bash
-# Mac 上（指定 NAS 的架构，Intel 群晖用 amd64，ARM 群晖用 arm64）
-cd 成绩分析docker
-docker buildx build --platform linux/amd64 -t exam-backend ./backend
-docker buildx build --platform linux/amd64 -t exam-frontend ./frontend
-docker save exam-backend exam-frontend -o exam-images.tar
+cd /volume1/docker/exam-tracker
+mkdir -p data/backups/manual
+cp data/db.sqlite "data/backups/manual/db.sqlite.before-$(date +%Y%m%d-%H%M%S)"
+
+# 拉取仓库中的最新 compose/文档；已有本地配置文件不会被覆盖
+git pull --ff-only
+
+# 编辑根目录 .env，例如 IMAGE_TAG=2.0.1
+sudo docker compose -p grade_tracker pull
+sudo docker compose -p grade_tracker up -d --remove-orphans
+curl -f http://127.0.0.1:8080/api/health
+sudo docker compose -p grade_tracker ps
+```
+
+若启动或业务验收失败：
+
+1. 把根目录 `.env` 的 `IMAGE_TAG` 改回之前已发布的版本并重新执行 `pull`、`up -d`。
+2. 若数据库需要回滚，先 `docker compose -p grade_tracker down`，再用升级前的 `db.sqlite.before-*` 覆盖 `data/db.sqlite`。
+3. 2.0.x 不会主动删除旧 `TotalScore` 数据，但旧版本与 2.0.x 的业务契约不同，恢复旧镜像时应同时恢复对应时间点数据库。
+
+## 附：离线导入镜像
+
+NAS 无法访问 GHCR 时，可在能联网且架构相同的机器上拉取并导出：
+
+```bash
+docker pull ghcr.io/wangzuoyuan/performance-analysis-teaching-backend:2.0.1
+docker pull ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend:2.0.1
+docker save \
+  ghcr.io/wangzuoyuan/performance-analysis-teaching-backend:2.0.1 \
+  ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend:2.0.1 \
+  -o exam-images-2.0.1.tar
 # 把 exam-images.tar 传到 NAS，Container Manager → 映像 → 新增 → 从文件添加
-# 然后把 compose 里 backend/frontend 的 build: 换成 image: exam-backend / exam-frontend
 ```

@@ -46,7 +46,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 ## 部署（Docker / 群晖 NAS）
 
-同一套代码既能本地 `run.py` 跑，也能 Docker 部署（不再维护单独副本）。部署文件：根 `docker-compose.yml`（backend + frontend + caddy 三服务，项目名 `grade_tracker`）、`Caddyfile`（`:8080` 路径分流 /api→backend、/→frontend）、`backend/Dockerfile`、`frontend/Dockerfile`（Next standalone）、`DEPLOY.md`（群晖 NAS 完整手册）。
+同一套代码既能本地 `run.py` 跑，也能 Docker 部署（不再维护单独副本）。部署文件：根 `docker-compose.yml`（backend + frontend + caddy 三服务，项目名 `grade_tracker`）、`compose.env.example`（GHCR 镜像与版本）、`Caddyfile`（`:8080` 路径分流 /api→backend、/→frontend）、两个 Dockerfile、`DEPLOY.md`。`.github/workflows/docker.yml` 发布 amd64/arm64 镜像；Compose 默认拉 GHCR，`--build` 时仍使用本地源码。
 
 部署特性**对本地开发无感（默认关闭）**：
 

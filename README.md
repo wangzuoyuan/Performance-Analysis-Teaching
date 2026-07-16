@@ -1,6 +1,6 @@
 # 成绩分析（教学版）
 
-![version](https://img.shields.io/badge/version-2.0.0-blue)
+![version](https://img.shields.io/badge/version-2.0.1-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Next.js](https://img.shields.io/badge/Next.js-14-black)
@@ -118,12 +118,12 @@ cd frontend && npm run build        # 生产构建
 
 **后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），SQLAlchemy。路由挂 `/api`：`ingest`/`analysis`/`chat`/`homework`/`notes`/`backup`/`teaching`/`auth`。
 
-**成绩表**：`teacher`、`exam`、`upload`、`subject_score`(+`class_label`)、`total_score`、`class_average`(+`class_label`)、`analysis_config`。
+**成绩表**：`teacher`、`exam`、`upload`、`subject_score`(+`class_label`)、`class_average`(+`class_label`)、`analysis_config`；`total_score` 仅保留旧库兼容，不参与业务分析。
 **教学班表**（教学版核心）：`teaching_class`（grade+label+subject+kind）、`teaching_class_member`（teaching_class_id ↔ 真实学号，含来源 source）。
 **跨学年身份**：`student_identity`（人）、`student_alias`（学号 ↔ 人，分班后学号变更时建链）。
 **作业**：`class_roster`(+`class_label`)、`homework_record`、`special_record`、`homework_setting`。`homework_record.subject` 是兼容旧库/旧 API 的字段名，当前业务含义为“作业种类”。**档案**：`student_note`。
 
-**核心口径**：所有按班级的分析从旧的 `WHERE class_num == N` 改为 `resolve_scope(db, teaching_class_id=...)` 解析成成员学号集合（`None`＝全年级）。段位排名仍是**全年级**口径，只是计数落在「我的班成员」子集上。详见 [CLAUDE.md](CLAUDE.md)。
+**核心口径**：`resolve_scope(db, teaching_class_id=...)` 只解析教师当前学科的合法教学班成员；`None` 表示这些教学班成员的去重并集，不是全年级。显式教学班是硬边界，各班独立使用 competition ranking。详见 [CLAUDE.md](CLAUDE.md)。
 
 ## 对话助手配置（`backend/.env`）
 
@@ -142,8 +142,20 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 部署（Docker / 群晖 NAS）
 
-`docker-compose.yml`（backend + frontend + caddy）+ `Caddyfile`（`:8080` 路径分流）+ `DEPLOY.md`（群晖完整手册）。
-登录鉴权仅当设了 `APP_PASSWORD` **且**请求命中 `PUBLIC_HOST`（外网域名）时启用；内网/本地/未设密码一律放行。NAS 上 compose 需带 `-p grade_tracker`。
+官方多架构镜像发布在 GHCR，支持 `linux/amd64` 和 `linux/arm64`。首次部署：
+
+```bash
+cp compose.env.example .env       # 默认固定 IMAGE_TAG=2.0.1
+cp backend/.env.example backend/.env
+# 填好 backend/.env 后：
+docker compose -p grade_tracker pull
+docker compose -p grade_tracker up -d --remove-orphans
+curl -f http://127.0.0.1:8080/api/health
+```
+
+升级前先备份 `data/db.sqlite`，然后更新根目录 `.env` 的 `IMAGE_TAG`，再执行 `pull` 和 `up -d`。`./data:/data` 是宿主机持久化目录，替换容器不会覆盖数据库。需要本地开发镜像时仍可运行 `docker compose -p grade_tracker up -d --build`。
+
+`docker-compose.yml` 包含 backend + frontend + caddy，`Caddyfile` 在 `:8080` 分流。登录鉴权仅当设了 `APP_PASSWORD` 且请求命中 `PUBLIC_HOST` 时启用。完整部署、升级和回滚步骤见 [DEPLOY.md](DEPLOY.md)。
 
 ## 测试
 
@@ -152,13 +164,13 @@ cd backend && source .venv/bin/activate && pytest tests/
 ```
 覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router` / `notes_router` / `backup_weekly`，教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除），以及作业看板的 **`test_homework_dashboard`**（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）。
 
-**持续集成**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与所有 PR 上跑——后端 `pytest`、前端 `tsc --noEmit` + `next build`。
+**持续集成**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与所有 PR 上运行后端 `pytest`、前端 `tsc --noEmit` + `next build`；`.github/workflows/docker.yml` 在版本标签或手动触发时发布 GHCR 多架构镜像。
 
 > 注：`test_homework_router::test_toggle_excluded_roundtrip` 依赖已跑过 `homework/migrate.py`（把旧 `homework.db` 迁入），全新空库下会因花名册为空而跳过失败，属环境依赖，不影响功能。
 
 ## 版本
 
-当前版本 **2.0.0**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
+当前版本 **2.0.1**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
 
 ## 设计文档
 
