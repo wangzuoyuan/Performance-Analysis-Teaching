@@ -151,19 +151,11 @@ def _base_miss_query(db, start, end, student=None, subject=None,
 
 
 def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
-    """作业范围：指定教学班＝该班成员；None＝我教的全部班成员并集。
-    尚未配置任何教学班时回落到全花名册（旧版口径），避免看板/录入整体失明。
+    """作业范围：显式班或当前任教学科全部合法教学班成员并集。
 
-    注意：本函数的 None 路径取所有学科教学班成员并集（all_my_member_ids），
-    单学科化后仅供已明确传入 teaching_class_id 的调用使用。需要「默认＝当前
-    学科」语义的调用方（如 weekly_focus）应改用 _current_subject_hw_member_ids，
-    禁止把 None 当默认旁路。"""
-    if teaching_class_id is not None:
-        ids = members_of(db, int(teaching_class_id), include_anon=True)
-    else:
-        ids = all_my_member_ids(db, include_anon=True)
-        if not ids:
-            ids = {r[0] for r in db.query(ClassRoster.student_id).all()}
+    不再回退到所有学科教学班或全花名册；显式他科班由统一学科解析器拒绝。
+    """
+    ids = _current_subject_hw_member_ids(db, teaching_class_id)
     if include_excluded or not ids:
         return set(ids)
     excluded = {
@@ -173,6 +165,25 @@ def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
     return set(ids) - excluded
 
 
+def _current_subject_class_ids(db, teaching_class_id=None) -> set[int]:
+    """当前学科合法教学班 ID；兼容 subject 为空的旧班。"""
+    from sqlalchemy import func, or_
+    from app.db.models import TeachingClass
+    from app.teaching.subject import resolve_teaching_subject
+
+    subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+    q = db.query(TeachingClass.id)
+    if teaching_class_id is not None:
+        q = q.filter(TeachingClass.id == int(teaching_class_id))
+    else:
+        q = q.filter(or_(
+            func.trim(TeachingClass.subject) == subject,
+            TeachingClass.subject.is_(None),
+            func.trim(TeachingClass.subject) == "",
+        ))
+    return {row[0] for row in q.all()}
+
+
 def _current_subject_hw_member_ids(db, teaching_class_id=None) -> set[str]:
     """当前任教学科教学班成员并集（含 _anon: 占位成员），供作业缺交跟踪使用。
 
@@ -180,27 +191,22 @@ def _current_subject_hw_member_ids(db, teaching_class_id=None) -> set[str]:
     教师遗留的他科教学班成员；本函数严格限定到教师唯一 subject 匹配的教学班。
 
     - 解析教师唯一 subject（resolve_teaching_subject）。
-    - 只查询 TeachingClass.subject == subject 的班级；显式 teaching_class_id
-      时进一步限定到该班，且校验其 subject/归属。
+    - 查询 TeachingClass.subject == subject 或空 subject 兼容旧班；显式
+      teaching_class_id 时进一步限定到该班，且校验其 subject/归属。
     - 成员集合含 _anon:（仅姓名占位成员），因为作业缺交跟踪正是「先有名单、
       后有成绩」的场景。
     """
     from app.analysis.scope import members_of
-    from app.teaching.subject import resolve_teaching_subject
     from app.db.models import TeachingClassMember
 
-    subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
+    class_ids = _current_subject_class_ids(db, teaching_class_id)
 
     if teaching_class_id is not None:
-        # 显式班：直接取该班成员（含 anon）；subject 一致性已由
-        # resolve_teaching_subject 校验（冲突会抛 SubjectConflictError）。
         return members_of(db, int(teaching_class_id), include_anon=True)
 
-    # 默认：当前学科所有教学班成员并集（含 anon）
     rows = (
         db.query(TeachingClassMember.student_id)
-        .join(TeachingClass, TeachingClass.id == TeachingClassMember.teaching_class_id)
-        .filter(TeachingClass.subject == subject)
+        .filter(TeachingClassMember.teaching_class_id.in_(class_ids))
         .all()
     )
     return {r[0] for r in rows if r[0]}
@@ -228,7 +234,9 @@ def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
     else:
         worst_subject = {"name": "无", "count": 0}
 
-    labels = student_class_map_multi(db)
+    labels = student_class_map_multi(
+        db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
+    )
     top_students = [
         {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": c}
         for (sid, name), c in sorted(stu_counts.items(), key=lambda x: x[1], reverse=True)[:5]
@@ -259,7 +267,9 @@ def subjects(db, start, end, student=None, subject=None, teaching_class_id=None)
         canonical = normalize_subject(rec.subject)
         totals[canonical] += 1
         detail[canonical][(roster.student_id, roster.name)] += 1
-    labels = student_class_map_multi(db)
+    labels = student_class_map_multi(
+        db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
+    )
     out = []
     for name, count in sorted(totals.items(), key=lambda x: x[1], reverse=True):
         students = sorted(detail[name].items(), key=lambda x: x[1], reverse=True)
@@ -282,7 +292,9 @@ def rankings(db, start, end, student=None, subject=None, limit=10,
     for _, roster in rows:
         counts[(roster.student_id, roster.name)] += 1
     ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
-    labels = student_class_map_multi(db)
+    labels = student_class_map_multi(
+        db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
+    )
     return {
         "names": [name for (_, name), _ in ranked],
         "counts": [c for _, c in ranked],
@@ -345,7 +357,9 @@ def warnings(db, start, end, teaching_class_id=None, scope_ids=None):
             missed[(subj, roster.student_id)].add(rec.date)
             timeline[subj].add(rec.date)
 
-    labels = student_class_map_multi(db)
+    labels = student_class_map_multi(
+        db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
+    )
     serious, warning = [], []
     for (subj, sid), miss_dates in missed.items():
         roster = identities[(subj, sid)]
@@ -486,6 +500,7 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     姓名筛选只作用于按学生的榜单/预警/荣誉/趋势；教学班提交率与学期对比
     始终按完整范围计算，避免筛一个人时把班级指标算成单人指标。
     """
+    class_ids = _current_subject_class_ids(db, teaching_class_id)
     scope_ids = _scope_student_ids(db, teaching_class_id)
     roster_rows = (
         db.query(ClassRoster).filter(
@@ -499,7 +514,7 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
         if student else roster_all
     )
     ids = set(roster)
-    labels = student_class_map_multi(db)
+    labels = student_class_map_multi(db, teaching_class_ids=class_ids)
 
     records = (
         db.query(HomeworkRecord)
@@ -628,10 +643,12 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
         for row in rows:
             members_by_class[row["teaching_class_id"]].add(sid)
 
-    classes_q = db.query(TeachingClass)
-    if teaching_class_id is not None:
-        classes_q = classes_q.filter(TeachingClass.id == teaching_class_id)
-    classes = classes_q.order_by(TeachingClass.sort_order, TeachingClass.id).all()
+    classes = (
+        db.query(TeachingClass)
+        .filter(TeachingClass.id.in_(class_ids))
+        .order_by(TeachingClass.sort_order, TeachingClass.id)
+        .all()
+    )
 
     rates = []
     eligible_full_attendance = set()

@@ -1,8 +1,7 @@
 """作业模块路由冒烟测试。
 
-使用真实 ~/.exam-tracker/db.sqlite（迁移后应已有作业数据）。仅验证端点
-可访问、返回结构正确，并跑通「录入 → 查询 → 删除」闭环，不污染统计口径
-（用一个不存在的占位学生触发"找不到学生"，再用真实路径校验结构）。
+在 fresh 测试库创建唯一任教学科和合法教学班。仅验证端点可访问、返回结构正确，
+并跑通「录入 → 查询」闭环，不读取或修改真实 ~/.exam-tracker 数据。
 """
 
 import pytest
@@ -14,7 +13,11 @@ from tests.conftest import seed_minimal_exam_scope
 
 @pytest.fixture
 def client():
-    return TestClient(app)
+    cleanup = seed_minimal_exam_scope()
+    try:
+        yield TestClient(app)
+    finally:
+        cleanup()
 
 
 def test_kpi_shape(client):

@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.db.models import (
     Base, ClassRoster, HomeworkRecord, HomeworkSemester, SpecialRecord,
-    TeachingClass, TeachingClassMember,
+    Teacher, TeachingClass, TeachingClassMember,
 )
 from app.homework.parser import parse_name_action
 from app.homework.service import add_semester, dashboard, student_summary, warnings
@@ -13,7 +13,10 @@ from app.homework.service import add_semester, dashboard, student_summary, warni
 def make_db():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
-    return sessionmaker(bind=engine)()
+    db = sessionmaker(bind=engine)()
+    db.add(Teacher(subject="物理", name="测试教师"))
+    db.commit()
+    return db
 
 
 def seed_scope(db):
@@ -22,8 +25,8 @@ def seed_scope(db):
         ClassRoster(student_id="A2", name="同名", excluded=0),
         ClassRoster(student_id="B1", name="乙", excluded=0),
         ClassRoster(student_id="X1", name="排除", excluded=1),
-        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
-        TeachingClass(id=2, grade=2, label="物A2", kind="教学", sort_order=2),
+        TeachingClass(id=1, grade=2, label="物A1", subject="物理", kind="教学", sort_order=1),
+        TeachingClass(id=2, grade=2, label="物A2", subject="物理", kind="教学", sort_order=2),
         TeachingClassMember(teaching_class_id=1, student_id="A1"),
         TeachingClassMember(teaching_class_id=1, student_id="A2"),
         TeachingClassMember(teaching_class_id=1, student_id="X1"),
@@ -100,8 +103,8 @@ def test_leave_excluded_and_dashboard_awards():
     assert result["semester_compare"][0]["name"] == "测试学期"
 
 
-def test_scope_falls_back_to_full_roster_without_classes():
-    """老库升级后尚未配置教学班：回落全花名册，看板不能失明。"""
+def test_scope_does_not_fall_back_to_full_roster_without_classes():
+    """未配置合法教学班时返回空范围，不得退化到全花名册。"""
     db = make_db()
     db.add_all([
         ClassRoster(student_id="R1", name="甲", excluded=0),
@@ -111,10 +114,10 @@ def test_scope_falls_back_to_full_roster_without_classes():
     record(db, "R1", "2026-03-01")
     db.commit()
     result = dashboard(db, "2026-03-01", "2026-03-31")
-    assert result["scope"]["member_count"] == 2
-    assert result["kpi"]["total_misses"] == 1
-    assert {x["student_id"] for x in result["rankings"]["missing"]} == {"R1"}
-    assert {x["student_id"] for x in result["honors"]["full_attendance"]} == {"R2"}
+    assert result["scope"]["member_count"] == 0
+    assert result["kpi"]["total_misses"] == 0
+    assert result["rankings"]["missing"] == []
+    assert result["honors"]["full_attendance"] == []
 
 
 def test_other_students_submission_does_not_break_streak():
@@ -205,7 +208,7 @@ def test_name_action_parser_supports_status_evaluation_and_special():
 def seed_name_only_class(db):
     """一个只配了「仅姓名」占位成员的教学班（还没上传成绩、没建花名册）。"""
     db.add_all([
-        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
+        TeachingClass(id=1, grade=2, label="物A1", subject="物理", kind="教学", sort_order=1),
         TeachingClassMember(
             teaching_class_id=1, student_id="_anon:方石", name="方石", source="manual"
         ),
@@ -272,8 +275,8 @@ def test_rekey_scopes_anon_ids_per_class_and_migrates_data():
 
     db = make_db()
     db.add_all([
-        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
-        TeachingClass(id=2, grade=2, label="物B3", kind="教学", sort_order=2),
+        TeachingClass(id=1, grade=2, label="物A1", subject="物理", kind="教学", sort_order=1),
+        TeachingClass(id=2, grade=2, label="物B3", subject="物理", kind="教学", sort_order=2),
         # 两个班各有一个同名「王某」（旧格式共用一个占位学号）
         TeachingClassMember(teaching_class_id=1, student_id="_anon:王某", name="王某"),
         TeachingClassMember(teaching_class_id=2, student_id="_anon:王某", name="王某"),
@@ -314,8 +317,8 @@ def test_same_name_miss_does_not_leak_across_classes(monkeypatch):
 
     db = make_db()
     db.add_all([
-        TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1),
-        TeachingClass(id=2, grade=2, label="物B3", kind="教学", sort_order=2),
+        TeachingClass(id=1, grade=2, label="物A1", subject="物理", kind="教学", sort_order=1),
+        TeachingClass(id=2, grade=2, label="物B3", subject="物理", kind="教学", sort_order=2),
         TeachingClassMember(teaching_class_id=1, student_id=anon_sid_for("王某", 1), name="王某"),
         TeachingClassMember(teaching_class_id=2, student_id=anon_sid_for("王某", 2), name="王某"),
         HomeworkSemester(
@@ -345,7 +348,7 @@ def test_smart_input_supports_mixed_name_and_type_lines(monkeypatch):
     from app.homework import router as hw_router
 
     db = make_db()
-    db.add(TeachingClass(id=1, grade=2, label="物A1", kind="教学", sort_order=1))
+    db.add(TeachingClass(id=1, grade=2, label="物A1", subject="物理", kind="教学", sort_order=1))
     for sid, name in (
         ("S1", "张三"), ("S2", "李四"), ("S3", "王五"),
         ("S4", "吴六"), ("S5", "赵七"),

@@ -28,6 +28,7 @@ import { Button } from '@/components/ui/button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import WeeklyFocusCard from '@/components/WeeklyFocusCard'
+import HomeworkOverviewCard from '@/components/HomeworkOverviewCard'
 import BackupCard from '@/components/BackupCard'
 import { ClassScopePicker } from '@/components/ClassScopePicker'
 import {
@@ -387,6 +388,9 @@ export default function Dashboard() {
 
       {/* 本周关注（主动提醒，单学科化） */}
       <WeeklyFocusCard teachingClassId={tidParam ?? undefined} />
+
+      {/* 作业摘要：与当前教学班范围联动，完整功能在 /homework。 */}
+      <HomeworkOverviewCard teachingClassId={tidParam ?? undefined} />
 
       {/* KPI 行（单学科化：当前学科均分 / 最高·最低或有效人数 / 班内名次区间 / 重点关注） */}
       {loading || scopeStatsLoading ? (

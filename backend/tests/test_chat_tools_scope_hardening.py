@@ -30,7 +30,7 @@ import pytest
 # ════════════════════════════════════════════════════════════════
 
 _TOOL_TEST_SCRIPT = textwrap.dedent("""\
-    import json, sys
+    import json, os, sys
     setup_script = sys.argv[1]
     assert_script = sys.argv[2]
     ns = {"json": json}
@@ -38,6 +38,8 @@ _TOOL_TEST_SCRIPT = textwrap.dedent("""\
         exec(f.read(), ns)
     with open(assert_script) as f:
         exec(f.read(), ns)
+    sys.stdout.flush()
+    os._exit(0)
 """)
 
 

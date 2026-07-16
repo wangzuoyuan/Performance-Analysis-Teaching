@@ -49,6 +49,24 @@ def _filters(start_date, end_date, student, subject, db):
     )
 
 
+def _validate_homework_scope(db, teaching_class_id=None):
+    """校验作业读写范围并把领域异常映射为稳定 HTTP 状态。"""
+    from app.teaching.subject import SubjectConflictError, SubjectNotConfiguredError
+
+    try:
+        return service._current_subject_hw_member_ids(db, teaching_class_id)
+    except (SubjectConflictError, SubjectNotConfiguredError) as exc:
+        raise HTTPException(409, str(exc))
+    except ValueError as exc:
+        raise HTTPException(404, str(exc))
+
+
+def _ensure_student_in_homework_scope(db, student_id: str):
+    ids = service._scope_student_ids(db, include_excluded=True)
+    if student_id not in ids:
+        raise HTTPException(404, "记录不存在")
+
+
 # ─────────────────────────── 看板统计 ───────────────────────────
 
 @router.get("/homework/kpi")
@@ -121,10 +139,7 @@ async def hw_dashboard(start_date: str = "", end_date: str = "", student: str = 
                        group_by: str = Query("week", pattern="^(week|month)$")):
     db = next(get_db())
     try:
-        if teaching_class_id is not None and not db.query(TeachingClass).filter(
-            TeachingClass.id == teaching_class_id
-        ).first():
-            raise HTTPException(404, "教学班不存在")
+        _validate_homework_scope(db, teaching_class_id)
         s, e, stu, _ = _filters(start_date, end_date, student, "", db)
         return service.dashboard(db, s, e, stu, teaching_class_id, group_by)
     finally:
@@ -190,6 +205,7 @@ async def hw_student_summary(student_id: str):
     """单个学生作业概况（供学生画像页作业卡片）。"""
     db = next(get_db())
     try:
+        _ensure_student_in_homework_scope(db, student_id)
         return service.student_summary(db, student_id=student_id)
     finally:
         db.close()
@@ -229,14 +245,8 @@ class RecordsPayload(BaseModel):
 
 
 def _student_matches(db, name, teaching_class_id=None):
-    q = db.query(ClassRoster)
-    if teaching_class_id is not None:
-        q = q.join(
-            TeachingClassMember,
-            TeachingClassMember.student_id == ClassRoster.student_id,
-        ).filter(TeachingClassMember.teaching_class_id == teaching_class_id)
-    else:
-        q = q.filter(ClassRoster.student_id.in_(service._scope_student_ids(db)))
+    ids = service._scope_student_ids(db, teaching_class_id, include_excluded=True)
+    q = db.query(ClassRoster).filter(ClassRoster.student_id.in_(ids))
     return q.filter(ClassRoster.name == name).all()
 
 
@@ -252,13 +262,14 @@ def _resolve_student(db, name, teaching_class_id=None):
 
 @router.post("/homework/records")
 async def hw_add_records(payload: RecordsPayload):
-    if not payload.raw_text.strip():
-        raise HTTPException(400, "请输入记录内容")
     date = payload.date or _today()
     db = next(get_db())
     added = 0
     errors = []
     try:
+        _validate_homework_scope(db, payload.teaching_class_id)
+        if not payload.raw_text.strip():
+            raise HTTPException(400, "请输入记录内容")
         lines = [l.strip() for l in payload.raw_text.split("\n") if l.strip()]
         for line in lines:
             parts = split_colon(line)
@@ -330,15 +341,14 @@ class SmartInputPayload(BaseModel):
 
 @router.post("/homework/smart-input")
 async def hw_smart_input(payload: SmartInputPayload):
-    if not payload.raw_text.strip():
-        raise HTTPException(400, "请输入记录内容")
     db = next(get_db())
     try:
+        _validate_homework_scope(db, payload.teaching_class_id)
+        if not payload.raw_text.strip():
+            raise HTTPException(400, "请输入记录内容")
         tc = db.query(TeachingClass).filter(
             TeachingClass.id == payload.teaching_class_id
-        ).first()
-        if not tc:
-            raise HTTPException(404, "教学班不存在")
+        ).one()
         # 直接以教学班成员为准（含「仅姓名」占位成员），姓名优先取成员自身缓存，
         # 其次回落花名册——否则 source=class_num/parser 的成员姓名为空无法按姓名匹配。
         rows = (
@@ -476,13 +486,14 @@ class SpecialPayload(BaseModel):
 
 @router.post("/homework/special-records")
 async def hw_add_special(payload: SpecialPayload):
-    if not payload.raw_text.strip():
-        raise HTTPException(400, "请输入记录内容")
     date = payload.date or _today()
     db = next(get_db())
     added = 0
     errors = []
     try:
+        _validate_homework_scope(db, payload.teaching_class_id)
+        if not payload.raw_text.strip():
+            raise HTTPException(400, "请输入记录内容")
         for line in [l.strip() for l in payload.raw_text.split("\n") if l.strip()]:
             parts = split_colon(line)
             if not parts:
@@ -516,10 +527,14 @@ async def hw_get_special(date: str = ""):
     target = date or _today()
     db = next(get_db())
     try:
+        scope_ids = service._scope_student_ids(db, include_excluded=True)
         rows = (
             db.query(SpecialRecord, ClassRoster)
             .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
-            .filter(SpecialRecord.date == target)
+            .filter(
+                SpecialRecord.date == target,
+                SpecialRecord.student_id.in_(scope_ids),
+            )
             .order_by(SpecialRecord.type, ClassRoster.name)
             .all()
         )
@@ -535,7 +550,11 @@ async def hw_get_special(date: str = ""):
 async def hw_delete_special(record_id: int):
     db = next(get_db())
     try:
-        db.query(SpecialRecord).filter(SpecialRecord.id == record_id).delete()
+        rec = db.query(SpecialRecord).filter(SpecialRecord.id == record_id).first()
+        if not rec:
+            raise HTTPException(404, "记录不存在")
+        _ensure_student_in_homework_scope(db, rec.student_id)
+        db.delete(rec)
         db.commit()
         return {"success": True}
     finally:
@@ -562,6 +581,7 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
             .join(ClassRoster, ClassRoster.student_id == SpecialRecord.student_id)
         )
         # 记录管理是运维视角：excluded 学生的历史记录也要能查到、能改能删
+        class_ids = service._current_subject_class_ids(db, teaching_class_id)
         scope_ids = service._scope_student_ids(db, teaching_class_id, include_excluded=True)
         rec_q = rec_q.filter(HomeworkRecord.student_id.in_(scope_ids))
         sp_q = sp_q.filter(SpecialRecord.student_id.in_(scope_ids))
@@ -586,7 +606,7 @@ async def hw_manage_list(date: str = "", student: str = "", subject: str = "",
             else:
                 rec_q = rec_q.filter(HomeworkRecord.subject == subject)
 
-        labels = student_class_map_multi(db)
+        labels = student_class_map_multi(db, teaching_class_ids=class_ids)
         records = [
             {"id": r.id, "student_id": roster.student_id, "name": roster.name,
              "class_labels": service._labels_for(labels, roster.student_id),
@@ -627,6 +647,7 @@ async def hw_manage_update(record_id: int, payload: UpdateRecordPayload):
         rec = db.query(HomeworkRecord).filter(HomeworkRecord.id == record_id).first()
         if not rec:
             raise HTTPException(404, "记录不存在")
+        _ensure_student_in_homework_scope(db, rec.student_id)
         rec.subject = payload.subject
         rec.content = payload.content
         rec.remark = payload.remark
@@ -644,12 +665,13 @@ async def hw_manage_delete(record_id: int):
     db = next(get_db())
     try:
         rec = db.query(HomeworkRecord).filter(HomeworkRecord.id == record_id).first()
-        rec_date = rec.date if rec else None
-        if rec:
-            db.delete(rec)
-            db.commit()
-        if rec_date:
-            export_daily_report(rec_date, db=db)
+        if not rec:
+            raise HTTPException(404, "记录不存在")
+        _ensure_student_in_homework_scope(db, rec.student_id)
+        rec_date = rec.date
+        db.delete(rec)
+        db.commit()
+        export_daily_report(rec_date, db=db)
         return {"success": True}
     finally:
         db.close()
@@ -658,10 +680,16 @@ async def hw_manage_delete(record_id: int):
 # ─────────────────────────── 花名册 ───────────────────────────
 
 @router.get("/homework/roster")
-async def hw_roster():
+async def hw_roster(teaching_class_id: Optional[int] = None):
     db = next(get_db())
     try:
-        rows = db.query(ClassRoster).order_by(
+        _validate_homework_scope(db, teaching_class_id)
+        scope_ids = service._scope_student_ids(
+            db, teaching_class_id, include_excluded=True
+        )
+        rows = db.query(ClassRoster).filter(
+            ClassRoster.student_id.in_(scope_ids)
+        ).order_by(
             ClassRoster.excluded.asc(), ClassRoster.seat_no.asc()
         ).all()
         out = []
@@ -681,6 +709,7 @@ async def hw_roster():
 
 class AddStudentPayload(BaseModel):
     name: str
+    teaching_class_id: int
     student_id: Optional[str] = None
     seat_no: Optional[int] = None
     gender: Optional[str] = None
@@ -689,17 +718,64 @@ class AddStudentPayload(BaseModel):
 
 @router.post("/homework/roster")
 async def hw_add_student(payload: AddStudentPayload):
-    name = payload.name.strip()
-    if not name:
-        raise HTTPException(400, "姓名不能为空")
     db = next(get_db())
     try:
-        if db.query(ClassRoster).filter(ClassRoster.name == name).first():
+        _validate_homework_scope(db, payload.teaching_class_id)
+        name = payload.name.strip()
+        if not name:
+            raise HTTPException(400, "姓名不能为空")
+        members = (
+            db.query(TeachingClassMember)
+            .filter(TeachingClassMember.teaching_class_id == payload.teaching_class_id)
+            .all()
+        )
+        member_rosters = {
+            row.student_id: row
+            for row in db.query(ClassRoster).filter(
+                ClassRoster.student_id.in_([m.student_id for m in members])
+            ).all()
+        }
+        if payload.student_id:
+            matches = [m for m in members if m.student_id == payload.student_id]
+        else:
+            matches = [
+                m for m in members
+                if (m.name or "").strip() == name
+                or (m.student_id in member_rosters
+                    and member_rosters[m.student_id].name.strip() == name)
+            ]
+        if len(matches) > 1:
+            raise HTTPException(409, f"教学班内有多个同名学生 {name}，请提供学号")
+
+        member = matches[0] if matches else None
+        sid = (
+            member.student_id if member
+            else payload.student_id
+            or f"HW-{payload.teaching_class_id}-{payload.seat_no or name}"
+        )
+        roster = db.query(ClassRoster).filter(ClassRoster.student_id == sid).first()
+        if roster and roster.name.strip() != name:
+            raise HTTPException(409, f"学号 {sid} 已属于其他学生")
+        if roster and member:
             raise HTTPException(400, f"学生 {name} 已存在")
-        sid = payload.student_id or f"HW-{payload.seat_no or name}"
-        db.add(ClassRoster(student_id=sid, name=name, class_num=payload.class_num,
-                           seat_no=payload.seat_no, gender=payload.gender, excluded=0))
-        db.commit()
+        if not roster:
+            db.add(ClassRoster(student_id=sid, name=name, class_num=payload.class_num,
+                               seat_no=payload.seat_no, gender=payload.gender, excluded=0))
+        if not member:
+            db.add(TeachingClassMember(
+                teaching_class_id=payload.teaching_class_id,
+                student_id=sid,
+                name=name,
+                source="homework-roster",
+            ))
+        try:
+            db.commit()
+        except Exception as exc:
+            db.rollback()
+            from sqlalchemy.exc import IntegrityError
+            if isinstance(exc, IntegrityError):
+                raise HTTPException(409, "学生或教学班成员关系已存在")
+            raise
         return {"success": True, "student_id": sid}
     finally:
         db.close()
@@ -709,12 +785,25 @@ async def hw_add_student(payload: AddStudentPayload):
 async def hw_delete_student(student_id: str):
     db = next(get_db())
     try:
+        _ensure_student_in_homework_scope(db, student_id)
+        allowed_class_ids = service._current_subject_class_ids(db)
+        member_class_ids = {
+            row[0] for row in db.query(TeachingClassMember.teaching_class_id).filter(
+                TeachingClassMember.student_id == student_id
+            ).all()
+        }
+        if member_class_ids - allowed_class_ids:
+            raise HTTPException(409, "该学生仍属于其他学科教学班，不能从作业花名册全局删除")
         dates = [
             r[0] for r in db.query(HomeworkRecord.date)
             .filter(HomeworkRecord.student_id == student_id).distinct().all()
         ]
         db.query(HomeworkRecord).filter(HomeworkRecord.student_id == student_id).delete()
         db.query(SpecialRecord).filter(SpecialRecord.student_id == student_id).delete()
+        db.query(TeachingClassMember).filter(
+            TeachingClassMember.student_id == student_id,
+            TeachingClassMember.teaching_class_id.in_(allowed_class_ids),
+        ).delete(synchronize_session=False)
         db.query(ClassRoster).filter(ClassRoster.student_id == student_id).delete()
         db.commit()
         for d in dates:
@@ -728,6 +817,7 @@ async def hw_delete_student(student_id: str):
 async def hw_toggle_excluded(student_id: str):
     db = next(get_db())
     try:
+        _ensure_student_in_homework_scope(db, student_id)
         r = db.query(ClassRoster).filter(ClassRoster.student_id == student_id).first()
         if not r:
             raise HTTPException(404, "学生不存在")

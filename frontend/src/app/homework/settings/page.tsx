@@ -1,12 +1,14 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Link from 'next/link'
 import { ChevronLeft, Plus, Trash2 } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
+import { ClassScopePicker } from '@/components/ClassScopePicker'
+import { useClassScope } from '@/lib/class-scope'
 import { cn } from '@/lib/utils'
 import {
   Table,
@@ -40,6 +42,8 @@ interface RosterRow {
 }
 
 export default function HomeworkSettingsPage() {
+  const { current } = useClassScope()
+  const rosterRequestIdRef = useRef(0)
   const [semester, setSemester] = useState<Semester>({
     semester_start: '',
     semester_end: '',
@@ -49,6 +53,10 @@ export default function HomeworkSettingsPage() {
   const [semesters, setSemesters] = useState<SemesterHistory[]>([])
   const [newSemester, setNewSemester] = useState({ name: '', start_date: '', end_date: '' })
   const [roster, setRoster] = useState<RosterRow[]>([])
+  const [rosterScope, setRosterScope] = useState<'all' | number | null>(null)
+  const [rosterLoading, setRosterLoading] = useState(false)
+  const [rosterError, setRosterError] = useState(false)
+  const visibleRoster = rosterScope === current ? roster : []
 
   // 新增学生
   const [newName, setNewName] = useState('')
@@ -58,7 +66,7 @@ export default function HomeworkSettingsPage() {
   // 花名册里最常见的班号，作为「添加学生」班号留空时的默认值
   const defaultClass = useMemo(() => {
     const counts = new Map<number, number>()
-    for (const r of roster) {
+    for (const r of visibleRoster) {
       if (r.class_num != null) counts.set(r.class_num, (counts.get(r.class_num) ?? 0) + 1)
     }
     let best: number | null = null
@@ -70,12 +78,28 @@ export default function HomeworkSettingsPage() {
       }
     }
     return best
-  }, [roster])
+  }, [visibleRoster])
 
   const loadRoster = useCallback(async () => {
-    const data = await fetch('/api/homework/roster').then((r) => r.json())
-    setRoster(data)
-  }, [])
+    const requestId = ++rosterRequestIdRef.current
+    setRoster([])
+    setRosterScope(null)
+    setRosterLoading(true)
+    setRosterError(false)
+    const query = current === 'all' ? '' : `?teaching_class_id=${current}`
+    try {
+      const response = await fetch(`/api/homework/roster${query}`)
+      if (!response.ok) throw new Error('花名册加载失败')
+      const data = await response.json()
+      if (requestId !== rosterRequestIdRef.current) return
+      setRoster(data)
+      setRosterScope(current)
+    } catch {
+      if (requestId === rosterRequestIdRef.current) setRosterError(true)
+    } finally {
+      if (requestId === rosterRequestIdRef.current) setRosterLoading(false)
+    }
+  }, [current])
   const loadSemesters = useCallback(async () => {
     const data = await fetch('/api/homework/semesters').then((r) => r.json())
     setSemesters(data)
@@ -134,6 +158,10 @@ export default function HomeworkSettingsPage() {
 
   async function addStudent() {
     if (!newName.trim()) return
+    if (current === 'all') {
+      alert('请先选择具体教学班')
+      return
+    }
     const classNum = newClass.trim() ? Number(newClass) : defaultClass
     if (classNum == null || Number.isNaN(classNum)) {
       alert('请填写班号（花名册为空时无法自动推断）')
@@ -144,6 +172,7 @@ export default function HomeworkSettingsPage() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: newName.trim(),
+        teaching_class_id: current,
         seat_no: newSeat ? Number(newSeat) : null,
         class_num: classNum,
       }),
@@ -247,8 +276,9 @@ export default function HomeworkSettingsPage() {
 
       {/* 花名册 */}
       <Card>
-        <CardHeader>
+        <CardHeader className="flex-row items-center justify-between gap-3 space-y-0">
           <CardTitle className="text-base">花名册 · 排除统计</CardTitle>
+          <ClassScopePicker compact />
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-slate-500">
@@ -276,7 +306,8 @@ export default function HomeworkSettingsPage() {
               placeholder={defaultClass != null ? `班号（默认 ${defaultClass}）` : '班号'}
               className="w-32 rounded-md border border-slate-200 px-2 py-1 text-sm"
             />
-            <Button variant="outline" size="sm" onClick={addStudent}>
+            <Button variant="outline" size="sm" onClick={addStudent}
+              disabled={current === 'all' || rosterScope !== current || rosterLoading || rosterError}>
               <Plus className="mr-1 h-4 w-4" />
               添加学生
             </Button>
@@ -296,7 +327,7 @@ export default function HomeworkSettingsPage() {
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {roster.map((row) => (
+                {visibleRoster.map((row) => (
                   <TableRow
                     key={row.student_id}
                     className={cn('hover:bg-slate-50', row.excluded && 'opacity-50')}
@@ -344,6 +375,8 @@ export default function HomeworkSettingsPage() {
               </TableBody>
             </Table>
           </div>
+          {rosterLoading && <p className="text-sm text-slate-500">花名册加载中…</p>}
+          {rosterError && <p className="text-sm text-danger-600">花名册加载失败，请切换班级后重试。</p>}
         </CardContent>
       </Card>
     </div>

@@ -163,7 +163,7 @@ def test_student_not_found(tmp_path):
         print(json.dumps({"status_code": r.status_code}))
     """)
     _api_script = textwrap.dedent("""\
-        import json, sys
+        import json, os, sys
         from fastapi.testclient import TestClient
         from app.main import app
         from app.db.models import SessionLocal
@@ -172,6 +172,8 @@ def test_student_not_found(tmp_path):
             exec(f.read())
         with open(sys.argv[2]) as f:
             exec(f.read())
+        sys.stdout.flush()
+        os._exit(0)
     """)
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -238,7 +240,7 @@ def test_student_detail_returns_single_subject_trend(tmp_path):
         print(json.dumps(result))
     """)
     _api_script = textwrap.dedent("""\
-        import json, sys
+        import json, os, sys
         from fastapi.testclient import TestClient
         from app.main import app
         from app.db.models import SessionLocal
@@ -247,6 +249,8 @@ def test_student_detail_returns_single_subject_trend(tmp_path):
             exec(f.read())
         with open(sys.argv[2]) as f:
             exec(f.read())
+        sys.stdout.flush()
+        os._exit(0)
     """)
     data_dir = tmp_path / "data"
     data_dir.mkdir()
@@ -314,7 +318,7 @@ def test_student_detail_excludes_empty_score_rows(tmp_path):
         print(json.dumps({"exam_names": exam_names}))
     """)
     _api_script = textwrap.dedent("""\
-        import json, sys
+        import json, os, sys
         from fastapi.testclient import TestClient
         from app.main import app
         from app.db.models import SessionLocal
@@ -323,6 +327,8 @@ def test_student_detail_excludes_empty_score_rows(tmp_path):
             exec(f.read())
         with open(sys.argv[2]) as f:
             exec(f.read())
+        sys.stdout.flush()
+        os._exit(0)
     """)
     data_dir = tmp_path / "data"
     data_dir.mkdir()

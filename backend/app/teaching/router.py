@@ -24,6 +24,20 @@ def _get_or_404(db, model, **filters):
     return obj
 
 
+def _current_subject_class_or_409(db, tc_id: int):
+    from app.db.models import TeachingClass
+    from app.teaching.subject import (
+        resolve_teaching_subject, SubjectConflictError, SubjectNotConfiguredError,
+    )
+
+    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    try:
+        resolve_teaching_subject(db, teaching_class_id=tc_id)
+    except (SubjectConflictError, SubjectNotConfiguredError) as exc:
+        raise HTTPException(409, str(exc))
+    return tc
+
+
 def _member_profile(db, tc_id: int) -> list[dict]:
     """成员列表：学号 / 姓名 / 来源 / 行政班 / 状态（inherited/new）。"""
     from app.db.models import (
@@ -98,13 +112,27 @@ def _class_payload(db, tc) -> dict:
 
 @router.get("/classes")
 def list_classes(grade: Optional[int] = None, db=Depends(get_db)):
-    from app.db.models import TeachingClass
+    from sqlalchemy import func, or_
+    from app.db.models import Teacher, TeachingClass
 
-    q = db.query(TeachingClass)
+    teacher = db.query(Teacher).first()
+    if not teacher or not (teacher.subject or "").strip():
+        return {"classes": []}
+    subject = teacher.subject.strip()
+    q = db.query(TeachingClass).filter(or_(
+        func.trim(TeachingClass.subject) == subject,
+        TeachingClass.subject.is_(None),
+        func.trim(TeachingClass.subject) == "",
+    ))
     if grade is not None:
         q = q.filter(TeachingClass.grade == grade)
     tcs = q.order_by(TeachingClass.sort_order, TeachingClass.id).all()
-    return {"classes": [_class_payload(db, tc) for tc in tcs]}
+    classes = []
+    for tc in tcs:
+        payload = _class_payload(db, tc)
+        payload["subject"] = subject
+        classes.append(payload)
+    return {"classes": classes}
 
 
 class ClassCreate(BaseModel):
@@ -161,6 +189,7 @@ def update_class(tc_id: int, payload: ClassUpdate, db=Depends(get_db)):
         SubjectConflictError,
         SubjectNotConfiguredError,
     )
+    _current_subject_class_or_409(db, tc_id)
     try:
         return update_class_subject_aware(
             db,
@@ -185,7 +214,7 @@ def update_class(tc_id: int, payload: ClassUpdate, db=Depends(get_db)):
 def delete_class(tc_id: int, db=Depends(get_db)):
     from app.db.models import Teacher, TeachingClass, TeachingClassMember
 
-    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    tc = _current_subject_class_or_409(db, tc_id)
     db.query(TeachingClassMember).filter(
         TeachingClassMember.teaching_class_id == tc_id
     ).delete(synchronize_session=False)
@@ -203,7 +232,7 @@ def delete_class(tc_id: int, db=Depends(get_db)):
 def list_members(tc_id: int, db=Depends(get_db)):
     from app.db.models import TeachingClass
 
-    _get_or_404(db, TeachingClass, id=tc_id)
+    _current_subject_class_or_409(db, tc_id)
     return {"members": _member_profile(db, tc_id)}
 
 
@@ -216,7 +245,7 @@ class MembersAdd(BaseModel):
 def add_members(tc_id: int, payload: MembersAdd, db=Depends(get_db)):
     from app.db.models import TeachingClass
 
-    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    tc = _current_subject_class_or_409(db, tc_id)
     res = service.add_by_names_and_ids(db, tc, payload.student_ids, payload.names)
     res["members"] = _member_profile(db, tc_id)
     return res
@@ -233,7 +262,7 @@ def reassign_member(tc_id: int, student_id: str, payload: MemberReassign, db=Dep
     特殊 / 档案 / 身份别名等教师侧数据；成绩表不动。"""
     from app.db.models import TeachingClass
 
-    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    tc = _current_subject_class_or_409(db, tc_id)
     try:
         res = service.reassign_member_id(db, tc, student_id, payload.new_student_id, payload.name)
     except service.ConflictError as e:
@@ -252,6 +281,7 @@ class MemberRemove(BaseModel):
 def remove_member(tc_id: int, student_id: str, db=Depends(get_db)):
     from app.db.models import TeachingClassMember
 
+    _current_subject_class_or_409(db, tc_id)
     row = (
         db.query(TeachingClassMember)
         .filter(
@@ -277,7 +307,7 @@ class ImportPayload(BaseModel):
 def import_members(tc_id: int, payload: ImportPayload, db=Depends(get_db)):
     from app.db.models import TeachingClass
 
-    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    tc = _current_subject_class_or_409(db, tc_id)
     lines = payload.text.split("\n") if payload.text else []
     report = service.resolve_import(
         db, tc, lines=lines, tokens=payload.tokens or [], upsert=payload.upsert
@@ -290,7 +320,7 @@ def import_members(tc_id: int, payload: ImportPayload, db=Depends(get_db)):
 def sync_by_class_num(tc_id: int, db=Depends(get_db)):
     from app.db.models import TeachingClass
 
-    tc = _get_or_404(db, TeachingClass, id=tc_id)
+    tc = _current_subject_class_or_409(db, tc_id)
     if tc.kind != "行政":
         raise HTTPException(400, "仅行政班（高一，label 为数字）支持按行政班号同步")
     try:
@@ -326,6 +356,9 @@ class CurrentPayload(BaseModel):
 @router.patch("/current")
 def set_current(payload: CurrentPayload, db=Depends(get_db)):
     from app.db.models import Teacher, TeachingClass
+    from app.teaching.subject import (
+        resolve_teaching_subject, SubjectConflictError, SubjectNotConfiguredError,
+    )
 
     teacher = db.query(Teacher).first()
     if not teacher:
@@ -333,6 +366,10 @@ def set_current(payload: CurrentPayload, db=Depends(get_db)):
         db.add(teacher)
     if payload.teaching_class_id is not None:
         _get_or_404(db, TeachingClass, id=payload.teaching_class_id)
+        try:
+            resolve_teaching_subject(db, teaching_class_id=payload.teaching_class_id)
+        except (SubjectConflictError, SubjectNotConfiguredError) as exc:
+            raise HTTPException(409, str(exc))
     teacher.current_teaching_class_id = payload.teaching_class_id
     db.commit()
     return {"ok": True, "teaching_class_id": teacher.current_teaching_class_id}

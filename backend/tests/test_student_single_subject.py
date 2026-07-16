@@ -26,7 +26,7 @@ import pytest
 # ════════════════════════════════════════════════════════════════
 
 _API_TEST_SCRIPT = textwrap.dedent("""\
-    import json, sys
+    import json, os, sys
     from fastapi.testclient import TestClient
     from app.main import app
     from app.db.models import SessionLocal
@@ -42,6 +42,8 @@ _API_TEST_SCRIPT = textwrap.dedent("""\
     assert_script = sys.argv[2]
     with open(assert_script) as f:
         exec(f.read())
+    sys.stdout.flush()
+    os._exit(0)
 """)
 
 

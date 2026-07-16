@@ -38,7 +38,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **后端**：FastAPI + SQLite（`~/.exam-tracker/db.sqlite`），通过 SQLAlchemy 访问。三个路由模块挂载在 `/api` 前缀下：`ingest`（上传）/ `analysis`（查询）/ `chat`（SSE 流式对话）。
 
-**前端**：Next.js 14 App Router + shadcn/ui + Recharts + Tailwind。全局布局由 `Shell.tsx`（侧边栏 + Topbar）管理，`ChatDrawer` 在 `layout.tsx` 全局挂载。页面：`/`(仪表盘，含「本周关注」「数据备份」卡) `/upload` `/compare` `/exam` `/student`（学生页含作业卡片、成长/谈话档案、「导出家长会一页纸」入口）`/student/[id]/report`(打印友好一页纸) `/homework`(作业，含 `/manage` `/warnings` `/correlation` `/settings` 子页)。
+**前端**：Next.js 14 App Router + shadcn/ui + Recharts + Tailwind。全局布局由 `Shell.tsx`（侧边栏 + Topbar）管理，`ChatDrawer` 在 `layout.tsx` 全局挂载。页面：`/`(仪表盘，含「本周关注」「作业看板摘要」「数据备份」卡) `/upload` `/compare` `/exam` `/student`（学生页含作业卡片、成长/谈话档案、「导出家长会一页纸」入口）`/student/[id]/report`(打印友好一页纸) `/homework`(页面内直接切换合法教学班，含 `/manage` `/warnings` `/correlation` `/settings` 子页)。
 
 **数据库**：成绩相关 6 张表——`teacher`、`exam`、`upload`、`subject_score`、`total_score`、`class_average`；另有 `analysis_config`（段位阈值，单行 id=1）。作业相关 4 张表（原 Flask「作业跟踪」合并而来）——`class_roster`（花名册，主键真实学号 `student_id`，含座号/性别/`excluded`）、`homework_record`、`special_record`、`homework_setting`。档案 1 张表——`student_note`（成长/谈话档案：category 谈话/观察/家访/家长沟通/奖惩、content、follow_up 跟进项）。作业与档案均按真实学号 `student_id` 与成绩表关联。
 
@@ -87,7 +87,7 @@ tail -f ~/.exam-tracker/frontend.log
 ### teaching router（`/api/teaching`，`teaching/router.py`）— 教学版核心
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| GET/POST | `/classes` | 列出（`?grade=`，带 `member_count`）/ 新建教学班 `{grade,label,subject?,kind,note?,sort_order?}` |
+| GET/POST | `/classes` | 只列教师当前学科教学班（`?grade=`，带 `member_count`）/ 新建教学班 `{grade,label,subject?,kind,note?,sort_order?}` |
 | PUT/DELETE | `/classes/{id}` | 改标签/学科/排序/备注 / 删班（连带成员） |
 | GET/POST | `/classes/{id}/members` | 成员列表（学号/姓名/来源/行政班/状态）/ 加成员 `{student_ids?}` 或 `{names?}`（姓名走反查） |
 | DELETE | `/classes/{id}/members/{student_id}` | 移除成员 |
@@ -109,8 +109,8 @@ tail -f ~/.exam-tracker/frontend.log
 ### homework router（`/api/homework`，`homework/router.py`）
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式；`by_subject` 为兼容旧名，当前含义是“按作业种类”），录入后自动导出当天 Excel |
-| GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`/subjects` 为兼容旧路径，返回各作业种类分布；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
+| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录；显式教学班必须属于教师当前学科，录入后自动导出当天 Excel |
+| GET  | `/dashboard` `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板默认仅聚合当前学科合法教学班成员；显式他科班返回 409；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
 | GET  | `/correlation` | 总缺交 × 当前学科班内排名，支持 `teaching_class_id` |
 | GET  | `/correlation/subjects` | 历史兼容路径，不得返回其他学科统计 |
 | GET  | `/student/{student_id}` | 单个学生作业概况（供学生画像页作业卡片） |
@@ -118,6 +118,8 @@ tail -f ~/.exam-tracker/frontend.log
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
 | GET  | `/api/weekly-focus` | 当前学科合法教学班范围的缺交预警、临界/薄弱与谈话跟进待办 |
+
+作业服务的成员、`class_labels`、教学班提交率和记录管理必须共用同一组当前学科合法教学班 ID；`subject` 为 `NULL`、空串或纯空白的旧班按兼容班统一纳入，非空他科班排除。任何按记录 ID、学生 ID 或教学班 ID 的更新/删除/成员操作都必须重新验证领域范围，不能依赖前端菜单隐藏。花名册新增要求具体合法 `teaching_class_id`，并在同一事务内创建 roster 与 class member。
 
 ### notes router（`/api/notes`，`notes/router.py`）
 | 方法 | 路径 | 说明 |
@@ -198,6 +200,6 @@ OPENAI_MODEL=gpt-4o-mini
 
 有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `homework_dashboard`（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）/ `teaching_router`（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）/ `scope`（范围解析 / 身份链接）
 
-CI：`.github/workflows/ci.yml`——push 到 `main` 与所有 PR 上跑后端 `pytest` + 前端 `tsc --noEmit`/`next build`。
+CI：`.github/workflows/ci.yml`——push 到 `main` 与所有 PR 上跑后端 `pytest` + 前端 `npm run test:ui`/`tsc --noEmit`/`next build`。
 
 **无测试**：`analysis/router.py` 的计算逻辑（`trends` / `class_compare` / `focus_list` / `cross_year` / `rank_metrics` 模块同样无测试）。

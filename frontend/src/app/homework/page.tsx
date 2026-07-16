@@ -1,6 +1,6 @@
 'use client'
 
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
 import { useRouter } from 'next/navigation'
 import {
@@ -15,6 +15,7 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
+import { ClassScopePicker } from '@/components/ClassScopePicker'
 import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
@@ -153,10 +154,13 @@ export default function HomeworkPage() {
 
   const [studentOpen, setStudentOpen] = useState(false)
   const [studentDetail, setStudentDetail] = useState<any>(null)
+  const requestIdRef = useRef(0)
 
   const load = useCallback(async () => {
+    const requestId = ++requestIdRef.current
     setLoading(true)
     setError('')
+    setData(null)
     const params = new URLSearchParams({ group_by: groupBy })
     if (current !== 'all') params.set('teaching_class_id', String(current))
     if (applied.start) params.set('start_date', applied.start)
@@ -166,13 +170,16 @@ export default function HomeworkPage() {
       const response = await fetch(`/api/homework/dashboard?${params}`)
       if (!response.ok) throw new Error('加载失败')
       const payload = await response.json()
+      if (requestId !== requestIdRef.current) return
       setData(payload)
       setStartDate((prev) => prev || payload.date_range.start)
       setEndDate((prev) => prev || payload.date_range.end)
     } catch {
+      if (requestId !== requestIdRef.current) return
+      setData(null)
       setError('作业看板加载失败，请检查后端服务。')
     } finally {
-      setLoading(false)
+      if (requestId === requestIdRef.current) setLoading(false)
     }
   }, [current, groupBy, applied])
 
@@ -253,6 +260,7 @@ export default function HomeworkPage() {
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
+          <ClassScopePicker compact />
           <Link href="/homework/manage"><Button variant="outline" size="sm">记录管理</Button></Link>
           <Link href="/homework/warnings"><Button variant="outline" size="sm">独立预警</Button></Link>
           <Link href="/homework/correlation"><Button variant="outline" size="sm">缺交 × 成绩</Button></Link>
@@ -339,21 +347,23 @@ export default function HomeworkPage() {
 
       {error && <div className="rounded-lg bg-danger-50 p-3 text-sm text-danger-600">{error}</div>}
 
-      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-        {[
-          { label: '区间缺交', value: data?.kpi.total_misses, icon: ClipboardList, tone: 'text-slate-900' },
-          { label: '红色预警', value: data?.warnings.streak.counts.serious, icon: AlertTriangle, tone: 'text-danger-600' },
-          { label: '黄色预警', value: data?.warnings.streak.counts.warning, icon: AlertTriangle, tone: 'text-warning-600' },
-          { label: '全勤之星', value: data?.honors.full_attendance.length, icon: UserCheck, tone: 'text-success-600' },
-        ].map(({ label, value, icon: Icon, tone }) => (
-          <Card key={label}>
-            <CardContent className="pt-5">
-              <div className="flex items-center gap-2 text-xs text-slate-500"><Icon className="h-4 w-4" />{label}</div>
-              <div className={`mt-2 text-3xl font-semibold ${tone}`}>{loading ? '—' : value ?? 0}</div>
-            </CardContent>
-          </Card>
-        ))}
-      </div>
+      {!error && (
+        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
+          {[
+            { label: '区间缺交', value: data?.kpi.total_misses, icon: ClipboardList, tone: 'text-slate-900' },
+            { label: '红色预警', value: data?.warnings.streak.counts.serious, icon: AlertTriangle, tone: 'text-danger-600' },
+            { label: '黄色预警', value: data?.warnings.streak.counts.warning, icon: AlertTriangle, tone: 'text-warning-600' },
+            { label: '全勤之星', value: data?.honors.full_attendance.length, icon: UserCheck, tone: 'text-success-600' },
+          ].map(({ label, value, icon: Icon, tone }) => (
+            <Card key={label}>
+              <CardContent className="pt-5">
+                <div className="flex items-center gap-2 text-xs text-slate-500"><Icon className="h-4 w-4" />{label}</div>
+                <div className={`mt-2 text-3xl font-semibold ${tone}`}>{loading ? '—' : value ?? 0}</div>
+              </CardContent>
+            </Card>
+          ))}
+        </div>
+      )}
 
       <div className="grid gap-4 xl:grid-cols-3">
         <Card className="overflow-hidden">

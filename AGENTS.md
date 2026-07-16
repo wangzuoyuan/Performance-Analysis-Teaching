@@ -80,8 +80,8 @@ tail -f ~/.exam-tracker/frontend.log
 由原独立 Flask「作业跟踪」合并而来，数据并入同一 SQLite 库。
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式；`by_subject` 为兼容旧名，当前含义是“按作业种类”），录入后自动导出当天 Excel |
-| GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`/subjects` 为兼容旧路径，返回各作业种类分布；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
+| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式；`by_subject` 为兼容旧名，当前含义是“按作业种类”）；显式 `teaching_class_id` 必须属于教师当前学科，录入后自动导出当天 Excel |
+| GET  | `/dashboard` `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；缺省范围仅为当前学科合法教学班成员并集，显式他科班返回 409；`/subjects` 为兼容旧路径，返回各作业种类分布；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
 | GET  | `/correlation` | 总缺交 × 当前学科班内排名；可用 `teaching_class_id` 限定合法教学班 |
 | GET  | `/correlation/subjects` | 历史兼容路径，不得返回其他学科统计 |
 | GET  | `/student/{student_id}` | 单个学生作业概况（供学生画像页作业卡片） |
@@ -89,6 +89,8 @@ tail -f ~/.exam-tracker/frontend.log
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
 | GET  | `/api/weekly-focus` | 当前学科范围的缺交预警、临界/薄弱与谈话跟进待办 |
+
+前端首页渲染范围联动的作业摘要；`/homework` 页头必须保留 `ClassScopePicker`，且切班请求只允许最新响应写入，防止旧班数据覆盖当前班。`/api/teaching/classes` 只返回教师当前学科（兼容 `NULL`、空串或纯空白 subject 旧班）的教学班，遗留他科 current id 在读取时回退为 all。空 subject 旧班在菜单、默认并集、标签、提交率和显式范围中使用同一兼容语义；所有 teaching CRUD、作业记录/花名册按 ID 写入也必须先验证当前学科范围。花名册新增必须绑定具体合法教学班；若已有 member 但缺 roster，应复用原 student ID 补全，不得创建重复身份。删除共享到范围外教学班的学生必须拒绝，不能跨学科清成员关系。
 
 ### notes / backup router
 - `notes/router.py`（`/api/notes`）：`GET /{student_id}`、`POST`、`PUT /{id}`（含跟进勾选）、`DELETE /{id}`，管理 `student_note` 成长/谈话档案。

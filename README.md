@@ -1,6 +1,6 @@
 # 成绩分析（教学版）
 
-![version](https://img.shields.io/badge/version-2.0.1-blue)
+![version](https://img.shields.io/badge/version-2.0.2-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Next.js](https://img.shields.io/badge/Next.js-14-black)
@@ -37,7 +37,7 @@
 - **学生画像页**：当前学科跨学年趋势、历次明细、教学班内排名、作业与学段履历；合法无成绩成员仍保留空画像。
 
 ### 作业 / 档案 / AI / 备份
-- **作业跟踪**：面向任课老师的单学科场景，智能文本录入缺交/请假/迟到/评价，按作业种类（校本作业、周末作业、试卷订正、日常作业等）统计，看板（每日趋势/各类作业占比/排行/连续缺交预警）、自动导出 Excel、花名册排除开关、学期配置。**仅按姓名添加的教学班成员也能录缺交并计入看板**（占位学号按教学班隔离，同名跨班互不串数据）。
+- **作业跟踪**：首页提供当前范围的作业摘要；完整作业页在页面头部直接切换当前学科合法教学班，再智能录入缺交/请假/迟到/评价。看板按作业种类（校本作业、周末作业、试卷订正、日常作业等）统计每日趋势、占比、排行与连续缺交预警，并支持自动导出 Excel、花名册排除开关和学期配置。**仅按姓名添加的教学班成员也能录缺交并计入看板**（占位学号按教学班隔离，同名跨班互不串数据）；遗留他科教学班不会进入菜单、标签、提交率、看板、记录管理或录入范围，按 ID 直接访问也会被拒绝。
 - **混合智能录入**：同一批文本可混写 `张三校本优秀`、`订正缺交：李四、王五`、`校本差：吴六、赵七`。
 - **缺交 × 成绩相关性**：总缺交次数与当前学科班内排名散点，只覆盖合法教学班成员。
 - **成长/谈话档案**：谈话/观察/家访/家长沟通/奖惩，跟进事项；AI 可读取辅助起草谈话提纲、家长沟通稿。
@@ -105,6 +105,7 @@ cd backend && source .venv/bin/activate && uvicorn app.main:app --reload --port 
 cd backend && source .venv/bin/activate && pytest tests/        # 测试
 # 前端开发
 cd frontend && npm run dev          # localhost:3000
+cd frontend && npm run test:ui      # UI 契约测试
 cd frontend && npx tsc --noEmit     # 类型检查
 cd frontend && npm run build        # 生产构建
 ```
@@ -145,7 +146,7 @@ OPENAI_MODEL=gpt-4o-mini
 官方多架构镜像发布在 GHCR，支持 `linux/amd64` 和 `linux/arm64`。首次部署：
 
 ```bash
-cp compose.env.example .env       # 默认固定 IMAGE_TAG=2.0.1
+cp compose.env.example .env       # 默认固定 IMAGE_TAG=2.0.2
 cp backend/.env.example backend/.env
 # 填好 backend/.env 后：
 docker compose -p grade_tracker pull
@@ -164,13 +165,13 @@ cd backend && source .venv/bin/activate && pytest tests/
 ```
 覆盖：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router` / `notes_router` / `backup_weekly`，教学版新增的 **`test_teaching_router`**（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）与 **`test_scope`**（范围解析 / 身份链接 / 解除），以及作业看板的 **`test_homework_dashboard`**（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）。
 
-**持续集成**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与所有 PR 上运行后端 `pytest`、前端 `tsc --noEmit` + `next build`；`.github/workflows/docker.yml` 在版本标签或手动触发时发布 GHCR 多架构镜像。
+**持续集成**：`.github/workflows/ci.yml` 在每次 push 到 `main` 与所有 PR 上运行后端 `pytest`、前端 `npm run test:ui` + `tsc --noEmit` + `next build`；`.github/workflows/docker.yml` 在版本标签或手动触发时发布 GHCR 多架构镜像。
 
 > 注：`test_homework_router::test_toggle_excluded_roundtrip` 依赖已跑过 `homework/migrate.py`（把旧 `homework.db` 迁入），全新空库下会因花名册为空而跳过失败，属环境依赖，不影响功能。
 
 ## 版本
 
-当前版本 **2.0.1**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
+当前版本 **2.0.2**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
 
 ## 设计文档
 

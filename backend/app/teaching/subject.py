@@ -172,17 +172,18 @@ def resolve_teaching_subject(db, teaching_class_id: Optional[int] = None) -> str
     from app.db.models import Teacher, TeachingClass
 
     teacher = db.query(Teacher).first()
-    if not teacher or not teacher.subject:
+    if not teacher or not (teacher.subject or "").strip():
         raise SubjectNotConfiguredError("教师尚未配置任教科目，请先在设置中选择你的学科")
 
-    subject = teacher.subject
+    subject = teacher.subject.strip()
 
     if teaching_class_id is not None:
         tc = db.query(TeachingClass).filter(TeachingClass.id == teaching_class_id).first()
         if not tc:
             raise ValueError(f"教学班 {teaching_class_id} 不存在")
-        # 空 subject 视为一致（回填后的预期状态）
-        if tc.subject and tc.subject != subject:
+        # NULL / 空串 / 纯空白 subject 视为一致（旧库兼容状态）
+        class_subject = (tc.subject or "").strip()
+        if class_subject and class_subject != subject:
             raise SubjectConflictError(
                 f"教学班「{tc.label}」的学科「{tc.subject}」与教师任教科目「{subject}」冲突",
                 conflicting_classes=[{"id": tc.id, "label": tc.label, "subject": tc.subject}],
@@ -331,7 +332,17 @@ def get_current_class_payload(db) -> dict:
         if tc_id
         else None
     )
+    # 旧库可能保留他科 current id；读端回退到 all，不把冲突班暴露给前端。
+    if tc and teacher and (teacher.subject or "").strip():
+        teacher_subject = teacher.subject.strip()
+        class_subject = (tc.subject or "").strip()
+        if class_subject and class_subject != teacher_subject:
+            tc_id = None
+            tc = None
+    payload = _class_payload(db, tc) if tc else None
+    if payload is not None and teacher:
+        payload["subject"] = (teacher.subject or "").strip() or None
     return {
         "teaching_class_id": tc_id,
-        "class": _class_payload(db, tc) if tc else None,
+        "class": payload,
     }

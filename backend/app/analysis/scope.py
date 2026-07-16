@@ -140,8 +140,12 @@ def student_class_map(db, grade: Optional[int] = None) -> dict[str, tuple[str, i
     return mapping
 
 
-def student_class_map_multi(db, grade: Optional[int] = None) -> dict[str, list[dict]]:
-    """学生 → 其所属全部教学班列表（label+id+grade）。需展示多个班时用。"""
+def student_class_map_multi(
+    db,
+    grade: Optional[int] = None,
+    teaching_class_ids: Optional[set[int]] = None,
+) -> dict[str, list[dict]]:
+    """学生 → 其所属全部教学班列表，可限制到一组合法教学班 ID。"""
     from app.db.models import TeachingClass, TeachingClassMember
 
     q = (
@@ -157,6 +161,8 @@ def student_class_map_multi(db, grade: Optional[int] = None) -> dict[str, list[d
     )
     if grade is not None:
         q = q.filter(TeachingClass.grade == grade)
+    if teaching_class_ids is not None:
+        q = q.filter(TeachingClass.id.in_(teaching_class_ids))
     mapping: dict[str, list[dict]] = {}
     for student_id, label, tc_id, cgrade, _order in q.all():
         mapping.setdefault(student_id, []).append(

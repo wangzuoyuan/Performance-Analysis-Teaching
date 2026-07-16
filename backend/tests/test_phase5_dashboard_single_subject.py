@@ -34,7 +34,7 @@ import pytest
 # ════════════════════════════════════════════════════════════════
 
 _API_TEST_SCRIPT = textwrap.dedent("""\
-    import json, sys
+    import json, os, sys
     from fastapi.testclient import TestClient
     from app.main import app
     from app.db.models import SessionLocal
@@ -48,6 +48,8 @@ _API_TEST_SCRIPT = textwrap.dedent("""\
     assert_script = sys.argv[2]
     with open(assert_script) as f:
         exec(f.read())
+    sys.stdout.flush()
+    os._exit(0)
 """)
 
 
@@ -683,18 +685,15 @@ class TestExamDetailDefaultScopeIsolation:
     def test_explicit_class_still_subject_checked(self, tmp_path):
         """显式 teaching_class_id 仍必须校验 subject/grade；遗留他科班 id 不能返回。"""
         assert_code = textwrap.dedent("""\
-            r0 = client.get("/api/teaching/classes")
-            classes = r0.json().get("classes", [])
-            # 找 P 班（遗留物理）
-            p_cls = [c for c in classes if c.get("label") == "P班"]
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            p_id = db.query(TeachingClass).filter(TeachingClass.label == "P班").one().id
+            db.close()
             r = client.get("/api/exams")
             exams = r.json().get("exams", [])
             latest = exams[0]["id"] if exams else 1
-            if p_cls:
-                d = client.get("/api/exams/%s?teaching_class_id=%s" % (latest, p_cls[0]["id"]))
-                result = {"status": d.status_code}
-            else:
-                result = {"status": "no_P_class"}
+            d = client.get("/api/exams/%s?teaching_class_id=%s" % (latest, p_id))
+            result = {"status": d.status_code}
             print(json.dumps(result))
         """)
         proc = _run_isolated_api_test(tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code)
@@ -1415,3 +1414,417 @@ class TestWeeklyAnonInCurrentSubject:
         data = _parse_stdout(proc)
         assert data["anon_count"] >= 1, \
             f"当前学科匿名成员连续缺交应进入 Weekly: {data}"
+
+
+# ── §7.6 作业看板 / 录入 / 班级菜单必须排除遗留他科教学班 ──
+
+class TestHomeworkScopeExcludesLegacySubjectClass:
+    """数学教师的遗留物理班不得出现在菜单、看板或录入路径。"""
+
+    def test_class_list_and_current_hide_legacy_subject_class(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, Teacher, TeachingClass
+            db = SessionLocal()
+            p = db.query(TeachingClass).filter(TeachingClass.label == "P班").one()
+            teacher = db.query(Teacher).one()
+            teacher.current_teaching_class_id = p.id
+            db.commit()
+            db.close()
+
+            classes_r = client.get("/api/teaching/classes")
+            current_r = client.get("/api/teaching/current")
+            result = {
+                "class_status": classes_r.status_code,
+                "labels": [c["label"] for c in classes_r.json().get("classes", [])],
+                "current_status": current_r.status_code,
+                "current_id": current_r.json().get("teaching_class_id"),
+            }
+            print(json.dumps(result))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["class_status"] == 200
+        assert data["labels"] == ["A班", "B班"]
+        assert data["current_status"] == 200
+        assert data["current_id"] is None
+
+    def test_dashboard_default_excludes_and_explicit_legacy_rejected(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass, ClassRoster, HomeworkRecord
+            db = SessionLocal()
+            p = db.query(TeachingClass).filter(TeachingClass.label == "P班").one()
+            for sid, name in [("s1", "数学生"), ("s6", "物理生")]:
+                roster = db.query(ClassRoster).filter(ClassRoster.student_id == sid).one()
+                roster.name = name
+                db.add(HomeworkRecord(student_id=sid, date="2025-11-01",
+                    subject="校本", submission_status="缺交"))
+            db.commit()
+            p_id = p.id
+            db.close()
+
+            default_r = client.get(
+                "/api/homework/dashboard?start_date=2025-11-01&end_date=2025-11-01"
+            )
+            legacy_r = client.get(
+                f"/api/homework/dashboard?start_date=2025-11-01&end_date=2025-11-01&teaching_class_id={p_id}"
+            )
+            result = {
+                "default_status": default_r.status_code,
+                "total_misses": default_r.json().get("kpi", {}).get("total_misses"),
+                "ranking_ids": [x["student_id"] for x in default_r.json().get("rankings", {}).get("missing", [])],
+                "legacy_status": legacy_r.status_code,
+            }
+            print(json.dumps(result))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["default_status"] == 200
+        assert data["total_misses"] == 5
+        assert set(data["ranking_ids"]) == {"s1", "s2"}
+        assert data["legacy_status"] == 409
+
+    def test_records_reject_explicit_legacy_subject_class(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass, ClassRoster
+            db = SessionLocal()
+            p = db.query(TeachingClass).filter(TeachingClass.label == "P班").one()
+            roster = db.query(ClassRoster).filter(ClassRoster.student_id == "s6").one()
+            roster.name = "物理生"
+            db.commit()
+            p_id = p.id
+            db.close()
+
+            r = client.post("/api/homework/records", json={
+                "raw_text": "物理生：校本作业",
+                "date": "2025-11-01",
+                "mode": "by_student",
+                "teaching_class_id": p_id,
+            })
+            print(json.dumps({"status": r.status_code}))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["status"] == 409
+
+    def test_dashboard_filters_labels_rates_and_includes_legacy_empty_subject(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import (
+                SessionLocal, TeachingClass, TeachingClassMember,
+                Teacher, ClassRoster, HomeworkRecord,
+            )
+            db = SessionLocal()
+            p = db.query(TeachingClass).filter(TeachingClass.label == "P班").one()
+            # 重叠遗留关系：s1 同时残留在 P 班，标签/提交率仍不得暴露 P。
+            db.add(TeachingClassMember(teaching_class_id=p.id, student_id="s1", source="manual"))
+            empty = TeachingClass(grade=2, label="旧NULL班", subject=None, kind="教学")
+            blank = TeachingClass(grade=2, label="旧空串班", subject="", kind="教学")
+            whitespace = TeachingClass(grade=2, label="旧空白班", subject="   ", kind="教学")
+            db.add_all([empty, blank, whitespace])
+            db.flush()
+            db.add(TeachingClassMember(teaching_class_id=empty.id, student_id="s8", source="manual"))
+            db.add(TeachingClassMember(teaching_class_id=blank.id, student_id="s9", source="manual"))
+            db.add(TeachingClassMember(teaching_class_id=whitespace.id, student_id="s10", source="manual"))
+            db.add(ClassRoster(student_id="s8", name="空班学生", class_num=1, excluded=0))
+            db.add(ClassRoster(student_id="s9", name="空串学生", class_num=1, excluded=0))
+            db.add(ClassRoster(student_id="s10", name="空白学生", class_num=1, excluded=0))
+            db.add(HomeworkRecord(student_id="s8", date="2025-11-01",
+                subject="校本", submission_status="缺交"))
+            db.add(HomeworkRecord(student_id="s9", date="2025-11-01",
+                subject="校本", submission_status="缺交"))
+            db.add(HomeworkRecord(student_id="s10", date="2025-11-01",
+                subject="校本", submission_status="缺交"))
+            for day in ["2025-11-02", "2025-11-03"]:
+                db.add(HomeworkRecord(student_id="s1", date=day,
+                    subject="校本", submission_status="缺交"))
+            db.commit()
+            empty_id, blank_id, whitespace_id = empty.id, blank.id, whitespace.id
+            teacher = db.query(Teacher).one()
+            teacher.current_teaching_class_id = whitespace_id
+            db.commit()
+            db.close()
+
+            menu = client.get("/api/teaching/classes").json().get("classes", [])
+            current_r = client.get("/api/teaching/current")
+            all_r = client.get(
+                "/api/homework/dashboard?start_date=2025-11-01&end_date=2025-11-03"
+            )
+            explicit_r = client.get(
+                f"/api/homework/dashboard?start_date=2025-11-01&end_date=2025-11-01&teaching_class_id={empty_id}"
+            )
+            blank_r = client.get(
+                f"/api/homework/dashboard?start_date=2025-11-01&end_date=2025-11-01&teaching_class_id={blank_id}"
+            )
+            whitespace_r = client.get(
+                f"/api/homework/dashboard?start_date=2025-11-01&end_date=2025-11-01&teaching_class_id={whitespace_id}"
+            )
+            kpi_r = client.get(
+                "/api/homework/kpi?start_date=2025-11-01&end_date=2025-11-03"
+            )
+            warnings_r = client.get(
+                "/api/homework/warnings?start_date=2025-11-01&end_date=2025-11-03"
+            )
+            all_data = all_r.json()
+            s1 = next(x for x in all_data["rankings"]["missing"] if x["student_id"] == "s1")
+            top_s1 = next(x for x in all_data["kpi"]["top_students"] if x["student_id"] == "s1")
+            warning_s1 = next(x for x in all_data["warnings"]["streak"]["serious"] if x["student_id"] == "s1")
+            direct_top_s1 = next(x for x in kpi_r.json()["top_students"] if x["student_id"] == "s1")
+            direct_warning_s1 = next(x for x in warnings_r.json()["serious"] if x["student_id"] == "s1")
+            result = {
+                "menu": [c["label"] for c in menu],
+                "menu_subjects": {c["label"]: c.get("subject") for c in menu},
+                "current_id": current_r.json().get("teaching_class_id"),
+                "current_subject": (current_r.json().get("class") or {}).get("subject"),
+                "whitespace_id": whitespace_id,
+                "member_count": all_data["scope"]["member_count"],
+                "ranking_ids": [x["student_id"] for x in all_data["rankings"]["missing"]],
+                "s1_labels": s1["class_labels"],
+                "nested_labels": [top_s1["class_labels"], warning_s1["class_labels"],
+                    direct_top_s1["class_labels"], direct_warning_s1["class_labels"]],
+                "rate_labels": [x["label"] for x in all_data["submission_rates"]],
+                "explicit_status": explicit_r.status_code,
+                "explicit_members": explicit_r.json().get("scope", {}).get("member_count"),
+                "blank_status": blank_r.status_code,
+                "blank_members": blank_r.json().get("scope", {}).get("member_count"),
+                "whitespace_status": whitespace_r.status_code,
+                "whitespace_members": whitespace_r.json().get("scope", {}).get("member_count"),
+            }
+            print(json.dumps(result))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["menu"] == ["A班", "B班", "旧NULL班", "旧空串班", "旧空白班"]
+        assert set(data["menu_subjects"].values()) == {"数学"}
+        assert data["current_id"] == data["whitespace_id"]
+        assert data["current_subject"] == "数学"
+        assert data["member_count"] == 8
+        assert set(data["ranking_ids"]) == {"s1", "s2", "s8", "s9", "s10"}
+        assert data["s1_labels"] == ["A班"]
+        assert data["nested_labels"] == [["A班"]] * 4
+        assert data["rate_labels"] == ["A班", "B班", "旧NULL班", "旧空串班", "旧空白班"]
+        assert data["explicit_status"] == 200
+        assert data["explicit_members"] == 1
+        assert data["blank_status"] == 200
+        assert data["blank_members"] == 1
+        assert data["whitespace_status"] == 200
+        assert data["whitespace_members"] == 1
+
+    def test_roster_add_requires_and_binds_legal_teaching_class(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass, TeachingClassMember, ClassRoster
+            db = SessionLocal()
+            a_id = db.query(TeachingClass).filter(TeachingClass.label == "A班").one().id
+            p_id = db.query(TeachingClass).filter(TeachingClass.label == "P班").one().id
+            db.add(TeachingClassMember(
+                teaching_class_id=a_id, student_id="s10", name="待补学生", source="manual",
+            ))
+            db.commit()
+            db.close()
+
+            missing_r = client.post("/api/homework/roster", json={"name": "缺班学生", "class_num": 1})
+            legacy_r = client.post("/api/homework/roster", json={
+                "name": "物理孤儿", "class_num": 2, "teaching_class_id": p_id,
+            })
+            blank_legacy_r = client.post("/api/homework/roster", json={
+                "name": "   ", "class_num": 2, "teaching_class_id": p_id,
+            })
+            legal_r = client.post("/api/homework/roster", json={
+                "name": "新增学生", "seat_no": 9, "class_num": 1,
+                "teaching_class_id": a_id,
+            })
+            fill_r = client.post("/api/homework/roster", json={
+                "name": "待补学生", "class_num": 1, "teaching_class_id": a_id,
+            })
+            roster = client.get("/api/homework/roster").json()
+            sid = legal_r.json().get("student_id")
+            db = SessionLocal()
+            roster_exists = db.query(ClassRoster).filter(ClassRoster.student_id == sid).count()
+            member_exists = db.query(TeachingClassMember).filter(
+                TeachingClassMember.teaching_class_id == a_id,
+                TeachingClassMember.student_id == sid,
+            ).count()
+            orphan_exists = db.query(ClassRoster).filter(ClassRoster.name == "物理孤儿").count()
+            filled_roster = db.query(ClassRoster).filter(ClassRoster.student_id == "s10").count()
+            filled_members = db.query(TeachingClassMember).filter(
+                TeachingClassMember.teaching_class_id == a_id,
+                TeachingClassMember.student_id == "s10",
+            ).count()
+            synthetic_duplicates = db.query(TeachingClassMember).filter(
+                TeachingClassMember.teaching_class_id == a_id,
+                TeachingClassMember.student_id.like("HW-%待补学生"),
+            ).count()
+            db.close()
+            print(json.dumps({
+                "missing_status": missing_r.status_code,
+                "legacy_status": legacy_r.status_code,
+                "blank_legacy_status": blank_legacy_r.status_code,
+                "legal_status": legal_r.status_code,
+                "visible": sid in {x["student_id"] for x in roster},
+                "roster_exists": roster_exists,
+                "member_exists": member_exists,
+                "orphan_exists": orphan_exists,
+                "fill_status": fill_r.status_code,
+                "fill_sid": fill_r.json().get("student_id"),
+                "filled_roster": filled_roster,
+                "filled_members": filled_members,
+                "synthetic_duplicates": synthetic_duplicates,
+            }))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["missing_status"] == 422
+        assert data["legacy_status"] == 409
+        assert data["blank_legacy_status"] == 409
+        assert data["legal_status"] == 200
+        assert data["visible"] is True
+        assert data["roster_exists"] == 1
+        assert data["member_exists"] == 1
+        assert data["orphan_exists"] == 0
+        assert data["fill_status"] == 200
+        assert data["fill_sid"] == "s10"
+        assert data["filled_roster"] == 1
+        assert data["filled_members"] == 1
+        assert data["synthetic_duplicates"] == 0
+
+    def test_special_records_validate_scope_before_parsing(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass, SpecialRecord
+            db = SessionLocal()
+            p_id = db.query(TeachingClass).filter(TeachingClass.label == "P班").one().id
+            before = db.query(SpecialRecord).count()
+            db.close()
+            special_r = client.post("/api/homework/special-records", json={
+                "raw_text": "   ",
+                "teaching_class_id": p_id,
+            })
+            records_r = client.post("/api/homework/records", json={
+                "raw_text": "   ",
+                "teaching_class_id": p_id,
+            })
+            smart_r = client.post("/api/homework/smart-input", json={
+                "raw_text": "   ",
+                "teaching_class_id": p_id,
+            })
+            db = SessionLocal()
+            after = db.query(SpecialRecord).count()
+            db.close()
+            print(json.dumps({
+                "statuses": [special_r.status_code, records_r.status_code, smart_r.status_code],
+                "before": before, "after": after,
+            }))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["statuses"] == [409, 409, 409]
+        assert data["after"] == data["before"]
+
+    def test_roster_delete_rejects_student_shared_with_legacy_subject(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass, TeachingClassMember, ClassRoster, HomeworkRecord
+            db = SessionLocal()
+            p_id = db.query(TeachingClass).filter(TeachingClass.label == "P班").one().id
+            db.add(TeachingClassMember(
+                teaching_class_id=p_id, student_id="s1", name="学生s1", source="legacy",
+            ))
+            db.commit()
+            before_members = db.query(TeachingClassMember).filter(
+                TeachingClassMember.student_id == "s1"
+            ).count()
+            before_records = db.query(HomeworkRecord).filter(HomeworkRecord.student_id == "s1").count()
+            db.close()
+
+            r = client.delete("/api/homework/roster/s1")
+            db = SessionLocal()
+            result = {
+                "status": r.status_code,
+                "members": db.query(TeachingClassMember).filter(
+                    TeachingClassMember.student_id == "s1"
+                ).count(),
+                "roster": db.query(ClassRoster).filter(ClassRoster.student_id == "s1").count(),
+                "records": db.query(HomeworkRecord).filter(HomeworkRecord.student_id == "s1").count(),
+                "before_members": before_members,
+                "before_records": before_records,
+            }
+            db.close()
+            print(json.dumps(result))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["status"] == 409
+        assert data["members"] == data["before_members"] == 2
+        assert data["roster"] == 1
+        assert data["records"] == data["before_records"]
+
+    def test_manage_record_ids_cannot_mutate_legacy_subject_students(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, HomeworkRecord
+            db = SessionLocal()
+            update_rec = HomeworkRecord(student_id="s6", date="2025-11-02",
+                subject="原物理记录", submission_status="缺交")
+            delete_rec = HomeworkRecord(student_id="s7", date="2025-11-02",
+                subject="待保留记录", submission_status="缺交")
+            db.add_all([update_rec, delete_rec])
+            db.commit()
+            update_id, delete_id = update_rec.id, delete_rec.id
+            db.close()
+
+            update_r = client.put(f"/api/homework/manage/records/{update_id}", json={
+                "subject": "越权改写", "content": "", "remark": "",
+                "submission_status": "已交", "evaluation": "",
+            })
+            delete_r = client.delete(f"/api/homework/manage/records/{delete_id}")
+            db = SessionLocal()
+            updated = db.query(HomeworkRecord).filter(HomeworkRecord.id == update_id).one()
+            delete_exists = db.query(HomeworkRecord).filter(HomeworkRecord.id == delete_id).count()
+            result = {
+                "update_status": update_r.status_code,
+                "delete_status": delete_r.status_code,
+                "updated_subject": updated.subject,
+                "delete_exists": delete_exists,
+            }
+            db.close()
+            print(json.dumps(result))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["update_status"] == 404
+        assert data["delete_status"] == 404
+        assert data["updated_subject"] == "原物理记录"
+        assert data["delete_exists"] == 1
+
+    def test_teaching_class_id_crud_rejects_legacy_subject_class(self, tmp_path):
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            p = db.query(TeachingClass).filter(TeachingClass.label == "P班").one()
+            p_id = p.id
+            db.close()
+
+            update_r = client.put(f"/api/teaching/classes/{p_id}", json={"label": "越权改名"})
+            members_r = client.get(f"/api/teaching/classes/{p_id}/members")
+            add_r = client.post(f"/api/teaching/classes/{p_id}/members", json={"student_ids": ["x"]})
+            delete_r = client.delete(f"/api/teaching/classes/{p_id}")
+            db = SessionLocal()
+            after = db.query(TeachingClass).filter(TeachingClass.id == p_id).first()
+            result = {
+                "statuses": [update_r.status_code, members_r.status_code,
+                    add_r.status_code, delete_r.status_code],
+                "exists": after is not None,
+                "label": after.label if after else None,
+            }
+            db.close()
+            print(json.dumps(result))
+        """)
+        data = _parse_stdout(_run_isolated_api_test(
+            tmp_path, _SETUP_MATH_WITH_LEGACY_PHYSICS, assert_code,
+        ))
+        assert data["statuses"] == [409, 409, 409, 409]
+        assert data["exists"] is True
+        assert data["label"] == "P班"

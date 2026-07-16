@@ -5,7 +5,16 @@ import os
 
 from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
 
-app = FastAPI(title="成绩追踪 API", version="2.0.1")
+app = FastAPI(title="成绩追踪 API", version="2.0.2")
+
+from app.teaching.subject import SubjectConflictError, SubjectNotConfiguredError  # noqa: E402
+
+
+@app.exception_handler(SubjectConflictError)
+@app.exception_handler(SubjectNotConfiguredError)
+async def teaching_subject_domain_error(_request: Request, exc: Exception):
+    """未在路由内转换的学科边界错误统一返回 409。"""
+    return _JSONResponse({"detail": str(exc)}, status_code=409)
 
 # 生产同源（经反代）时无需 CORS；本地 dev 前端 3000 → 后端 8000 跨源需放行。
 # 额外可用 CORS_ORIGINS（逗号分隔）显式追加来源。
