@@ -157,9 +157,8 @@ def test_parse_grade23_class_average_workbook(tmp_path):
     assert first["teacher_name"] == "张老师"
     assert first["subject_averages"]["语文"] == 101.2
     assert first["subject_averages"]["物理_等级"] == 61.2
-    assert first["total_averages"]["+3"] == 180.5
-    assert first["total_averages"]["主三门"] == 319.9
-    assert first["total_averages"]["3+3"] == 500.4
+    # 阶段7：兼容读取含旧总分列的 Excel，但 parser 契约不得再生成/返回总分。
+    assert "total_averages" not in first
     # 无教学班列时，subject_scores 的 class_label 缺省为 None（写库时回退 str(class_num)）
     assert first["class_label"] is None
 
