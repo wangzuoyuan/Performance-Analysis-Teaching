@@ -69,23 +69,47 @@ def _band_config_line() -> str:
 
 
 def _safe_page(raw_page) -> str | None:
-    """只允许 page 的 pathname（有限字符串），拒绝 href/query/object。"""
+    """只允许 page 的 pathname（有限字符串），拒绝 href/query/object。
+
+    安全约束（dict/string 同规则）：
+    - 必须以 ``/`` 开头；
+    - 长度 ≤ 200；
+    - 不含 CR/LF/TAB/NUL 等控制字符；
+    - 不含 ``?`` / ``#``（防 query/hash 注入）。
+    """
     if raw_page is None:
         return None
     if isinstance(raw_page, dict):
         pathname = raw_page.get("pathname")
-        if isinstance(pathname, str) and len(pathname) <= 200:
-            return pathname
-    if isinstance(raw_page, str) and len(raw_page) <= 200:
-        return raw_page
-    return None
+        if isinstance(pathname, str):
+            return _safe_page(pathname)
+        return None
+    if not isinstance(raw_page, str):
+        return None
+    if len(raw_page) > 200:
+        return None
+    if not raw_page.startswith("/"):
+        return None
+    if any(ch in raw_page for ch in ("?", "#", "\r", "\n", "\t", "\x00")):
+        return None
+    # 拒绝其他 C0 控制字符
+    if any(ord(ch) < 0x20 for ch in raw_page):
+        return None
+    return raw_page
 
 
 def _safe_student_id(raw) -> str | None:
-    """student_id 必须是有限短字符串，拒绝 object/超长/换行注入。"""
-    if isinstance(raw, str) and len(raw) <= 50 and "\n" not in raw:
-        return raw
-    return None
+    """student_id 必须是有限短字符串，拒绝 object/超长/控制字符注入。
+
+    拒绝全部 C0 控制字符（含 CR/LF/TAB/NUL 等），而非只拒绝 ``\\n``。
+    """
+    if not isinstance(raw, str):
+        return None
+    if len(raw) > 50:
+        return None
+    if any(ord(ch) < 0x20 for ch in raw):
+        return None
+    return raw
 
 
 def _safe_exam_id(raw) -> int | None:

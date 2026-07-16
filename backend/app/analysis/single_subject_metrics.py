@@ -156,22 +156,44 @@ def compute_rank_multi_class(
     return combined
 
 
+def _validate_teaching_class_id(value) -> None:
+    """teaching_class_id 硬校验：type(x) is int 且 x > 0。
+
+    拒绝 bool（isinstance(True, int)==True 是 Python 陷阱）、字符串、0、负数、None。
+    None 本身不报错（表示 all 模式），由调用方在传参时处理。
+    """
+    if value is None:
+        return
+    if type(value) is not int:
+        raise ValueError(
+            f"teaching_class_id 必须是正整数，收到 {type(value).__name__}: {value!r}"
+        )
+    if value <= 0:
+        raise ValueError(f"teaching_class_id 必须大于 0，收到 {value}")
+
+
 def resolve_single_subject_context(
     db,
     *,
     teaching_class_id: Optional[int] = None,
     grade: Optional[int] = None,
+    include_anon: bool = False,
 ) -> SingleSubjectContext:
     """解析教师唯一任教学科 + 允许的教学班成员范围 + 教学班归属。
 
     与 resolve_exam_context 的区别：grade 可选，用于按年级过滤成员范围
     （rank-frequency 需要按年级限定）。
 
-    扩展（Blocker 3/4/5）：
+    扩展（Blocker 3/4/5/6 + 第三轮审查）：
+    - teaching_class_id 做 type(x) is int and x>0 硬校验，拒绝 bool/字符串/0/负数。
     - 显式 teaching_class_id 时，其 grade 必须与请求 grade（或其考试 grade）
       一致，否则 ValueError（跨年级拒绝）。
     - 填充 explicit_class_id / member_to_default_class / class_labels，
       供六端点统一 label/rank 计算。
+    - include_anon（默认 False）：是否纳入当前学科教学班的合法 _anon: 占位成员。
+      成绩排名工具默认 False（anon 无成绩，不应进入排名池）；作业/档案工具传 True
+      （缺交/谈话跟踪先有名单后有成绩）。只纳入当前学科教学班的 anon，绝不纳入
+      他科班 anon。
 
     Returns:
         SingleSubjectContext(subject, member_ids, explicit_class_id,
@@ -183,6 +205,8 @@ def resolve_single_subject_context(
     """
     from app.analysis.exam_context import resolve_exam_context, NoTeachingScopeError
     from app.db.models import TeachingClass, TeachingClassMember
+
+    _validate_teaching_class_id(teaching_class_id)
 
     # resolve_exam_context remains the authority for the teacher's configured
     # subject and explicit-class subject conflict checks.  Its all-class member
@@ -217,10 +241,14 @@ def resolve_single_subject_context(
         .filter(TeachingClassMember.teaching_class_id.in_(class_ids))
         .all()
     )
-    member_ids = {
-        sid for _tc_id, sid in member_rows
-        if sid and not sid.startswith("_anon:")
-    }
+    member_ids: set[str] = set()
+    for _tc_id, sid in member_rows:
+        if not sid:
+            continue
+        is_anon = sid.startswith("_anon:")
+        if is_anon and not include_anon:
+            continue
+        member_ids.add(sid)
     if not member_ids:
         raise NoTeachingScopeError("当前任教学科的教学班没有有效成员")
 
@@ -230,8 +258,12 @@ def resolve_single_subject_context(
     # students one deterministic default class in all-class mode.
     members_by_class: dict[int, list[str]] = {}
     for tc_id, sid in member_rows:
-        if sid and not sid.startswith("_anon:"):
-            members_by_class.setdefault(tc_id, []).append(sid)
+        if not sid:
+            continue
+        is_anon = sid.startswith("_anon:")
+        if is_anon and not include_anon:
+            continue
+        members_by_class.setdefault(tc_id, []).append(sid)
     for tc in classes:
         for sid in members_by_class.get(tc.id, []):
             member_to_default.setdefault(sid, tc.id)

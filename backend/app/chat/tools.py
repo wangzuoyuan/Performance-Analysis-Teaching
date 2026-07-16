@@ -123,6 +123,8 @@ def list_exams(grade: Optional[int] = None, teaching_class_id: Optional[int] = N
     单学科化：只返回当前教师任教学科在教学班成员范围内有 raw_score 或
     grade_score 的考试；最近考试按 exam_date desc, id desc。
     teaching_class_id 可选，进一步限定到某个具体教学班的成员范围。
+
+    grade 硬校验（Blocker 7）：仅允许 None/1/2/3，拒绝 bool 和其他整数。
     """
     from app.analysis.single_subject_metrics import (
         resolve_single_subject_context,
@@ -130,6 +132,13 @@ def list_exams(grade: Optional[int] = None, teaching_class_id: Optional[int] = N
     )
     from app.teaching.subject import resolve_teaching_subject
     from app.db.models import Exam
+
+    # grade 硬校验：拒绝 bool（isinstance(True,int)==True 陷阱）和非法值
+    if grade is not None:
+        if type(grade) is not int:
+            raise ValueError(f"grade 必须是 None/1/2/3，收到 {type(grade).__name__}: {grade!r}")
+        if grade not in (1, 2, 3):
+            raise ValueError(f"grade 仅允许 None/1/2/3，收到 {grade}")
 
     db = _db()
     try:
@@ -197,6 +206,8 @@ def student_exam_detail(student_id: str, exam_id: int, teaching_class_id: Option
     competition ranking）。学生必须在合法 scope（否则 ValueError）。
     teaching_class_id 可选，用于显式班 rank pool 和正确 class_label。
     空分行（无 raw/grade_score）不当作有效成绩。
+
+    exam_id 硬校验（Blocker 7）：必须是正整数且非 bool。
     """
     from app.db.models import Exam, SubjectScore
     from app.analysis.single_subject_metrics import (
@@ -207,6 +218,10 @@ def student_exam_detail(student_id: str, exam_id: int, teaching_class_id: Option
     from app.teaching.subject import resolve_teaching_subject
 
     _reject_legacy_class_params()
+
+    # exam_id 硬校验：必须是正整数且非 bool
+    if type(exam_id) is not int or exam_id <= 0:
+        raise ValueError(f"exam_id 必须是正整数，收到 {exam_id!r}")
 
     db = _db()
     try:
@@ -284,10 +299,21 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teachin
     """某生当前学科跨次趋势（单学科化）。
 
     只生成当前任教学科历史，删除 total_type / main_total_trend。
-    每个 series 点含 raw_score / grade_score / grade_percentile / subject_rank。
+    每个 series 点含 raw_score / grade_score / grade_percentile / subject_rank /
+    student_id（标实际学号）。
     学生必须在合法 scope（否则 ValueError）。高二/三选考用 grade_score 判断趋势，
     其他单科用 percentile，沿用阶段3/4 既有规则。
     teaching_class_id 可选，用于验证学生属于该班并使用该班 rank pool。
+
+    identity 跨学段（第三轮审查 Blocker 4/5）：
+    - 先验证请求 student_id 属于当前 scope；
+    - 再用 identity 层 student_ids_of_person 读取同一人的历史学号成绩；
+    - 绝不扩展到其他 identity；无 alias 时只读自身学号。
+
+    exam_ids 硬校验（Blocker 8）：
+    - 必须是正整数列表（拒绝 bool / 字符串 / 非正整数）；
+    - 每个考试必须属于当前 subject/scope（valid_exam_ids_for_subject）；
+    - 非法/不存在/他班独有考试明确 ValueError，绝不静默过滤。
     """
     from app.db.models import Exam, SubjectScore
     from app.analysis.single_subject_metrics import (
@@ -296,6 +322,7 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teachin
         label_for_student,
         valid_exam_ids_for_subject,
     )
+    from app.analysis.scope import student_ids_of_person
     from app.teaching.subject import resolve_teaching_subject
 
     db = _db()
@@ -306,18 +333,60 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teachin
             raise ValueError(
                 f"学生 {student_id} 不在当前任教学科教学班成员范围内"
             )
+
         valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids)
+
+        # identity 跨学段：读取同一人的全部历史学号
+        all_person_ids = student_ids_of_person(db, student_id)
+
+        # 发现历史别名学号的考试（当前 subject），合并到趋势可选范围
+        historical_exam_ids = {
+            row[0] for row in (
+                db.query(SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(all_person_ids),
+                )
+                .filter(
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None)
+                )
+                .distinct()
+                .all()
+            )
+        }
+        # 合并：当前 scope 有效考试 + 同一人历史别名考试
+        all_valid_ids = valid_ids | historical_exam_ids
+
         if exam_ids:
-            selected = [eid for eid in exam_ids if eid in valid_ids]
+            # 硬校验：必须是正整数列表，拒绝 bool
+            if not isinstance(exam_ids, list):
+                raise ValueError("exam_ids 必须是正整数列表")
+            for eid in exam_ids:
+                if type(eid) is not int or eid <= 0:
+                    raise ValueError(
+                        f"exam_ids 中的 {eid!r} 不是正整数"
+                    )
+            # 每个考试必须属于当前 subject/scope（含同一人历史别名考试）
+            for eid in exam_ids:
+                if eid not in all_valid_ids:
+                    raise ValueError(
+                        f"考试 {eid} 不在当前任教学科/教学班范围内"
+                    )
+            selected = sorted(exam_ids)
         else:
-            selected = sorted(valid_ids)
+            selected = sorted(all_valid_ids)
         if not selected:
+            scope_field = "teaching_class" if teaching_class_id is not None else "all"
             return {
                 "teaching_subject": subject,
+                "teaching_class_id": ctx.explicit_class_id,
+                "scope": scope_field,
+                "score_basis": "raw_score",
                 "student_id": student_id,
                 "series": [],
-                "score_basis": "grade_score" if False else "raw_score",
             }
+
         exams = (
             db.query(Exam)
             .filter(Exam.id.in_(selected))
@@ -329,13 +398,16 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teachin
         use_grade_score = last_exam.grade in (2, 3) and subject in ELECTIVE_SUBJECTS
         score_basis = "grade_score" if use_grade_score else "raw_score"
 
+        scope_field = "teaching_class" if teaching_class_id is not None else "all"
+
         series = []
         for exam in exams:
+            # 在同一人的全部历史学号中查找该场考试的成绩
             score = (
                 db.query(SubjectScore)
                 .filter(
                     SubjectScore.exam_id == exam.id,
-                    SubjectScore.student_id == student_id,
+                    SubjectScore.student_id.in_(all_person_ids),
                     SubjectScore.subject == subject,
                 )
                 .first()
@@ -351,6 +423,7 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teachin
                 "exam_name": exam.name,
                 "exam_date": exam.exam_date,
                 "grade": exam.grade,
+                "student_id": score.student_id,
                 "raw_score": score.raw_score,
                 "grade_score": score.grade_score,
                 "grade_percentile": score.grade_percentile,
@@ -359,8 +432,8 @@ def student_trend(student_id: str, exam_ids: Optional[list[int]] = None, teachin
             })
         return {
             "teaching_subject": subject,
-            "teaching_class_id": label_for_student(ctx, student_id, return_tc_id=True)[1],
-            "scope": "all",
+            "teaching_class_id": ctx.explicit_class_id,
+            "scope": scope_field,
             "score_basis": score_basis,
             "student_id": student_id,
             "series": series,
@@ -383,51 +456,100 @@ def student_learning_profile(
     保留 series（当前学科跨次趋势，含 subject_rank）。
     学生必须在合法 scope。
     teaching_class_id 可选，用于在 scope 内按 name 解析学生并限定 rank pool。
+
+    第三轮审查修复：
+    - 合法成员即使无当前 SubjectScore，按 id/name 也返回 student 与空 series/null 成绩，
+      不再返回「未找到」。
+    - identity 跨学段：先用 student_ids_of_person 读取同一人的全部历史学号成绩。
+    - scope 字段：显式班为 teaching_class，全部为 all；teaching_class_id 一致。
     """
-    from app.db.models import Exam, SubjectScore
+    from app.db.models import Exam, SubjectScore, TeachingClassMember
     from app.analysis.single_subject_metrics import (
         resolve_single_subject_context,
         compute_subject_rank_contextual,
         label_for_student,
         valid_exam_ids_for_subject,
     )
+    from app.analysis.scope import student_ids_of_person
     from app.teaching.subject import resolve_teaching_subject
 
     db = _db()
     try:
         subject = resolve_teaching_subject(db, teaching_class_id=teaching_class_id)
         ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
-        # 学生定位（限合法成员范围内、当前学科）
-        q = (
-            db.query(SubjectScore.student_id, SubjectScore.name)
-            .filter(
-                SubjectScore.subject == subject,
-                SubjectScore.student_id.in_(ctx.member_ids),
+
+        scope_field = "teaching_class" if teaching_class_id is not None else "all"
+
+        # 学生定位：先查 TeachingClassMember（含无分成员），再回退 SubjectScore name
+        # 用教学班成员表作为权威来源，无分成员也能命中
+        member_q = (
+            db.query(
+                TeachingClassMember.student_id,
+                TeachingClassMember.name,
             )
-            .distinct()
+            .filter(TeachingClassMember.student_id.in_(ctx.member_ids))
         )
         if student_id:
-            q = q.filter(SubjectScore.student_id == student_id)
-        if name:
-            q = q.filter(SubjectScore.name.like(f"%{name}%"))
-        students = q.limit(10).all()
-        if not students:
+            member_q = member_q.filter(TeachingClassMember.student_id == student_id)
+        elif name:
+            member_q = member_q.filter(TeachingClassMember.name.like(f"%{name}%"))
+        else:
+            return {"error": "需提供 student_id 或 name", "teaching_subject": subject}
+
+        members = member_q.limit(10).all()
+        if not members:
+            # 回退：尝试从 SubjectScore name 查找（成员表可能没填 name）
+            score_q = (
+                db.query(SubjectScore.student_id, SubjectScore.name)
+                .filter(
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(ctx.member_ids),
+                )
+                .distinct()
+            )
+            if student_id:
+                score_q = score_q.filter(SubjectScore.student_id == student_id)
+            elif name:
+                score_q = score_q.filter(SubjectScore.name.like(f"%{name}%"))
+            members = score_q.limit(10).all()
+
+        if not members:
             return {"error": "未在当前任教学科范围内找到该学生",
                     "student_id": student_id, "name": name,
                     "teaching_subject": subject}
-        if len(students) > 1 and not student_id:
+        if len(members) > 1 and not student_id:
             return {
                 "error": "匹配到多个学生，请指定学号",
                 "teaching_subject": subject,
-                "candidates": [{"student_id": r[0], "name": r[1]} for r in students],
+                "candidates": [{"student_id": r[0], "name": r[1]} for r in members],
             }
-        resolved_student_id = students[0][0]
-        resolved_name = students[0][1] or resolved_student_id
+        resolved_student_id = members[0][0]
+        resolved_name = members[0][1] or resolved_student_id
+
+        # identity 跨学段：读取同一人的全部历史学号
+        all_person_ids = student_ids_of_person(db, resolved_student_id)
 
         valid_ids = valid_exam_ids_for_subject(db, subject, ctx.member_ids)
+        # 发现历史别名学号的考试（当前 subject），合并到趋势可选范围
+        historical_exam_ids = {
+            row[0] for row in (
+                db.query(SubjectScore.exam_id)
+                .filter(
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(all_person_ids),
+                )
+                .filter(
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None)
+                )
+                .distinct()
+                .all()
+            )
+        }
+        all_valid_ids = valid_ids | historical_exam_ids
         exams = (
             db.query(Exam)
-            .filter(Exam.id.in_(valid_ids))
+            .filter(Exam.id.in_(all_valid_ids))
             .order_by(Exam.grade, Exam.exam_date, Exam.id)
             .all()
         )
@@ -438,11 +560,12 @@ def student_learning_profile(
 
         series = []
         for exam in exams:
+            # 在同一人的全部历史学号中查找该场考试的成绩
             score = (
                 db.query(SubjectScore)
                 .filter(
                     SubjectScore.exam_id == exam.id,
-                    SubjectScore.student_id == resolved_student_id,
+                    SubjectScore.student_id.in_(all_person_ids),
                     SubjectScore.subject == subject,
                 )
                 .first()
@@ -460,6 +583,7 @@ def student_learning_profile(
                 "exam_name": exam.name,
                 "exam_date": exam.exam_date,
                 "grade": exam.grade,
+                "student_id": score.student_id,
                 "raw_score": score.raw_score,
                 "grade_score": score.grade_score,
                 "grade_percentile": score.grade_percentile,
@@ -481,10 +605,8 @@ def student_learning_profile(
 
         return {
             "teaching_subject": subject,
-            "teaching_class_id": label_for_student(
-                ctx, resolved_student_id, return_tc_id=True,
-            )[1],
-            "scope": "all",
+            "teaching_class_id": ctx.explicit_class_id,
+            "scope": scope_field,
             "score_basis": score_basis,
             "student": {
                 "student_id": resolved_student_id,
@@ -1387,8 +1509,10 @@ def student_homework_summary(
 
     db = next(get_db())
     try:
-        # 先校验学生是否在当前学科合法范围内
-        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        # 先校验学生是否在当前学科合法范围内（含合法 anon 成员）
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id, include_anon=True,
+        )
         if student_id and student_id not in ctx.member_ids:
             return {"error": f"学生 {student_id} 不在当前任教学科教学班成员范围内",
                     "teaching_subject": ctx.subject}
@@ -1427,7 +1551,9 @@ def student_notes(
 
     db = next(get_db())
     try:
-        ctx = resolve_single_subject_context(db, teaching_class_id=teaching_class_id)
+        ctx = resolve_single_subject_context(
+            db, teaching_class_id=teaching_class_id, include_anon=True,
+        )
         member_ids = ctx.member_ids
         roster_q = db.query(ClassRoster).filter(ClassRoster.student_id.in_(member_ids))
         if student_id:
