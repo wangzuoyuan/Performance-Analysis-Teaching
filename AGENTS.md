@@ -59,11 +59,11 @@ tail -f ~/.exam-tracker/frontend.log
 | GET  | `/api/exams` | 考试列表，支持 `?grade=` 筛选 |
 | DELETE | `/api/exams/{id}` | 删除考试及所有关联数据（级联） |
 | GET  | `/api/exams/{id}` | 考试详情：含 `students[]`、`rank_bands`、`rank_distribution`、`class_averages`、`stats` |
-| GET  | `/api/focus-list/{id}` | 重点关注名单（临界段/薄弱段/严重偏科），支持 `?class_num=` |
-| GET  | `/api/students/{id}` | 学生跨学年画像：含 `main_total_trend`（每项含 `class_rank`）、`five_trend`、`plus3_trend`、`san3_trend`、`subject_trend` |
-| GET  | `/api/class/compare` | 班级横向对比，支持 `?exam_id=` |
-| GET  | `/api/subject-weakness/{id}` | 单科薄弱名单，支持 `?class_num=` |
-| GET  | `/api/band-trend` | 历次考试高分段/临界段/薄弱段人数趋势，支持 `?grade=&class_num=` |
+| GET  | `/api/focus-list/{id}` | 当前学科临界/薄弱名单，支持 `?teaching_class_id=` |
+| GET  | `/api/students/{id}` | 当前学科跨学年画像，合法无成绩成员返回空 `series` |
+| GET  | `/api/class/compare` | 当前学科教学班横向对比，支持 `?exam_id=` |
+| GET  | `/api/subject-weakness/{id}` | 当前学科薄弱名单，支持 `?teaching_class_id=` |
+| GET  | `/api/band-trend` | 当前学科历次段位人数趋势，支持 `?grade=&teaching_class_id=` |
 | GET  | `/api/rank-metrics` | 返回排名筛选/频次统计可用指标，支持 `?grade=&mode=range\|frequency` |
 | GET  | `/api/rank-range` | 单次考试按指标和年级排名区间筛选学生 |
 | GET  | `/api/rank-frequency` | 多场考试排名区间/百分位区间/精确等级分频次统计 |
@@ -82,13 +82,13 @@ tail -f ~/.exam-tracker/frontend.log
 |------|------|------|
 | POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录（by_student / by_subject 两模式；`by_subject` 为兼容旧名，当前含义是“按作业种类”），录入后自动导出当天 Excel |
 | GET  | `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板统计；`/subjects` 为兼容旧路径，返回各作业种类分布；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
-| GET  | `/correlation` | 缺交 × 成绩相关：默认总缺交 × 主三门排名；`?subject=` 为历史兼容的单科学业相关入口，前端不再作为主路径 |
-| GET  | `/correlation/subjects` | 历史兼容：各学科「缺交拖成绩」皮尔逊相关系数排序 |
+| GET  | `/correlation` | 总缺交 × 当前学科班内排名；可用 `teaching_class_id` 限定合法教学班 |
+| GET  | `/correlation/subjects` | 历史兼容路径，不得返回其他学科统计 |
 | GET  | `/student/{student_id}` | 单个学生作业概况（供学生画像页作业卡片） |
 | GET/PUT/DELETE | `/manage/records[/{id}]` | 记录管理；列表支持 `?date=&student=&subject=` 筛选（`subject` 为兼容参数名，实际筛作业种类，供看板图表下钻） |
 | GET/POST/DELETE/PUT | `/roster[/{student_id}[/toggle-excluded]]` | 花名册增删查 + 排除统计开关 |
 | GET/PUT | `/semester` | 学期起止与名称配置 |
-| GET  | `/api/weekly-focus` | 本周关注：连续缺交预警 + 本周缺交激增 + 最近考试临界/薄弱/偏科 + 谈话跟进待办（缺交驱动，不依赖新考试） |
+| GET  | `/api/weekly-focus` | 当前学科范围的缺交预警、临界/薄弱与谈话跟进待办 |
 
 ### notes / backup router
 - `notes/router.py`（`/api/notes`）：`GET /{student_id}`、`POST`、`PUT /{id}`（含跟进勾选）、`DELETE /{id}`，管理 `student_note` 成长/谈话档案。
@@ -108,7 +108,7 @@ tail -f ~/.exam-tracker/frontend.log
 
 **上传链路**：`ingest/router.py`（`POST /api/uploads/preview` 取回按文件名识别的年级/学期/考试类型，前端逐文件确认后 `POST /api/uploads/commit` 入库）→ `filename_parser.py` → `excel_parser.py`（高一固定列 vs 高二/三 3+3 两种 schema；教学版额外探测「教学班/走班/选科班」列写 `class_label`）→ 写入 SQLite。教学版：旧的 `POST /api/teacher/bind-class`（单班绑定）已废弃、前端上传页的「绑定班级」步骤已移除；班级在 `/settings/classes`（`/api/teaching/*`）维护，`commit` 后由 `teaching/service.sync_members_after_upload` 自动维护教学班成员。
 
-**读端链路**：`analysis/router.py` 直接用 SQLAlchemy 查询，**没有使用** `analysis/trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py` 这些计算模块（它们是早期抽象，当前 router 内联了逻辑）。改查询逻辑只需改 `router.py`。
+**读端链路**：`analysis/router.py` 与 `chat/tools.py` 直接按教师当前学科和教学班范围查询；早期 `trends.py` / `class_compare.py` / `focus_list.py` / `cross_year.py` 已删除。
 
 **学生画像单科趋势**：`/api/students/{id}` 的 `subject_trend` 只返回 `raw_score` 或 `grade_score` 有真实值的单科记录。像 2025 年 9 月只有语数英时，物化生政史地即使原始导入行残留百分位，也不能进入单科趋势线；前端明细表仍显示为 `"—"`。
 
@@ -116,17 +116,15 @@ tail -f ~/.exam-tracker/frontend.log
 
 **作业模块**：聚合查询集中在 `homework/service.py`（看板/排行/预警/相关性/`weekly_focus`），被 `homework/router.py` 与 `chat/tools.py` 共用；作业种类归类与录入文本解析在 `homework/parser.py`；Excel 导出在 `homework/export.py`。新增 4 张表 `class_roster`/`homework_record`/`special_record`/`homework_setting`，作业记录按真实学号 `student_id` 与成绩表关联。`HomeworkRecord.subject` / `?subject=` / `/subjects` 是兼容旧库和旧 API 的命名，当前业务含义均为“作业种类”。缺交看板默认口径：过滤 `remark` 非空（请假当天不算缺交）、`subject='全科'`、`excluded=1` 学生。智能录入支持混合写法（如 `张三校本优秀`、`订正缺交：李四、王五`、`校本差：吴六、赵七`），并按作业种类统计校本作业、周末作业、试卷订正、日常作业等。一次性数据迁移脚本 `homework/migrate.py`（按姓名把旧 `homework.db` 座号映射到成绩库真实学号，幂等可重跑）。
 
-**档案 / 主动提醒 / 备份**：`student_note` 表 + `notes/router.py` 管理成长/谈话档案，AI 工具 `student_notes` 可读取。`weekly_focus()` 合成「本周关注」（懒导入 `chat/tools.focus_list` 避免循环依赖）。`backup/router.py` 与 `run.py` 的 `backup/restore` 子命令共用备份目录 `~/.exam-tracker-backups`（DATA_DIR 之外）；`run.py init` 清空前自动快照。打印一页纸 `/student/[id]/report` 靠 `@media print`（`print:hidden` 隐藏侧栏/顶栏）。
+**档案 / 主动提醒 / 备份**：`student_note` 表 + `notes/router.py` 管理成长/谈话档案，AI 工具 `student_notes` 只在合法成员范围内读取。`weekly_focus()` 直接复用当前学科排名口径，不调用 chat focus 工具。备份目录为 `~/.exam-tracker-backups`（DATA_DIR 之外），`run.py init` 清空前自动快照。打印一页纸 `/student/[id]/report` 使用 `@media print`。
 
 ## 业务口径（AI 与趋势指标）
 
-- **加三学科**：指物理、化学、生物、政治、历史、地理六科的统称；`+3/选考三科` 才表示高二/高三学生实际选择参加的三门。
-- **跨学年趋势**：只能用主三门和语数英原始分；高一到高二禁止用九门或 +3 比。
-- **总分趋势**：用 `xueji_rank`；无学籍排名时用 `grade_percentile`。
-- **高一所有单科**：用 `grade_percentile`，百分位降低表示进步。
-- **高二/高三语数英单科**：用 `grade_percentile`。
-- **高二/高三加三选考单科**：用 `grade_score`，不用原始分和百分位判断趋势；等级分按 70、67、64、61、58、55、52、49、46、43、40 精确值统计。
-- `raw_score` 只用于单次考试原始分描述，不得用于趋势进退步计算。
+- **唯一学科**：所有页面、API、导出和 AI 工具只使用教师唯一任教学科。
+- **教学班范围**：未选班时为当前学科所有合法教学班成员的去重并集；选班时 `teaching_class_id` 是不可覆盖的硬边界。
+- **排名池**：各教学班独立 competition ranking，不合并班级排名池。
+- **分数口径**：高二/高三选考科目使用 `grade_score`，其他情况使用 `raw_score`；无真实分数的合法成员保留但成绩/排名为 `null`。
+- **旧总分**：`TotalScore` 只用于旧库启动、备份/恢复和整场删除兼容，不得进入业务读写。
 
 ## 前端开发要点
 
