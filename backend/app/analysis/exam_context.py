@@ -33,6 +33,7 @@ class ExamAnalysisContext:
     """考试分析上下文：学科 + 允许的学生学号集合。"""
     subject: str
     member_ids: frozenset[str]
+    class_ids: frozenset[int]
 
 
 def resolve_exam_context(
@@ -56,7 +57,9 @@ def resolve_exam_context(
         NoTeachingScopeError: 没有任何有成员的教学班，或指定教学班无成员。
         ValueError: teaching_class_id 不存在。
     """
-    from app.analysis.scope import members_of, all_my_member_ids
+    from sqlalchemy import func, or_
+    from app.analysis.scope import members_of
+    from app.db.models import TeachingClass, TeachingClassMember
 
     # 1) 学科解析 + teaching_class_id 存在性/一致性校验
     #    resolve_teaching_subject 内部校验：id 不存在→ValueError；
@@ -65,13 +68,35 @@ def resolve_exam_context(
 
     # 2) 成员范围解析
     if teaching_class_id is not None:
+        current_class_ids = {teaching_class_id}
         member_ids = members_of(db, teaching_class_id)
         if not member_ids:
             raise NoTeachingScopeError(
                 f"教学班 {teaching_class_id} 没有成员，无法进行考试分析"
             )
     else:
-        member_ids = all_my_member_ids(db)
+        current_class_ids = {
+            row[0]
+            for row in (
+                db.query(TeachingClass.id)
+                .filter(or_(
+                    func.trim(TeachingClass.subject) == subject,
+                    TeachingClass.subject.is_(None),
+                    func.trim(TeachingClass.subject) == "",
+                ))
+                .all()
+            )
+        }
+        member_ids = {
+            row[0]
+            for row in (
+                db.query(TeachingClassMember.student_id)
+                .filter(TeachingClassMember.teaching_class_id.in_(current_class_ids))
+                .distinct()
+                .all()
+            )
+            if row[0] and not row[0].startswith("_anon:")
+        }
         if not member_ids:
             raise NoTeachingScopeError(
                 "没有任何有成员的教学班，请先在设置中配置教学班成员"
@@ -80,4 +105,5 @@ def resolve_exam_context(
     return ExamAnalysisContext(
         subject=subject,
         member_ids=frozenset(member_ids),
+        class_ids=frozenset(current_class_ids),
     )

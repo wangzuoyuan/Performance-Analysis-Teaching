@@ -70,7 +70,8 @@ def list_my_classes(grade: Optional[int] = None) -> list[dict[str, Any]]:
         subject = resolve_teaching_subject(db)
         out = []
         for tc in list_classes(db, grade):
-            if tc.subject != subject:
+            class_subject = (tc.subject or "").strip()
+            if class_subject and class_subject != subject:
                 continue
             out.append({
                 "teaching_class_id": tc.id,

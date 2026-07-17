@@ -109,6 +109,46 @@ class TestTeacherSubjectMigration:
         assert t.subject is None  # 补列后默认 None
         db.close()
 
+    def test_migration_infers_unique_subject_and_backfills_empty_classes(self):
+        eng = make_legacy_db_without_teacher_subject()
+        Session = sessionmaker(bind=eng)
+        db = Session()
+        db.execute(text("INSERT INTO teacher (id, name) VALUES (1, '王老师')"))
+        db.execute(text(
+            "INSERT INTO teaching_class (grade, label, subject, kind, sort_order) "
+            "VALUES (2, '物A1', '物理', '教学', 0), (1, '6', NULL, '行政', 1)"
+        ))
+        db.commit()
+
+        from app.teaching.migrate_subject import migrate_teacher_subject
+        result = migrate_teacher_subject(eng, db)
+
+        teacher = db.query(Teacher).first()
+        classes = db.query(TeachingClass).order_by(TeachingClass.id).all()
+        assert teacher.subject == "物理"
+        assert [tc.subject for tc in classes] == ["物理", "物理"]
+        assert result["inferred_subject"] == "物理"
+        assert result["backfilled_classes"] == 1
+        db.close()
+
+    def test_migration_does_not_guess_when_classes_have_multiple_subjects(self):
+        eng = make_legacy_db_without_teacher_subject()
+        Session = sessionmaker(bind=eng)
+        db = Session()
+        db.execute(text("INSERT INTO teacher (id, name) VALUES (1, '王老师')"))
+        db.execute(text(
+            "INSERT INTO teaching_class (grade, label, subject, kind, sort_order) "
+            "VALUES (2, '物A1', '物理', '教学', 0), (2, '史B3', '历史', '教学', 1)"
+        ))
+        db.commit()
+
+        from app.teaching.migrate_subject import migrate_teacher_subject
+        result = migrate_teacher_subject(eng, db)
+
+        assert db.query(Teacher).first().subject is None
+        assert result["inferred_subject"] is None
+        db.close()
+
     def test_real_app_startup_migrates_subject_before_teacher_query(self, tmp_path):
         """旧库真实启动顺序：补 subject 后才能让后续迁移查询 Teacher ORM。"""
         data_dir = tmp_path / "data"
@@ -373,6 +413,40 @@ class TestResolveTeachingSubject:
         db.close()
 
 
+class TestExamContextSubjectClassBoundary:
+    """默认范围只聚合当前学科班；旧库空学科班继续兼容。"""
+
+    def test_all_scope_excludes_legacy_other_subject_class_members(self):
+        from app.analysis.exam_context import resolve_exam_context
+        db = make_db()
+        db.add(Teacher(subject="物理"))
+        physics = TeachingClass(grade=2, label="物A1", subject="物理", kind="教学")
+        history = TeachingClass(grade=2, label="史B3", subject="历史", kind="教学")
+        db.add_all([physics, history])
+        db.flush()
+        db.add_all([
+            TeachingClassMember(teaching_class_id=physics.id, student_id="p1"),
+            TeachingClassMember(teaching_class_id=history.id, student_id="h1"),
+        ])
+        db.commit()
+
+        assert resolve_exam_context(db).member_ids == frozenset({"p1"})
+        db.close()
+
+    def test_all_scope_includes_legacy_empty_subject_class(self):
+        from app.analysis.exam_context import resolve_exam_context
+        db = make_db()
+        db.add(Teacher(subject="物理"))
+        legacy = TeachingClass(grade=1, label="6", subject=None, kind="行政")
+        db.add(legacy)
+        db.flush()
+        db.add(TeachingClassMember(teaching_class_id=legacy.id, student_id="p1"))
+        db.commit()
+
+        assert resolve_exam_context(db).member_ids == frozenset({"p1"})
+        db.close()
+
+
 # ────────────────────────────── 首次设置 subject：回填 + 冲突 ──────────────────────────────
 
 
@@ -496,6 +570,20 @@ class TestClassCreateInheritsSubject:
             db, grade=2, label="物A1", kind="教学", subject="物理"
         )
         assert tc["subject"] == "物理"
+        db.close()
+
+    def test_first_create_configures_teacher_from_compatible_request(self):
+        from app.teaching.subject import create_class_with_subject
+        db = make_db()
+        db.add(Teacher(subject=None))
+        db.commit()
+
+        tc = create_class_with_subject(
+            db, grade=2, label="物A1", kind="教学", subject=" 物理 "
+        )
+
+        assert tc["subject"] == "物理"
+        assert db.query(Teacher).first().subject == "物理"
         db.close()
 
     def test_create_with_conflicting_subject_raises(self):

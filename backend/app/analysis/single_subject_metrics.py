@@ -203,6 +203,7 @@ def resolve_single_subject_context(
         SubjectNotConfiguredError / SubjectConflictError / NoTeachingScopeError /
         ValueError
     """
+    from sqlalchemy import func, or_
     from app.analysis.exam_context import resolve_exam_context, NoTeachingScopeError
     from app.db.models import TeachingClass, TeachingClassMember
 
@@ -216,7 +217,11 @@ def resolve_single_subject_context(
     base_ctx = resolve_exam_context(db, teaching_class_id=teaching_class_id)
     subject = base_ctx.subject
 
-    classes_q = db.query(TeachingClass).filter(TeachingClass.subject == subject)
+    classes_q = db.query(TeachingClass).filter(or_(
+        func.trim(TeachingClass.subject) == subject,
+        TeachingClass.subject.is_(None),
+        func.trim(TeachingClass.subject) == "",
+    ))
     if teaching_class_id is not None:
         classes_q = classes_q.filter(TeachingClass.id == teaching_class_id)
     if grade is not None:

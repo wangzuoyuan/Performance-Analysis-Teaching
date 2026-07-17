@@ -6,6 +6,7 @@ const dashboard = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 
 const homework = readFileSync(new URL('../src/app/homework/page.tsx', import.meta.url), 'utf8')
 const homeworkSettings = readFileSync(new URL('../src/app/homework/settings/page.tsx', import.meta.url), 'utf8')
 const weeklyFocus = readFileSync(new URL('../src/components/WeeklyFocusCard.tsx', import.meta.url), 'utf8')
+const classSettings = readFileSync(new URL('../src/app/settings/classes/page.tsx', import.meta.url), 'utf8')
 
 test('home dashboard renders a scope-aware homework overview', () => {
   assert.match(dashboard, /import HomeworkOverviewCard from ['"]@\/components\/HomeworkOverviewCard['"]/, '首页应导入作业看板摘要组件')
@@ -42,4 +43,11 @@ test('homework roster additions bind to the selected teaching class', () => {
   assert.match(homeworkSettings, /setRoster\(\[\]\)/, '切班请求开始时应清空旧花名册')
   assert.match(homeworkSettings, /setRosterError\(true\)/, '花名册失败时应进入显式错误态')
   assert.match(homeworkSettings, /rosterScope !== current/, '花名册范围与选择器不一致时必须禁用新增')
+})
+
+test('class creation bootstraps and locks the single teaching subject', () => {
+  assert.match(classSettings, /fetch\(['"]\/api\/teacher['"]\)/, '建班前应读取教师唯一任教学科')
+  assert.match(classSettings, /任教学科（首次必填）/, '首次建班必须明确提示学科必填')
+  assert.match(classSettings, /disabled=\{teacherSubject != null\}/, '教师学科配置后不能在单个班级中修改')
+  assert.match(classSettings, /const data = await res\.json\(\)\.catch/, '创建失败时应保留后端错误详情')
 })

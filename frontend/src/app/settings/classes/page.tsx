@@ -988,6 +988,7 @@ function CreateClassDialog(props: {
   const [grade, setGrade] = useState<number>(1)
   const [label, setLabel] = useState('')
   const [subject, setSubject] = useState('')
+  const [teacherSubject, setTeacherSubject] = useState<string | null>(null)
   const [kind, setKind] = useState<'行政' | '教学'>('行政')
   const [candidates, setCandidates] = useState<{ class_nums: number[]; class_labels: string[] }>({
     class_nums: [],
@@ -1008,6 +1009,19 @@ function CreateClassDialog(props: {
       .catch(() => setCandidates({ class_nums: [], class_labels: [] }))
   }, [open, grade])
 
+  useEffect(() => {
+    if (!open) return
+    fetch('/api/teacher')
+      .then(async (res) => {
+        const data = await res.json().catch(() => null)
+        if (!res.ok) throw new Error(data?.detail || '无法读取任教学科')
+        const configured = typeof data?.subject === 'string' ? data.subject : null
+        setTeacherSubject(configured)
+        setSubject(configured ?? '')
+      })
+      .catch((error) => setErr(error instanceof Error ? error.message : '无法读取任教学科'))
+  }, [open])
+
   function reset() {
     setLabel('')
     setSubject('')
@@ -1018,6 +1032,10 @@ function CreateClassDialog(props: {
     const lbl = label.trim()
     if (!lbl) {
       setErr('请填写班名')
+      return
+    }
+    if (!subject.trim()) {
+      setErr('请填写任教学科；首次设置后所有班级都只分析该学科')
       return
     }
     setBusy(true)
@@ -1033,7 +1051,7 @@ function CreateClassDialog(props: {
           kind,
         }),
       })
-      const data = res.ok ? await res.json() : null
+      const data = await res.json().catch(() => null)
       if (!res.ok) {
         setErr(data?.detail || '创建失败')
         return
@@ -1101,11 +1119,12 @@ function CreateClassDialog(props: {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="学科（可选）">
+            <Field label={teacherSubject ? '任教学科' : '任教学科（首次必填）'}>
               <Input
                 value={subject}
                 onChange={(e) => setSubject(e.target.value)}
                 placeholder="如 物理"
+                disabled={teacherSubject != null}
               />
             </Field>
           </div>
@@ -1212,8 +1231,8 @@ function EditClassDialog(props: {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label="学科（可选）">
-              <Input value={subject} onChange={(e) => setSubject(e.target.value)} />
+            <Field label="任教学科">
+              <Input value={subject} disabled />
             </Field>
           </div>
           <Field label="备注（可选）">

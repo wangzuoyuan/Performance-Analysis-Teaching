@@ -706,7 +706,7 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
         SubjectConflictError,
     )
     from app.analysis.exam_context import NoTeachingScopeError
-    from app.analysis.scope import student_class_map, my_class_labels
+    from app.analysis.scope import student_class_map
 
     db = SessionLocal()
     try:
@@ -784,8 +784,14 @@ async def get_exam(exam_id: int, teaching_class_id: Optional[int] = None):
                 rank_by_student[r.student_id] = idx
 
         # ── 教学班 label 映射（供学生明细标注 class_label + class_averages 现算）──
-        label_map = student_class_map(db, exam.grade)
-        mine_labels_map = my_class_labels(db, exam.grade)
+        label_map = {
+            sid: (ctx.class_labels[class_id], class_id)
+            for sid, class_id in ctx.member_to_default_class.items()
+            if class_id in ctx.class_labels
+        }
+        mine_labels_map = {
+            label: class_id for class_id, label in ctx.class_labels.items()
+        }
         mine_labels = set(mine_labels_map.keys())
 
         # ── 构造学生明细（单学科，不再携带 total_scores / total_score / grade_rank）──
@@ -1114,7 +1120,9 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
 
         # grades 来源：有效成绩考试的年级 + 教学班成员元数据年级（补全无成绩成员）
         from app.analysis.scope import student_class_map_multi
-        tc_grade_map = student_class_map_multi(db, None)
+        tc_grade_map = student_class_map_multi(
+            db, None, teaching_class_ids=set(ctx.class_ids),
+        )
         member_grades: set[int] = set()
         for sid in ids:
             for info in tc_grade_map.get(sid, []):
@@ -1148,7 +1156,9 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
                 continue
             grade = exam.grade
             if grade not in label_map_cache:
-                label_map_cache[grade] = student_class_map(db, grade)
+                label_map_cache[grade] = student_class_map(
+                    db, grade, teaching_class_ids=set(ctx.class_ids),
+                )
             lm = label_map_cache[grade]
 
             # 显式班级优先：若该考试年级与显式班级年级匹配，强制用该班
@@ -1205,7 +1215,9 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
             current_tc_id = explicit_tc_obj.id
         elif latest_grade is not None:
             if latest_grade not in label_map_cache:
-                label_map_cache[latest_grade] = student_class_map(db, latest_grade)
+                label_map_cache[latest_grade] = student_class_map(
+                    db, latest_grade, teaching_class_ids=set(ctx.class_ids),
+                )
             sids_latest = {
                 s.student_id for s in subject_scores
                 if exam_map.get(s.exam_id) and exam_map[s.exam_id].grade == latest_grade
@@ -1238,7 +1250,9 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
             if explicit_tc_obj and explicit_tc_obj.grade == grade:
                 return explicit_tc_obj.label
             if grade not in label_map_cache:
-                label_map_cache[grade] = student_class_map(db, grade)
+                label_map_cache[grade] = student_class_map(
+                    db, grade, teaching_class_ids=set(ctx.class_ids),
+                )
             lm = label_map_cache[grade]
             info = lm.get(s.student_id)
             if info:
@@ -1346,9 +1360,14 @@ async def compare_classes(exam_id: Optional[int] = None):
         ) if selected_ids else []
 
         # 列出当前学科的所有教学班（逐班计算均分/成员）
+        from sqlalchemy import func, or_
         tc_rows = (
             db.query(TeachingClass)
-            .filter(TeachingClass.subject == subject)
+            .filter(or_(
+                func.trim(TeachingClass.subject) == subject,
+                TeachingClass.subject.is_(None),
+                func.trim(TeachingClass.subject) == "",
+            ))
             .order_by(TeachingClass.sort_order, TeachingClass.id)
             .all()
         )
@@ -1573,7 +1592,9 @@ async def list_students(
         # 教学班成员映射：student_id → (label, teaching_class_id, grade)
         # 用于 grade 过滤和 per-class 排名
         from app.analysis.scope import student_class_map_multi
-        member_class_map = student_class_map_multi(db, grade)
+        member_class_map = student_class_map_multi(
+            db, grade, teaching_class_ids=set(ctx.class_ids),
+        )
         if grade is not None:
             # 限定年级：只保留该年级教学班的成员（按教学班 grade 元数据，不按是否有成绩）
             scope_ids = {
@@ -1671,7 +1692,9 @@ async def list_students(
                         break
 
         # label_map：显式 teaching_class_id 时优先该班，否则取第一个匹配年级的
-        label_map = student_class_map(db, grade)
+        label_map = student_class_map(
+            db, grade, teaching_class_ids=set(ctx.class_ids),
+        )
         # 构建显式班级时的 (label, tc_id) 供学生行优先使用
         explicit_tc_info: tuple[str, int] | None = None
         if teaching_class_id is not None:
@@ -1822,7 +1845,12 @@ async def dashboard_overview(grade: Optional[int] = None):
         from app.db.models import TeachingClass
         # 重新列出当前学科的教学班（resolve_single_subject_context 已限定成员范围，
         # 这里按同样的 subject/grade 列出班级用于逐班展示）。
-        tc_q = db.query(TeachingClass).filter(TeachingClass.subject == subject)
+        from sqlalchemy import func, or_
+        tc_q = db.query(TeachingClass).filter(or_(
+            func.trim(TeachingClass.subject) == subject,
+            TeachingClass.subject.is_(None),
+            func.trim(TeachingClass.subject) == "",
+        ))
         if grade is not None:
             tc_q = tc_q.filter(TeachingClass.grade == grade)
         classes = tc_q.order_by(TeachingClass.sort_order, TeachingClass.id).all()

@@ -116,7 +116,11 @@ def all_my_member_ids(db, grade: Optional[int] = None, include_anon: bool = Fals
     return {r[0] for r in q.all() if r[0] and not r[0].startswith("_anon:")}
 
 
-def student_class_map(db, grade: Optional[int] = None) -> dict[str, tuple[str, int]]:
+def student_class_map(
+    db,
+    grade: Optional[int] = None,
+    teaching_class_ids: Optional[set[int]] = None,
+) -> dict[str, tuple[str, int]]:
     """学生 → 其教学班 (label, tc_id)。同一老师同年级一个学生取一条（按 sort_order
     最前者）。供考试详情、关注名单、学生页统一标注「学生旁的班级」。"""
     from app.db.models import TeachingClass, TeachingClassMember
@@ -133,6 +137,8 @@ def student_class_map(db, grade: Optional[int] = None) -> dict[str, tuple[str, i
     )
     if grade is not None:
         q = q.filter(TeachingClass.grade == grade)
+    if teaching_class_ids is not None:
+        q = q.filter(TeachingClass.id.in_(teaching_class_ids))
     mapping: dict[str, tuple[str, int]] = {}
     for student_id, label, tc_id, _order in q.all():
         if student_id not in mapping:

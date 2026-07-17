@@ -213,9 +213,17 @@ def create_class_with_subject(
     Returns:
         新建教学班的 payload（含 subject）。
     """
-    from app.db.models import TeachingClass
+    from app.db.models import Teacher, TeachingClass
 
-    teacher_subject = resolve_teaching_subject(db)  # 未配置会抛 SubjectNotConfiguredError
+    teacher = db.query(Teacher).first()
+    if not teacher or not (teacher.subject or "").strip():
+        if subject is None:
+            raise SubjectNotConfiguredError("教师尚未配置任教科目，请先填写任教学科")
+        # 兼容 2.0.0 以前的班级设置页：首次建班时用表单学科初始化
+        # 教师唯一学科，并由 update_teacher_profile 统一处理旧班回填/冲突。
+        update_teacher_profile(db, subject=validate_subject(subject))
+
+    teacher_subject = resolve_teaching_subject(db)
 
     if subject is not None:
         requested = validate_subject(subject)
