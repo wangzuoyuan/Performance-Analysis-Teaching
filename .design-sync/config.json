@@ -1,0 +1,107 @@
+{
+  "pkg": "exam-tracker-frontend",
+  "globalName": "ExamTrackerFrontend",
+  "projectId": "a6dffd75-9da7-4cb6-914d-ba90357eda67",
+  "shape": "package",
+  "srcDir": "src",
+  "tsconfig": "tsconfig.json",
+  "cssEntry": ".ds-compiled.css",
+  "componentSrcMap": {
+    "Avatar": "src/components/ui/avatar.tsx",
+    "Badge": "src/components/ui/badge.tsx",
+    "Button": "src/components/ui/button.tsx",
+    "Input": "src/components/ui/input.tsx",
+    "Progress": "src/components/ui/progress.tsx",
+    "Separator": "src/components/ui/separator.tsx",
+    "Skeleton": "src/components/ui/skeleton.tsx",
+    "Card": "src/components/ui/card.tsx",
+    "ScrollArea": "src/components/ui/scroll-area.tsx",
+    "Table": "src/components/ui/table.tsx",
+    "Tabs": "src/components/ui/tabs.tsx",
+    "Dialog": "src/components/ui/dialog.tsx",
+    "Select": "src/components/ui/select.tsx",
+    "Sheet": "src/components/ui/sheet.tsx",
+    "Tooltip": "src/components/ui/tooltip.tsx",
+    "Shell": "src/components/layout/Shell.tsx",
+    "Sidebar": "src/components/layout/Sidebar.tsx",
+    "Topbar": "src/components/layout/Topbar.tsx",
+    "AuthGate": "src/components/AuthGate.tsx",
+    "ChatDrawer": "src/components/ChatDrawer.tsx",
+    "BandTrendChart": "src/components/BandTrendChart.tsx",
+    "RankBandStackedBar": "src/components/RankBandStackedBar.tsx",
+    "SubjectScatter": "src/components/SubjectScatter.tsx",
+    "TrendLineChart": "src/components/TrendLineChart.tsx",
+    "ClassScopePicker": "src/components/ClassScopePicker.tsx",
+    "BackupCard": "src/components/BackupCard.tsx",
+    "HomeworkCard": "src/components/HomeworkCard.tsx",
+    "StudentNotes": "src/components/StudentNotes.tsx",
+    "ToolCallCard": "src/components/ToolCallCard.tsx",
+    "WeeklyFocusCard": "src/components/WeeklyFocusCard.tsx",
+    "HomeworkOverviewCard": null
+  },
+  "docsMap": {
+    "Avatar": "../.design-sync/docs/Avatar.md",
+    "Badge": "../.design-sync/docs/Badge.md",
+    "Button": "../.design-sync/docs/Button.md",
+    "Input": "../.design-sync/docs/Input.md",
+    "Progress": "../.design-sync/docs/Progress.md",
+    "Separator": "../.design-sync/docs/Separator.md",
+    "Skeleton": "../.design-sync/docs/Skeleton.md",
+    "Card": "../.design-sync/docs/Card.md",
+    "ScrollArea": "../.design-sync/docs/ScrollArea.md",
+    "Table": "../.design-sync/docs/Table.md",
+    "Tabs": "../.design-sync/docs/Tabs.md",
+    "Dialog": "../.design-sync/docs/Dialog.md",
+    "Select": "../.design-sync/docs/Select.md",
+    "Sheet": "../.design-sync/docs/Sheet.md",
+    "Tooltip": "../.design-sync/docs/Tooltip.md",
+    "Shell": "../.design-sync/docs/Shell.md",
+    "Sidebar": "../.design-sync/docs/Sidebar.md",
+    "Topbar": "../.design-sync/docs/Topbar.md",
+    "AuthGate": "../.design-sync/docs/AuthGate.md",
+    "ChatDrawer": "../.design-sync/docs/ChatDrawer.md",
+    "BandTrendChart": "../.design-sync/docs/BandTrendChart.md",
+    "RankBandStackedBar": "../.design-sync/docs/RankBandStackedBar.md",
+    "SubjectScatter": "../.design-sync/docs/SubjectScatter.md",
+    "TrendLineChart": "../.design-sync/docs/TrendLineChart.md",
+    "ClassScopePicker": "../.design-sync/docs/ClassScopePicker.md",
+    "BackupCard": "../.design-sync/docs/BackupCard.md",
+    "HomeworkCard": "../.design-sync/docs/HomeworkCard.md",
+    "StudentNotes": "../.design-sync/docs/StudentNotes.md",
+    "ToolCallCard": "../.design-sync/docs/ToolCallCard.md",
+    "WeeklyFocusCard": "../.design-sync/docs/WeeklyFocusCard.md"
+  },
+  "readmeHeader": ".design-sync/conventions.md",
+  "overrides": {
+    "Dialog": {
+      "cardMode": "single",
+      "viewport": "480x360"
+    },
+    "Sheet": {
+      "cardMode": "single",
+      "viewport": "520x420"
+    },
+    "Tooltip": {
+      "cardMode": "single",
+      "viewport": "360x220"
+    },
+    "Table": {
+      "cardMode": "column"
+    },
+    "TrendLineChart": {
+      "cardMode": "column"
+    },
+    "SubjectScatter": {
+      "cardMode": "column"
+    },
+    "RankBandStackedBar": {
+      "cardMode": "column"
+    },
+    "BandTrendChart": {
+      "cardMode": "column"
+    },
+    "ToolCallCard": {
+      "cardMode": "column"
+    }
+  }
+}

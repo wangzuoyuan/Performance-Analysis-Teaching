@@ -14,3 +14,14 @@ raw/
 /data/
 
 .DS_Store
+
+# design-sync (generated / staged; durable inputs under .design-sync are committed)
+.ds-sync/
+ds-bundle/
+.design-sync/.cache/
+.design-sync/learnings/
+.design-sync/node_modules
+frontend/.ds-barrel.tsx
+frontend/.ds-compiled.css
+frontend/.ds-tailwind.config.js
+frontend/.ds-shim.ts
