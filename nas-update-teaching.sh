@@ -29,8 +29,8 @@ git pull --ff-only origin main
 echo "==> [3/5] Build and update containers"
 sudo "$DOCKER" compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --build --remove-orphans
 
-echo "==> [4/5] Restart proxy after container replacement"
-sudo "$DOCKER" compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" restart caddy
+echo "==> [4/5] Recreate proxy with current service addresses"
+sudo "$DOCKER" compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" up -d --force-recreate --no-deps caddy
 
 echo "==> [5/5] Health check"
 attempt=1

@@ -1,0 +1,49 @@
+# Synology NAS deployment on port 8081.
+services:
+  backend:
+    build:
+      context: ./backend
+      network: host
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    restart: unless-stopped
+    env_file:
+      - ./backend/.env
+    volumes:
+      - ./data:/data
+    expose:
+      - "8000"
+
+  frontend:
+    build:
+      context: ./frontend
+      network: host
+    dns:
+      - 223.5.5.5
+      - 119.29.29.29
+    restart: unless-stopped
+    depends_on:
+      - backend
+    expose:
+      - "3000"
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - backend
+      - frontend
+    links:
+      - backend
+      - frontend
+    ports:
+      - "8081:8080"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+
+volumes:
+  caddy_data:
+  caddy_config:
