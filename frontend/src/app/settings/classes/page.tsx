@@ -43,6 +43,7 @@ import {
 } from '@/components/ui/table'
 
 const GRADE_LABEL: Record<number, string> = { 1: '高一', 2: '高二', 3: '高三' }
+const SUPPORTED_SUBJECTS = ['语文', '数学', '英语', '物理', '化学', '生物', '政治', '历史', '地理']
 
 interface ClassMember {
   student_id: string
@@ -1119,13 +1120,21 @@ function CreateClassDialog(props: {
                 </SelectContent>
               </Select>
             </Field>
-            <Field label={teacherSubject ? '任教学科' : '任教学科（首次必填）'}>
-              <Input
-                value={subject}
-                onChange={(e) => setSubject(e.target.value)}
-                placeholder="如 物理"
-                disabled={teacherSubject != null}
-              />
+            <Field label={teacherSubject ? '任教学科' : '任教学科（首次选择）'}>
+              {teacherSubject ? (
+                <Input value={teacherSubject} disabled />
+              ) : (
+                <Select value={subject} onValueChange={setSubject}>
+                  <SelectTrigger>
+                    <SelectValue placeholder="请选择学科" />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {SUPPORTED_SUBJECTS.map((item) => (
+                      <SelectItem key={item} value={item}>{item}</SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+              )}
             </Field>
           </div>
 

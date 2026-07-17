@@ -572,18 +572,19 @@ class TestClassCreateInheritsSubject:
         assert tc["subject"] == "物理"
         db.close()
 
-    def test_first_create_configures_teacher_from_compatible_request(self):
+    def test_first_create_uses_subject_selected_by_teacher(self):
         from app.teaching.subject import create_class_with_subject
         db = make_db()
         db.add(Teacher(subject=None))
         db.commit()
 
         tc = create_class_with_subject(
-            db, grade=2, label="物A1", kind="教学", subject=" 物理 "
+            db, grade=2, label="数A1", kind="教学", subject=" 数学 "
         )
 
-        assert tc["subject"] == "物理"
-        assert db.query(Teacher).first().subject == "物理"
+        assert tc["subject"] == "数学"
+        assert db.query(Teacher).first().subject == "数学"
+        assert db.query(Teacher).first().subject != "物理"
         db.close()
 
     def test_create_with_conflicting_subject_raises(self):

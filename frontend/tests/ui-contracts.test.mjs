@@ -47,7 +47,9 @@ test('homework roster additions bind to the selected teaching class', () => {
 
 test('class creation bootstraps and locks the single teaching subject', () => {
   assert.match(classSettings, /fetch\(['"]\/api\/teacher['"]\)/, '建班前应读取教师唯一任教学科')
-  assert.match(classSettings, /任教学科（首次必填）/, '首次建班必须明确提示学科必填')
-  assert.match(classSettings, /disabled=\{teacherSubject != null\}/, '教师学科配置后不能在单个班级中修改')
+  assert.match(classSettings, /任教学科（首次选择）/, '首次建班必须明确提示由使用者选择学科')
+  assert.match(classSettings, /SUPPORTED_SUBJECTS\.map/, '首次建班应提供完整的支持学科选项')
+  assert.match(classSettings, /<Select value=\{subject\} onValueChange=\{setSubject\}>/, '未配置学科时必须由使用者选择')
+  assert.match(classSettings, /<Input value=\{teacherSubject\} disabled \/>/, '学科配置后不能在单个班级中修改')
   assert.match(classSettings, /const data = await res\.json\(\)\.catch/, '创建失败时应保留后端错误详情')
 })
