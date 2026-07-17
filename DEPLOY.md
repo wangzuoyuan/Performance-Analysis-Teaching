@@ -50,7 +50,7 @@ DSM 反向代理（TLS, synology.me 证书）    │
 cp compose.env.example .env
 ```
 
-根目录 `.env` 默认固定 `IMAGE_TAG=2.0.2`，比 `latest` 更容易审计和回滚。然后复制 `backend/.env.example` 为 `backend/.env`，填：
+根目录 `.env` 默认固定 `IMAGE_TAG=2.0.3`，比 `latest` 更容易审计和回滚。然后复制 `backend/.env.example` 为 `backend/.env`，填：
 
 ```env
 CHAT_PROVIDER=...            # 你现在用的（如 GLM 走 openai 兼容）
@@ -141,7 +141,7 @@ cp data/db.sqlite "data/backups/manual/db.sqlite.before-$(date +%Y%m%d-%H%M%S)"
 # 拉取仓库中的最新 compose/文档；已有本地配置文件不会被覆盖
 git pull --ff-only
 
-# 编辑根目录 .env，例如 IMAGE_TAG=2.0.2
+# 编辑根目录 .env，例如 IMAGE_TAG=2.0.3
 sudo docker compose -p grade_tracker pull
 sudo docker compose -p grade_tracker up -d --remove-orphans
 curl -f http://127.0.0.1:8080/api/health
@@ -159,11 +159,11 @@ sudo docker compose -p grade_tracker ps
 NAS 无法访问 GHCR 时，可在能联网且架构相同的机器上拉取并导出：
 
 ```bash
-docker pull ghcr.io/wangzuoyuan/performance-analysis-teaching-backend:2.0.2
-docker pull ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend:2.0.2
+docker pull ghcr.io/wangzuoyuan/performance-analysis-teaching-backend:2.0.3
+docker pull ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend:2.0.3
 docker save \
-  ghcr.io/wangzuoyuan/performance-analysis-teaching-backend:2.0.2 \
-  ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend:2.0.2 \
-  -o exam-images-2.0.2.tar
+  ghcr.io/wangzuoyuan/performance-analysis-teaching-backend:2.0.3 \
+  ghcr.io/wangzuoyuan/performance-analysis-teaching-frontend:2.0.3 \
+  -o exam-images-2.0.3.tar
 # 把 exam-images.tar 传到 NAS，Container Manager → 映像 → 新增 → 从文件添加
 ```

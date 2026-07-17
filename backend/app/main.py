@@ -5,7 +5,7 @@ import os
 
 from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
 
-app = FastAPI(title="成绩追踪 API", version="2.0.2")
+app = FastAPI(title="成绩追踪 API", version="2.0.3")
 
 from app.teaching.subject import SubjectConflictError, SubjectNotConfiguredError  # noqa: E402
 

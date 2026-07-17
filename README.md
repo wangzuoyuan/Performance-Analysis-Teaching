@@ -1,6 +1,6 @@
 # 成绩分析（教学版）
 
-![version](https://img.shields.io/badge/version-2.0.2-blue)
+![version](https://img.shields.io/badge/version-2.0.3-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![python](https://img.shields.io/badge/python-3.10%2B-blue)
 ![Next.js](https://img.shields.io/badge/Next.js-14-black)
@@ -146,7 +146,7 @@ OPENAI_MODEL=gpt-4o-mini
 官方多架构镜像发布在 GHCR，支持 `linux/amd64` 和 `linux/arm64`。首次部署：
 
 ```bash
-cp compose.env.example .env       # 默认固定 IMAGE_TAG=2.0.2
+cp compose.env.example .env       # 默认固定 IMAGE_TAG=2.0.3
 cp backend/.env.example backend/.env
 # 填好 backend/.env 后：
 docker compose -p grade_tracker pull
@@ -171,7 +171,7 @@ cd backend && source .venv/bin/activate && pytest tests/
 
 ## 版本
 
-当前版本 **2.0.2**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
+当前版本 **2.0.3**。完整变更见 [CHANGELOG.md](CHANGELOG.md)，历史版本见 [Releases](https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases)。
 
 ## 设计文档
 
