@@ -156,6 +156,59 @@ class TestStudentsListSingleSubject:
         assert data["teaching_subject"] == "数学", \
             f"teaching_subject 应为 数学, 得到 {data['teaching_subject']}"
 
+    def test_name_only_members_are_listed_without_exam_scores(self, tmp_path):
+        setup = textwrap.dedent("""\
+            db = SessionLocal()
+            from app.db.models import Teacher, TeachingClass, TeachingClassMember
+            db.add(Teacher(subject="物理", name="物理老师"))
+            tc = TeachingClass(grade=2, label="物A1", subject="物理", kind="教学")
+            db.add(tc)
+            db.flush()
+            db.add(TeachingClassMember(
+                teaching_class_id=tc.id,
+                student_id=f"_anon:{tc.id}:张三",
+                name="张三",
+                source="manual",
+            ))
+            db.commit()
+            tc_id = tc.id
+            db.close()
+        """)
+        assert_code = textwrap.dedent("""\
+            from app.db.models import SessionLocal, TeachingClass
+            db = SessionLocal()
+            tc_id = db.query(TeachingClass.id).filter(TeachingClass.label == "物A1").scalar()
+            db.close()
+            exams = client.get(f"/api/exams?teaching_class_id={tc_id}")
+            students = client.get(f"/api/students?teaching_class_id={tc_id}")
+            assert exams.status_code == 200, exams.text
+            assert exams.json()["exams"] == []
+            assert students.status_code == 200, students.text
+            data = students.json()
+            row = data["students"][0]
+            result = {
+                "status": "ok",
+                "count": data["count"],
+                "name": row["name"],
+                "has_student_id": row["has_student_id"],
+                "has_profile": row["has_profile"],
+                "raw_score": row["raw_score"],
+                "latest_exam": row["latest_exam"],
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, setup, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data == {
+            "status": "ok",
+            "count": 1,
+            "name": "张三",
+            "has_student_id": False,
+            "has_profile": False,
+            "raw_score": None,
+            "latest_exam": None,
+        }
+
     def test_no_total_score_fields(self, tmp_path):
         """学生行不再有 latest_total_score / latest_xueji_rank 字段。"""
         assert_code = textwrap.dedent("""\

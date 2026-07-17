@@ -50,6 +50,10 @@ interface ExamListResponse {
   subject?: string | null
 }
 
+interface ApiErrorResponse {
+  detail?: string
+}
+
 interface ExamStats {
   total_students?: number | null
   avg?: number | null
@@ -70,6 +74,26 @@ async function safeJson<T>(url: string): Promise<T | null> {
     return (await res.json()) as T
   } catch {
     return null
+  }
+}
+
+async function fetchExamList(url: string): Promise<
+  | { ok: true; data: ExamListResponse }
+  | { ok: false; status: number | null; detail: string }
+> {
+  try {
+    const res = await fetch(url)
+    const payload = (await res.json().catch(() => ({}))) as ExamListResponse & ApiErrorResponse
+    if (!res.ok) {
+      return {
+        ok: false,
+        status: res.status,
+        detail: payload.detail || '考试列表暂时无法加载，请稍后重试',
+      }
+    }
+    return { ok: true, data: payload }
+  } catch {
+    return { ok: false, status: null, detail: '考试列表暂时无法加载，请稍后重试' }
   }
 }
 
@@ -98,6 +122,7 @@ export default function ExamListPage() {
   const [query, setQuery] = useState('')
   const [loading, setLoading] = useState(true)
   const [scopeError, setScopeError] = useState<string | null>(null)
+  const [scopeErrorStatus, setScopeErrorStatus] = useState<number | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -107,15 +132,18 @@ export default function ExamListPage() {
       setScopeError(null)
       // 单学科化：teaching_class_id 由教学班上下文决定，前端不传学科。
       const tcParam = current !== 'all' ? `?teaching_class_id=${current}` : ''
-      const examsRes = await safeJson<ExamListResponse>(`/api/exams${tcParam}`)
+      const examsResult = await fetchExamList(`/api/exams${tcParam}`)
       if (cancelled) return
-      if (!examsRes) {
-        setScopeError('无法加载考试列表，请先在设置中配置任教科目和教学班')
+      if (!examsResult.ok) {
+        setScopeError(examsResult.detail)
+        setScopeErrorStatus(examsResult.status)
         setExams([])
         setStatsById({})
         setLoading(false)
         return
       }
+      setScopeErrorStatus(null)
+      const examsRes = examsResult.data
       const examsList = examsRes.exams ?? []
       setSubject(examsRes.subject ?? null)
       setExams(examsList)
@@ -179,9 +207,11 @@ export default function ExamListPage() {
             <div className="flex flex-col items-center justify-center gap-3 text-center">
               <AlertCircle className="h-10 w-10 text-amber-400" />
               <p className="text-sm text-slate-600">{scopeError}</p>
-              <Button asChild variant="outline" size="sm">
-                <Link href="/settings/classes">前往设置教学班</Link>
-              </Button>
+              {scopeErrorStatus === 409 || scopeErrorStatus === 404 ? (
+                <Button asChild variant="outline" size="sm">
+                  <Link href="/settings/classes">前往设置教学班</Link>
+                </Button>
+              ) : null}
             </div>
           </CardContent>
         </Card>
@@ -330,7 +360,7 @@ function EmptyState() {
   return (
     <div className="flex flex-col items-center justify-center gap-3 py-12 text-center">
       <Hash className="h-10 w-10 text-slate-300" />
-      <p className="text-sm text-slate-500">暂无考试数据</p>
+      <p className="text-sm text-slate-500">当前范围暂无考试数据</p>
       <Button asChild variant="outline" size="sm">
         <Link href="/upload">
           <Upload className="h-4 w-4" />

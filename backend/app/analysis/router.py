@@ -1563,7 +1563,9 @@ async def list_students(
 
     scope_rank 按教学班成员集合和当前学科有效分数计算；无可靠教学班范围时为 null。
     """
-    from app.db.models import SessionLocal, Exam, SubjectScore
+    from app.db.models import (
+        SessionLocal, Exam, SubjectScore, TeachingClassMember,
+    )
     from app.analysis.exam_context import (
         resolve_exam_context,
         SubjectNotConfiguredError,
@@ -1589,6 +1591,19 @@ async def list_students(
 
         subject = ctx.subject
         scope_ids = set(ctx.member_ids)
+        member_rows = (
+            db.query(TeachingClassMember.student_id, TeachingClassMember.name)
+            .filter(
+                TeachingClassMember.teaching_class_id.in_(ctx.class_ids),
+                TeachingClassMember.student_id.in_(scope_ids),
+            )
+            .order_by(TeachingClassMember.id)
+            .all()
+        )
+        member_names: dict[str, str] = {}
+        for sid, name in member_rows:
+            if name and sid not in member_names:
+                member_names[sid] = name
         # 教学班成员映射：student_id → (label, teaching_class_id, grade)
         # 用于 grade 过滤和 per-class 排名
         from app.analysis.scope import student_class_map_multi
@@ -1616,9 +1631,14 @@ async def list_students(
                 .filter(SubjectScore.student_id.in_(scope_ids))
                 .distinct().all()
             )
+            score_names = {
+                sid: nm for sid, nm in name_rows if nm
+            }
             scope_ids = {
-                sid for sid, nm in name_rows
-                if (nm and q in nm) or q in sid
+                sid for sid in scope_ids
+                if q in sid
+                or q in member_names.get(sid, "")
+                or q in score_names.get(sid, "")
             }
             if not scope_ids:
                 return {"students": [], "count": 0, "teaching_subject": subject}
@@ -1655,6 +1675,19 @@ async def list_students(
                 .distinct().all()
             )
         )
+        score_student_ids = {
+            row[0]
+            for row in (
+                db.query(SubjectScore.student_id)
+                .filter(
+                    SubjectScore.subject == subject,
+                    SubjectScore.student_id.in_(scope_ids),
+                    SubjectScore.raw_score.isnot(None)
+                    | SubjectScore.grade_score.isnot(None),
+                )
+                .distinct().all()
+            )
+        }
         # 最新考试：按年级/日期/id（只在有真实分数的考试中选）
         latest_exam = None
         if valid_exam_ids:
@@ -1752,10 +1785,15 @@ async def list_students(
         students = []
         for ids in groups.values():
             rep = max(ids, key=lambda s: (sid_grade.get(s, 0), s))
-            name_row = db.query(SubjectScore.name).filter(
-                SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
-            ).first()
-            name = name_row[0] if name_row and name_row[0] else rep
+            name = next(
+                (member_names[sid] for sid in ids if member_names.get(sid)),
+                None,
+            )
+            if not name:
+                name_row = db.query(SubjectScore.name).filter(
+                    SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
+                ).first()
+                name = name_row[0] if name_row and name_row[0] else rep
             # 显式班级优先；否则用 label_map（按 sort_order 取第一个）
             if explicit_tc_info:
                 label, tc_id = explicit_tc_info
@@ -1767,13 +1805,15 @@ async def list_students(
             students.append({
                 "student_id": rep,
                 "name": name,
+                "has_student_id": not rep.startswith("_anon:"),
+                "has_profile": bool(ids & score_student_ids),
                 "class_label": label,
                 "teaching_class_id": tc_id,
                 "grades": sorted({sid_grade.get(s) for s in ids if sid_grade.get(s)}),
-                "latest_exam_id": latest_exam.id if latest_exam else None,
+                "latest_exam_id": latest_exam.id if latest_exam and s else None,
                 "latest_exam": (
                     {"id": latest_exam.id, "name": latest_exam.name}
-                    if latest_exam else None
+                    if latest_exam and s else None
                 ),
                 "raw_score": s.raw_score if s else None,
                 "grade_score": s.grade_score if s else None,

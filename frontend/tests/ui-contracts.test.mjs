@@ -7,6 +7,8 @@ const homework = readFileSync(new URL('../src/app/homework/page.tsx', import.met
 const homeworkSettings = readFileSync(new URL('../src/app/homework/settings/page.tsx', import.meta.url), 'utf8')
 const weeklyFocus = readFileSync(new URL('../src/components/WeeklyFocusCard.tsx', import.meta.url), 'utf8')
 const classSettings = readFileSync(new URL('../src/app/settings/classes/page.tsx', import.meta.url), 'utf8')
+const examList = readFileSync(new URL('../src/app/exam/page.tsx', import.meta.url), 'utf8')
+const studentList = readFileSync(new URL('../src/app/student/page.tsx', import.meta.url), 'utf8')
 
 test('home dashboard renders a scope-aware homework overview', () => {
   assert.match(dashboard, /import HomeworkOverviewCard from ['"]@\/components\/HomeworkOverviewCard['"]/, '首页应导入作业看板摘要组件')
@@ -52,4 +54,15 @@ test('class creation bootstraps and locks the single teaching subject', () => {
   assert.match(classSettings, /<Select value=\{subject\} onValueChange=\{setSubject\}>/, '未配置学科时必须由使用者选择')
   assert.match(classSettings, /<Input value=\{teacherSubject\} disabled \/>/, '学科配置后不能在单个班级中修改')
   assert.match(classSettings, /const data = await res\.json\(\)\.catch/, '创建失败时应保留后端错误详情')
+})
+
+test('exam list distinguishes an empty class from a configuration error', () => {
+  assert.match(examList, /当前范围暂无考试数据/, '合法教学班无考试时应显示正常空状态')
+  assert.match(examList, /payload\.detail \|\| '考试列表暂时无法加载，请稍后重试'/, '接口错误应保留后端详情')
+  assert.doesNotMatch(examList, /无法加载考试列表，请先在设置中配置任教科目和教学班/, '不得把所有接口错误都伪装成配置错误')
+})
+
+test('student list renders name-only roster members without fake profile links', () => {
+  assert.match(studentList, /student\.has_student_id === false \? '待补学号'/, '仅姓名成员不得展示内部占位学号')
+  assert.match(studentList, /student\.has_profile \? \(/, '无本学科成绩的成员不得进入不存在的画像页')
 })

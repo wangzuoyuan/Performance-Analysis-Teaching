@@ -37,6 +37,8 @@ import { formatGradeLabel } from '@/lib/labels'
 interface StudentRow {
   student_id: string
   name: string
+  has_student_id?: boolean
+  has_profile?: boolean
   class_label?: string | null
   teaching_class_id?: number | null
   grades?: number[]
@@ -227,15 +229,19 @@ export default function StudentSearchPage() {
                     {students.map((student) => (
                       <TableRow key={student.student_id} className="hover:bg-slate-50">
                         <TableCell className="font-mono text-xs text-slate-600">
-                          {student.student_id}
+                          {student.has_student_id === false ? '待补学号' : student.student_id}
                         </TableCell>
                         <TableCell>
-                          <Link
-                            href={`/student/${student.student_id}`}
-                            className="font-medium text-slate-900 hover:text-brand-600"
-                          >
-                            {student.name}
-                          </Link>
+                          {student.has_profile ? (
+                            <Link
+                              href={`/student/${student.student_id}`}
+                              className="font-medium text-slate-900 hover:text-brand-600"
+                            >
+                              {student.name}
+                            </Link>
+                          ) : (
+                            <span className="font-medium text-slate-900">{student.name}</span>
+                          )}
                         </TableCell>
                         <TableCell>
                           {formatClassChip(student.class_label) ? (
@@ -262,13 +268,15 @@ export default function StudentSearchPage() {
                           {formatInt(student.scope_rank)}
                         </TableCell>
                         <TableCell>
-                          <Link
-                            href={`/student/${student.student_id}`}
-                            aria-label={`查看${student.name}`}
-                            className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-900"
-                          >
-                            <ChevronRight className="h-4 w-4" />
-                          </Link>
+                          {student.has_profile ? (
+                            <Link
+                              href={`/student/${student.student_id}`}
+                              aria-label={`查看${student.name}`}
+                              className="inline-flex h-8 w-8 items-center justify-center rounded-md text-slate-400 hover:bg-slate-100 hover:text-slate-900"
+                            >
+                              <ChevronRight className="h-4 w-4" />
+                            </Link>
+                          ) : null}
                         </TableCell>
                       </TableRow>
                     ))}
@@ -278,42 +286,53 @@ export default function StudentSearchPage() {
 
               {/* 移动端卡片 */}
               <div className="space-y-2 md:hidden">
-                {students.map((student) => (
-                  <Link
-                    key={student.student_id}
-                    href={`/student/${student.student_id}`}
-                    className="block rounded-lg border border-slate-200 bg-white p-3 transition hover:border-brand-300 hover:bg-brand-50/40"
-                  >
-                    <div className="flex items-start justify-between gap-2">
-                      <div className="min-w-0">
-                        <div className="font-medium text-slate-900">{student.name}</div>
-                        <div className="mt-0.5 font-mono text-xs text-slate-500">
-                          {student.student_id}
+                {students.map((student) => {
+                  const content = (
+                    <>
+                      <div className="flex items-start justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="font-medium text-slate-900">{student.name}</div>
+                          <div className="mt-0.5 font-mono text-xs text-slate-500">
+                            {student.has_student_id === false ? '待补学号' : student.student_id}
+                          </div>
                         </div>
+                        {formatClassChip(student.class_label) ? (
+                          <Badge variant="secondary">
+                            {formatClassChip(student.class_label)}
+                          </Badge>
+                        ) : null}
                       </div>
-                      {formatClassChip(student.class_label) ? (
-                        <Badge variant="secondary">
-                          {formatClassChip(student.class_label)}
-                        </Badge>
-                      ) : null}
-                    </div>
-                    <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
-                      <span>年级：{gradeLabel(student.grades)}</span>
-                      <span>
-                        原始分：
-                        <span className="tabular-nums text-slate-900">
-                          {formatInt(student.raw_score)}
+                      <div className="mt-2 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-slate-600">
+                        <span>年级：{gradeLabel(student.grades)}</span>
+                        <span>
+                          原始分：
+                          <span className="tabular-nums text-slate-900">
+                            {formatInt(student.raw_score)}
+                          </span>
                         </span>
-                      </span>
-                      <span>
-                        班内排名：
-                        <span className="tabular-nums text-slate-900">
-                          {formatInt(student.scope_rank)}
+                        <span>
+                          班内排名：
+                          <span className="tabular-nums text-slate-900">
+                            {formatInt(student.scope_rank)}
+                          </span>
                         </span>
-                      </span>
+                      </div>
+                    </>
+                  )
+                  return student.has_profile ? (
+                    <Link
+                      key={student.student_id}
+                      href={`/student/${student.student_id}`}
+                      className="block rounded-lg border border-slate-200 bg-white p-3 transition hover:border-brand-300 hover:bg-brand-50/40"
+                    >
+                      {content}
+                    </Link>
+                  ) : (
+                    <div key={student.student_id} className="rounded-lg border border-slate-200 bg-white p-3">
+                      {content}
                     </div>
-                  </Link>
-                ))}
+                  )
+                })}
               </div>
             </>
           )}

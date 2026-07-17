@@ -90,6 +90,19 @@ class TestResolveExamContext:
         assert ctx.member_ids == {"s1", "s2", "s3", "s4", "s5"}  # 去重
         db.close()
 
+    def test_name_only_members_are_a_valid_scope(self):
+        db = _mem_db()
+        tc_ids = _setup_teacher_with_classes(db, "数学", [
+            ("A班", ["_anon:1:张三"], 2),
+        ])
+        from app.analysis.exam_context import resolve_exam_context
+
+        current = resolve_exam_context(db, teaching_class_id=tc_ids[0])
+        all_classes = resolve_exam_context(db)
+        assert current.member_ids == {"_anon:1:张三"}
+        assert all_classes.member_ids == {"_anon:1:张三"}
+        db.close()
+
     def test_no_subject_raises_not_configured(self):
         db = _mem_db()
         t = Teacher(subject=None)

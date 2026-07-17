@@ -69,7 +69,9 @@ def resolve_exam_context(
     # 2) 成员范围解析
     if teaching_class_id is not None:
         current_class_ids = {teaching_class_id}
-        member_ids = members_of(db, teaching_class_id)
+        # 仅姓名成员同样构成有效教学范围。它们没有 SubjectScore，后续成绩
+        # 查询会自然返回空，但不能因此把一个已有花名册的班级判成“无成员”。
+        member_ids = members_of(db, teaching_class_id, include_anon=True)
         if not member_ids:
             raise NoTeachingScopeError(
                 f"教学班 {teaching_class_id} 没有成员，无法进行考试分析"
@@ -95,7 +97,7 @@ def resolve_exam_context(
                 .distinct()
                 .all()
             )
-            if row[0] and not row[0].startswith("_anon:")
+            if row[0]
         }
         if not member_ids:
             raise NoTeachingScopeError(
