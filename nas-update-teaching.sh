@@ -35,7 +35,11 @@ sudo "$DOCKER" compose -f "$COMPOSE_FILE" -p "$PROJECT_NAME" restart caddy
 echo "==> [5/5] Health check"
 attempt=1
 while [ "$attempt" -le 12 ]; do
-  if wget -qO- http://127.0.0.1:8081/api/health 2>/dev/null | grep -q '"ok":true'; then
+  if env \
+    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= \
+    no_proxy=127.0.0.1,localhost NO_PROXY=127.0.0.1,localhost \
+    wget -qO- -T 10 -t 1 http://127.0.0.1:8081/api/health 2>/dev/null \
+    | grep -q '"ok":true'; then
     echo "Update complete: http://192.168.50.78:8081"
     exit 0
   fi
