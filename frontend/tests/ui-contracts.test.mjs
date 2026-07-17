@@ -5,10 +5,16 @@ import test from 'node:test'
 const dashboard = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 'utf8')
 const homework = readFileSync(new URL('../src/app/homework/page.tsx', import.meta.url), 'utf8')
 const homeworkSettings = readFileSync(new URL('../src/app/homework/settings/page.tsx', import.meta.url), 'utf8')
+const weeklyFocus = readFileSync(new URL('../src/components/WeeklyFocusCard.tsx', import.meta.url), 'utf8')
 
 test('home dashboard renders a scope-aware homework overview', () => {
   assert.match(dashboard, /import HomeworkOverviewCard from ['"]@\/components\/HomeworkOverviewCard['"]/, '首页应导入作业看板摘要组件')
   assert.match(dashboard, /<HomeworkOverviewCard teachingClassId=\{tidParam \?\? undefined\} \/>/, '首页作业摘要必须跟随当前教学班范围')
+})
+
+test('weekly focus errors cannot crash the home dashboard', () => {
+  assert.match(weeklyFocus, /if \(!r\.ok\) throw new Error/, '接口错误必须进入失败态')
+  assert.match(weeklyFocus, /Array\.isArray\(\(payload as WeeklyFocus\)\.students\)/, '响应必须校验 students 数组')
 })
 
 test('homework registration page exposes its own class scope picker', () => {

@@ -36,9 +36,20 @@ export default function WeeklyFocusCard({ teachingClassId }: { teachingClassId?:
         ? `/api/weekly-focus?teaching_class_id=${teachingClassId}`
         : '/api/weekly-focus'
     fetch(url)
-      .then((r) => r.json())
+      .then(async (r) => {
+        if (!r.ok) throw new Error(`HTTP ${r.status}`)
+        const payload: unknown = await r.json()
+        if (
+          !payload ||
+          typeof payload !== 'object' ||
+          !Array.isArray((payload as WeeklyFocus).students)
+        ) {
+          throw new Error('Invalid weekly focus response')
+        }
+        return payload as WeeklyFocus
+      })
       .then(setData)
-      .catch(() => {})
+      .catch(() => setData(null))
       .finally(() => setLoaded(true))
   }, [teachingClassId])
 
