@@ -110,6 +110,17 @@ function periodRange(period: string, mode: 'week' | 'month') {
   return { start: period, end: sunday.toISOString().slice(0, 10) }
 }
 
+/**
+ * 趋势图坐标轴文案。周模式的桶键是「周一日期」，直接显示会被误读成
+ * 「这一天的缺交数」（那天可能根本没布作业），所以显示成整周区间。
+ */
+function periodLabel(period: string, mode: 'week' | 'month') {
+  if (mode === 'month') return period
+  const range = periodRange(period, mode)
+  const short = (day: string) => day.slice(5).replace('-', '/')
+  return `${short(range.start)}–${short(range.end)}`
+}
+
 function StudentName({
   item, onOpen,
 }: {
@@ -498,9 +509,19 @@ export default function HomeworkPage() {
                 >
                   <defs><linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2563eb" stopOpacity={0.28} /><stop offset="100%" stopColor="#2563eb" stopOpacity={0.02} /></linearGradient></defs>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
-                  <XAxis dataKey="period" tick={{ fontSize: 11 }} />
+                  <XAxis
+                    dataKey="period"
+                    tick={{ fontSize: 11 }}
+                    tickFormatter={(period: string) => periodLabel(period, groupBy)}
+                  />
                   <YAxis allowDecimals={false} width={30} />
-                  <Tooltip />
+                  <Tooltip
+                    labelFormatter={(period) => (
+                      groupBy === 'week'
+                        ? `${periodLabel(String(period), 'week')} 当周`
+                        : `${period} 当月`
+                    )}
+                  />
                   <Area type="monotone" dataKey="count" name="缺交" stroke="#2563eb" fill="url(#trendFill)" strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>

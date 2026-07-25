@@ -36,16 +36,20 @@ export default function HomeworkManagePage() {
   const [records, setRecords] = useState<ManageRecord[]>([])
   const [student, setStudent] = useState('')
   const [date, setDate] = useState('')
+  const [startDate, setStartDate] = useState('')
+  const [endDate, setEndDate] = useState('')
   const [subject, setSubject] = useState('')
   const [loading, setLoading] = useState(false)
   const [editing, setEditing] = useState<ManageRecord | null>(null)
-  // 先把 URL 上的 date/student/subject 读进来再触发加载，避免「无筛选请求」
-  // 与「带筛选请求」竞争、前者后到把结果覆盖成全量。
+  // 先把 URL 上的 date/start_date/end_date/student/subject 读进来再触发加载，
+  // 避免「无筛选请求」与「带筛选请求」竞争、前者后到把结果覆盖成全量。
   const [ready, setReady] = useState(false)
 
   useEffect(() => {
     const params = new URLSearchParams(window.location.search)
     setDate(params.get('date') || '')
+    setStartDate(params.get('start_date') || '')
+    setEndDate(params.get('end_date') || '')
     setStudent(params.get('student') || '')
     setSubject(params.get('subject') || '')
     setReady(true)
@@ -55,7 +59,13 @@ export default function HomeworkManagePage() {
     setLoading(true)
     const params = new URLSearchParams()
     if (student) params.set('student', student)
-    if (date) params.set('date', date)
+    // 后端口径：start_date + end_date 同时给出时按区间筛，否则退回单日 date
+    if (startDate && endDate) {
+      params.set('start_date', startDate)
+      params.set('end_date', endDate)
+    } else if (date) {
+      params.set('date', date)
+    }
     if (subject) params.set('subject', subject)
     if (current !== 'all') params.set('teaching_class_id', String(current))
     try {
@@ -64,7 +74,7 @@ export default function HomeworkManagePage() {
     } finally {
       setLoading(false)
     }
-  }, [student, date, subject, current])
+  }, [student, date, startDate, endDate, subject, current])
 
   useEffect(() => {
     if (ready) load().catch(() => {})
@@ -121,9 +131,18 @@ export default function HomeworkManagePage() {
             <input
               type="date"
               value={date}
-              onChange={(e) => setDate(e.target.value)}
+              onChange={(e) => {
+                setDate(e.target.value)
+                setStartDate('')
+                setEndDate('')
+              }}
               className="rounded-md border border-slate-200 px-2 py-1 text-sm"
             />
+            {startDate && endDate && (
+              <Badge className="border-transparent bg-brand-50 text-brand-700">
+                日期区间：{startDate} ~ {endDate}
+              </Badge>
+            )}
             {subject && (
               <Badge className="border-transparent bg-brand-50 text-brand-700">
                 作业种类：{subject}
@@ -132,13 +151,15 @@ export default function HomeworkManagePage() {
             <Button variant="outline" size="sm" onClick={() => load()}>
               查询
             </Button>
-            {(student || date || subject) && (
+            {(student || date || startDate || endDate || subject) && (
               <Button
                 variant="ghost"
                 size="sm"
                 onClick={() => {
                   setStudent('')
                   setDate('')
+                  setStartDate('')
+                  setEndDate('')
                   setSubject('')
                 }}
               >
