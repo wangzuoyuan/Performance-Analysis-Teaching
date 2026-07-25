@@ -14,3 +14,11 @@ raw/
 /data/
 
 .DS_Store
+
+# 设计系统同步产物（可再生，不入库）
+.ds-sync/
+ds-bundle/
+frontend/.ds-barrel.tsx
+frontend/.ds-compiled.css
+frontend/.ds-shim.ts
+frontend/.ds-tailwind.config.js
