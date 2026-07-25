@@ -1,6 +1,31 @@
-# 共享fixtures
-import pytest
-from app.db.models import SessionLocal
+"""共享 fixtures。
+
+**测试一律跑临时数据目录，不碰 `~/.exam-tracker` 真库。** 多数用例直接用
+`SessionLocal()` 读写共享库，跑在真库上会往老师的花名册/教学班里留下残留
+（历史上就留下过 `tc-<时间戳>` 的假学生，让占位学号用例反查到真学号而失败）。
+
+`paths.py` 在 import 时就读环境变量并建目录，`models.py` 也在 import 时把库
+路径绑进 engine，所以设置环境变量必须发生在**任何 `app.*` 导入之前**——这段
+代码放在文件最顶部，import 顺序是有意的，不要挪到 fixture 里。
+
+CI 已显式给这两个变量指向 workspace 内的目录，此时沿用、不覆盖、不删除。
+"""
+import atexit
+import os
+import shutil
+import tempfile
+
+if not os.environ.get("EXAM_TRACKER_DIR"):
+    _TEST_DATA_DIR = tempfile.mkdtemp(prefix="exam-tracker-tests-")
+    os.environ["EXAM_TRACKER_DIR"] = _TEST_DATA_DIR
+    os.environ.setdefault(
+        "EXAM_TRACKER_BACKUP_DIR", os.path.join(_TEST_DATA_DIR, "backups")
+    )
+    # 用完删掉：atexit 覆盖正常退出和 Ctrl-C / 崩溃退出
+    atexit.register(shutil.rmtree, _TEST_DATA_DIR, ignore_errors=True)
+
+import pytest  # noqa: E402
+from app.db.models import SessionLocal  # noqa: E402
 
 
 @pytest.fixture
