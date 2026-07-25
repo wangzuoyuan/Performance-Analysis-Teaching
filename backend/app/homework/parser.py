@@ -77,16 +77,42 @@ def parse_homework_item(item):
     return (item, None, None)
 
 
-def is_subject_item(item):
-    """item 是否包含可识别的作业种类关键词（用于区分缺交 vs 特殊情况）。"""
+def is_special_item(item):
+    """item 是否为「情况」而非作业种类（记特殊记录，不计缺交）。
+
+    三档判定，顺序有意如此：
+    1. 情况词/情况句式（请假、迟到、忘带、漏题、补交…）优先于作业种类——
+       「校本漏题」是交了但没做全，不能记成缺交。
+    2. 命中作业种类或学科名 → 不是情况，交回 is_subject_item。
+    3. 剩下的才看评价词（优秀、潦草…）。放在种类之后，是因为「培优练习」
+       「查漏补缺」这类作业名会撞上评价词的单字，让种类先兜住。
+    """
     item = item.strip()
-    for _, keywords in SUBJECT_GROUPS:
-        for keyword in keywords:
-            if keyword in item:
-                return True
-    if any(keyword in item for keyword in ACADEMIC_SUBJECT_HINTS):
+    if not item:
+        return False
+    if any(word in item for word in SPECIAL_STATUS_WORDS):
         return True
-    return False
+    if SPECIAL_STATUS_RE.search(item):
+        return True
+    for _, keywords in SUBJECT_GROUPS:
+        if any(keyword in item for keyword in keywords):
+            return False
+    if any(keyword in item for keyword in ACADEMIC_SUBJECT_HINTS):
+        return False
+    return any(word in item for word in ITEM_EVALUATION_WORDS)
+
+
+def is_subject_item(item):
+    """item 是否当作作业种类（用于区分缺交 vs 特殊情况）。
+
+    只排除 is_special_item 认定的情况词，其余一律当作老师自定义的作业种类
+    （如「专题二」「限时训练」）——否则自定义作业名会被误记成特殊记录，
+    不计入缺交统计和连续缺交预警。
+    """
+    item = item.strip()
+    if not item:
+        return False
+    return not is_special_item(item)
 
 
 def split_names(raw):
@@ -107,6 +133,31 @@ NEGATIVE_EVALUATIONS = ("不合格", "不认真", "马虎", "潦草", "敷衍", 
 LEAVE_WORDS = ("请假", "病假", "事假")
 FORGOT_WORDS = ("忘带", "没带", "未带")
 MISSING_WORDS = ("缺交", "未交", "没交", "欠交")
+
+# ── 特殊记录（「情况」）的识别词表，见 is_special_item ──
+ATTENDANCE_WORDS = ("迟到", "早退", "旷课", "缺课", "缺席")
+# 交了但没做全：漏题、少做几题、留白，都不该记成缺交
+INCOMPLETE_WORDS = ("漏题", "漏做", "漏写", "漏答", "少做", "少写", "未完成", "没做完", "没写完", "空白")
+MAKEUP_WORDS = ("补交", "已补", "补做", "重做", "免做", "免交", "免修")
+CONDUCT_WORDS = ("表扬", "批评", "违纪", "值日", "抄袭", "代写")
+SPECIAL_STATUS_WORDS = (
+    LEAVE_WORDS + FORGOT_WORDS + ATTENDANCE_WORDS
+    + INCOMPLETE_WORDS + MAKEUP_WORDS + CONDUCT_WORDS
+)
+# 词表列不全的口语写法：「漏了两题」「少答一问」「没写完」「空了三题」。
+# 「漏交」是缺交的同义词，明确排除，别被 漏X 规则吞掉。
+_COUNT = r"\d一二两三四五六七八九十几半"
+SPECIAL_STATUS_RE = re.compile(
+    rf"漏(?!交)[了做写答题{_COUNT}]"
+    rf"|少[了做写答][{_COUNT}]?"
+    r"|没[写做答]完"
+    rf"|空[了]?[{_COUNT}]*[题空处]"
+)
+# 评价词只在没有作业种类时才判为特殊记录，单字的「优」「差」不参与，
+# 否则「培优练习」「查漏补差」这类作业名会被误判。
+ITEM_EVALUATION_WORDS = tuple(
+    word for word in NEGATIVE_EVALUATIONS + POSITIVE_EVALUATIONS if len(word) > 1
+)
 
 
 def parse_action(action):
@@ -141,6 +192,16 @@ def parse_action(action):
          if any(word in action for word in words)),
         DEFAULT_HOMEWORK_TYPE,
     )
+    incomplete = next((word for word in INCOMPLETE_WORDS if word in action), None)
+    if incomplete or SPECIAL_STATUS_RE.search(action):
+        # 交了但没做全：记一条特殊记录，作业本身算已交，不进缺交统计
+        return {
+            "subject": subject,
+            "submission_status": "已交",
+            "evaluation": "",
+            "content": action,
+            "special_type": incomplete or "漏做",
+        }
     if any(word in action for word in MISSING_WORDS):
         content = action
         for word in MISSING_WORDS:
