@@ -212,24 +212,38 @@ def _inject_page_scope(context: dict | None) -> dict | None:
     return None
 
 
-def _apply_scope_to_tool_args(args: dict, page_scope: dict | None) -> dict:
-    """把页面 scope 注入工具调用参数（仅限接受 teaching_class_id 的工具）。
+def _valid_teaching_class_id(raw) -> int | None:
+    """teaching_class_id 合法性：正整数才有效；bool/0/负数/其他类型一律 None。
 
-    硬约束规则（具体班优先于模型自选）：
-    - scope_mode=teaching_class → 页面 teaching_class_id 无条件覆盖模型值。
-      用户当前页面锁定了某个教学班，模型不能自行改查别的班。
-    - scope_mode=all → 模型自己传了 teaching_class_id 就保留（允许用户经工具
-      选择具体合法班）；模型没传则注入 None（全部模式）。
+    type(x) is int 拒绝 bool（isinstance(True, int) == True 是已知坑）。
+    """
+    return raw if (type(raw) is int and raw > 0) else None
+
+
+def _apply_scope_to_tool_args(args: dict, page_scope: dict | None) -> dict:
+    """把页面 scope 作为默认值注入工具调用参数（仅限接受 teaching_class_id 的工具）。
+
+    优先级规则（对全部 _SCOPE_TOOLS 一致，Anthropic / OpenAI 两条路径共用）：
+    1. 模型显式给出非 None 的 teaching_class_id → 一律保留原值，页面不覆盖：
+       - 合法正整数：按该班查询。典型流程：用户点名「物B3」→ list_my_classes
+         解析出 id → 模型显式传参，即使页面当前停在物A1 也查物B3。页面 scope
+         是默认上下文，不是禁止查询其他合法任教班的锁。
+       - 非法值（bool/0/负数/字符串/float 等）：同样不得替换成页面班，原样
+         透传，由工具层 _validate_teaching_class_id / resolve_single_subject_context
+         硬校验拒绝 —— 绝不静默退化成另一个班的查询。
+    2. key 缺失或值为 None（用户未点名其他班）→ 注入页面默认：
+       - scope_mode=teaching_class → 页面选中的具体班（页面值非法则不注入）；
+       - scope_mode=all → None（保持全部模式）。
+    越权班、他科班、跨年级、非法 ID 仍由工具层领域校验拒绝，这里不做任何放行。
     - 返回新的 args dict，不修改原 dict。
     """
-    if not page_scope:
-        return args
     result = dict(args)
-    if page_scope.get("scope_mode") == "teaching_class":
-        result["teaching_class_id"] = page_scope.get("teaching_class_id")
-    else:  # all
-        if "teaching_class_id" not in result or result.get("teaching_class_id") is None:
-            result["teaching_class_id"] = page_scope.get("teaching_class_id")
+    if result.get("teaching_class_id") is not None:
+        # 模型显式给出（含非法值）：保留原值，合法与否交给工具层硬校验
+        return result
+    if not page_scope:
+        return result
+    result["teaching_class_id"] = _valid_teaching_class_id(page_scope.get("teaching_class_id"))
     return result
 
 

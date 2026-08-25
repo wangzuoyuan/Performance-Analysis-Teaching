@@ -1612,11 +1612,15 @@ def class_homework_ranking(
     单学科化：teaching_class_id 必须属于当前任教学科（越权/跨学科拒绝）；
     不传时默认当前学科所有教学班成员并集，绝不混入他科班。
     """
+    from app.analysis.single_subject_metrics import _validate_teaching_class_id
     from app.db.models import get_db
     from app.homework import service
     from app.teaching.subject import resolve_teaching_subject
 
     _reject_legacy_class_params()
+    # 硬校验：bool/0/负数/字符串/float 一律 ValueError，绝不静默退化成其他班
+    # （resolve_teaching_subject 与 SQLite 类型亲和会把 True 当 id=1 查询）
+    _validate_teaching_class_id(teaching_class_id)
     db = next(get_db())
     try:
         # 校验 teaching_class_id 属于当前学科（越权拒绝）
