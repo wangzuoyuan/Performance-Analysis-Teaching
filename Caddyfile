@@ -7,6 +7,14 @@
 			flush_interval -1
 		}
 	}
+	# /mcp 与 /mcp/* → 后端只读 MCP 服务端（Streamable HTTP，Bearer 认证）。
+	# MCP 为 stateless JSON，无 SSE 流；保持缺省缓冲策略即可。
+	handle /mcp/* {
+		reverse_proxy backend:8000
+	}
+	handle /mcp {
+		reverse_proxy backend:8000
+	}
 	# 其余 → 前端
 	handle {
 		reverse_proxy frontend:3000

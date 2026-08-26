@@ -1727,9 +1727,22 @@ def to_openai_tools(tools: list[dict]) -> list[dict]:
     ]
 
 
-TOOLS = [
+# ─────────────────────────── 单一工具注册源 ───────────────────────────
+#
+# TOOL_REGISTRY 是唯一注册处：新增工具只需在这里加条目（name/read_only/
+# description/input_schema）并注册到 TOOL_FUNCTIONS。聊天助手（Anthropic/
+# OpenAI）与只读 MCP 服务端都从它派生：
+#   - 公开 TOOLS = 投影(name/description/input_schema)，发往 provider 的
+#     schema 永远不含 MCP 专用元数据，聊天行为不变；
+#   - MCP 目录 = TOOL_REGISTRY 中 read_only=True 的条目（写工具默认不暴露）。
+#
+# read_only：该工具是否纯只读查询。未来新增写入/删除工具必须显式置 False
+# （或省略），MCP 侧不会自动暴露它们。
+
+TOOL_REGISTRY = [
     {
         "name": "list_exams",
+        "read_only": True,
         "description": "罗列当前任教学科在教学班成员范围内有真实分数的考试（最近考试按日期倒序）。",
         "input_schema": {
             "type": "object",
@@ -1741,6 +1754,7 @@ TOOLS = [
     },
     {
         "name": "list_my_classes",
+        "read_only": True,
         "description": "列出我任教的教学班（高一=行政班数字、高二/三可为走班名如『物A1』）。当用户提到具体班级名时，先调用本工具把名字解析成 teaching_class_id，再传给其他工具。返回每班的 teaching_class_id、grade、label、kind、member_count。",
         "input_schema": {
             "type": "object",
@@ -1751,6 +1765,7 @@ TOOLS = [
     },
     {
         "name": "student_lookup",
+        "read_only": True,
         "description": "按姓名/学号定位学生（限当前任教学科教学班成员范围）。",
         "input_schema": {
             "type": "object",
@@ -1763,6 +1778,7 @@ TOOLS = [
     },
     {
         "name": "student_exam_detail",
+        "read_only": True,
         "description": "某生某次考试的当前学科成绩（含按班 subject_rank）。学科由后端教师上下文解析，只返回一科。",
         "input_schema": {
             "type": "object",
@@ -1776,6 +1792,7 @@ TOOLS = [
     },
     {
         "name": "student_trend",
+        "read_only": True,
         "description": "某生当前学科跨次趋势（含 subject_rank），高二/三选考用 grade_score 判断。",
         "input_schema": {
             "type": "object",
@@ -1789,6 +1806,7 @@ TOOLS = [
     },
     {
         "name": "student_learning_profile",
+        "read_only": True,
         "description": "学生当前学科学习画像：跨次趋势序列（含 subject_rank）、首末趋势变化。学科由后端解析，不含总分或其他学科。",
         "input_schema": {
             "type": "object",
@@ -1802,6 +1820,7 @@ TOOLS = [
     },
     {
         "name": "class_trend",
+        "read_only": True,
         "description": "教学班当前学科均分/排名时间序列。teaching_class_id 指定单班；不填=全部当前学科教学班。",
         "input_schema": {
             "type": "object",
@@ -1813,6 +1832,7 @@ TOOLS = [
     },
     {
         "name": "compare_classes",
+        "read_only": True,
         "description": "多班同次当前学科对比（均分/均排名）。teaching_class_id 可选；默认对比当前学科所有教学班。",
         "input_schema": {
             "type": "object",
@@ -1825,6 +1845,7 @@ TOOLS = [
     },
     {
         "name": "focus_list",
+        "read_only": True,
         "description": "某次考试的当前学科重点关注名单（基于 subject_rank + band_config 的临界段/薄弱段）。",
         "input_schema": {
             "type": "object",
@@ -1838,6 +1859,7 @@ TOOLS = [
     },
     {
         "name": "subject_weakness",
+        "read_only": True,
         "description": "当前学科薄弱名单（subject_rank 落在薄弱段的学生）。teaching_class_id 可选。",
         "input_schema": {
             "type": "object",
@@ -1850,6 +1872,7 @@ TOOLS = [
     },
     {
         "name": "subject_progress_ranking",
+        "read_only": True,
         "description": "当前学科跨考试进步或退步最大的学生排行。学科由后端解析，不接受 subject 参数。默认比较该年级最早和最新合法考试。高二/三选考按等级分，其他单科按百分位。",
         "input_schema": {
             "type": "object",
@@ -1866,6 +1889,7 @@ TOOLS = [
     },
     {
         "name": "multi_exam_progress_ranking",
+        "read_only": True,
         "description": "把最近N次或指定多场考试合起来，按当前学科分析全体学生进步、退步和趋势排行。学科固定为当前任教学科，不接受 metrics/总分。高二/三选考用等级分，其他单科用年级百分位。",
         "input_schema": {
             "type": "object",
@@ -1887,6 +1911,7 @@ TOOLS = [
     },
     {
         "name": "band_trend",
+        "read_only": True,
         "description": "某年级历次考试当前学科的高分段/临界段/薄弱段人数随时间变化趋势（基于 subject_rank）。分段口径使用用户当前自定义的设置，返回值含 band_config 说明区间。teaching_class_id 不填表示全部当前学科教学班。",
         "input_schema": {
             "type": "object",
@@ -1899,6 +1924,7 @@ TOOLS = [
     },
     {
         "name": "custom_rank_band_trend",
+        "read_only": True,
         "description": "按用户临时指定的排名区间统计历次考试当前学科人数变化（基于 subject_rank）。适合回答“班内前10名有多少人”“排名5-15名之间人数趋势”等，不受固定段位配置限制。",
         "input_schema": {
             "type": "object",
@@ -1915,6 +1941,7 @@ TOOLS = [
     },
     {
         "name": "rank_range_filter",
+        "read_only": True,
         "description": "按单次考试和当前学科按班排名区间筛选学生。学科由后端解析，metric 格式如 subject:数学（必须与任教科目一致）。",
         "input_schema": {
             "type": "object",
@@ -1930,6 +1957,7 @@ TOOLS = [
     },
     {
         "name": "rank_frequency_stat",
+        "read_only": True,
         "description": "统计多场考试里每名学生当前学科落入各排名/百分位/精确等级分区间的次数。高二/三选考用 subject_grade:学科 按精确等级分统计，其他单科用 subject:学科 按百分位区间统计。",
         "input_schema": {
             "type": "object",
@@ -1945,6 +1973,7 @@ TOOLS = [
     },
     {
         "name": "student_homework_summary",
+        "read_only": True,
         "description": "某个学生本学期的作业（缺交）概况：缺交总次数、按作业种类分布、迟到/请假次数、当前连续缺交预警。回答“某某作业完成情况怎么样”“他缺交多吗”“作业和成绩有没有关系”时先用本工具拿作业侧数据，再结合 student_learning_profile 的成绩。作业数据仅含缺交/请假/迟到，不代表完成质量。学生必须在当前任教学科教学班成员范围内。",
         "input_schema": {
             "type": "object",
@@ -1957,6 +1986,7 @@ TOOLS = [
     },
     {
         "name": "class_homework_ranking",
+        "read_only": True,
         "description": "班级缺交排行榜，回答“这学期谁缺交最多”“缺交前几名是谁”。默认当前学期区间，已排除被标记为不统计的学生。范围限定为当前任教学科教学班成员（teaching_class_id 指定单班；不填=全部当前学科教学班并集）。",
         "input_schema": {
             "type": "object",
@@ -1970,6 +2000,7 @@ TOOLS = [
     },
     {
         "name": "homework_grade_correlation",
+        "read_only": True,
         "description": "把「缺交」和「当前学科成绩」放在一起，回答“作业缺交多的学生当前学科成绩是不是更差”“缺交和名次有没有关系”。X 为所有作业种类的缺交次数，Y 为当前学科最近合法考试的 subject_rank（按班排名，越小越好）。附带 subject_correlation（当前学科缺交 × 当前学科名次 皮尔逊相关，r 越大表示缺交越拖成绩）。学科由后端教师上下文解析，不可选择其他学科或总分。exam_id 不填取最近一场。作业数据仅反映缺交，不代表完成质量。",
         "input_schema": {
             "type": "object",
@@ -1981,6 +2012,7 @@ TOOLS = [
     },
     {
         "name": "student_notes",
+        "read_only": True,
         "description": "读取某个学生的成长/谈话档案（班主任记录的谈话、观察、家访、家长沟通、奖惩等）。当用户要『结合最近谈话/家访情况』『帮我准备和某某的谈话提纲』『写给某某家长的沟通稿』时调用，结合 student_learning_profile 与 student_homework_summary 一起用。内容为私密档案，措辞需稳妥尊重。学生必须在当前任教学科教学班成员范围内。",
         "input_schema": {
             "type": "object",
@@ -1993,3 +2025,29 @@ TOOLS = [
         },
     },
 ]
+
+
+def _project_provider_tool(entry: dict) -> dict:
+    """注册表条目 → provider 工具（仅 name/description/input_schema 三键）。
+
+    read_only 等扩展元数据在这一步被剥离，保证发往 Anthropic / OpenAI 的
+    tools 参数与引入 MCP 前完全一致。
+    """
+    return {
+        "name": entry["name"],
+        "description": entry.get("description", ""),
+        "input_schema": entry.get("input_schema", {"type": "object", "properties": {}}),
+    }
+
+
+# 公开工具清单：聊天助手（session.build_tools_list / to_openai_tools）使用。
+# 内容由 TOOL_REGISTRY 投影而来；不要在此列表上添加 MCP 专用字段。
+TOOLS = [_project_provider_tool(e) for e in TOOL_REGISTRY]
+
+
+def readonly_tool_catalog() -> list[dict]:
+    """MCP 专用：TOOL_REGISTRY 中显式标记 read_only=True 的条目（原样引用）。
+
+    写入/删除工具（read_only 缺失或 False）不会进入 MCP 目录。
+    """
+    return [e for e in TOOL_REGISTRY if e.get("read_only")]

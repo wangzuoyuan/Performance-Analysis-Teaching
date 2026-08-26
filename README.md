@@ -158,6 +158,19 @@ curl -f http://127.0.0.1:8080/api/health
 
 `docker-compose.yml` 包含 backend + frontend + caddy，`Caddyfile` 在 `:8080` 分流。登录鉴权仅当设了 `APP_PASSWORD` 且请求命中 `PUBLIC_HOST` 时启用。完整部署、升级和回滚步骤见 [DEPLOY.md](DEPLOY.md)。
 
+
+## 只读 MCP 服务端（供 Hermes 等远程 AI 客户端）
+
+后端内置一个**只读 MCP（Model Context Protocol）服务端**，与聊天助手共用同一套工具注册表（`backend/app/chat/tools.py` 的 `TOOL_REGISTRY`）：凡是注册表中标记 `read_only: True` 的工具自动出现在 MCP 目录中，调用一律经既有的 `execute_tool()` 分发。默认关闭（`MCP_ENABLED` 留空时完全不挂载，应用行为与之前一致）。
+
+- 传输：MCP Streamable HTTP，stateless JSON（无会话），路径 `https://你的域名/mcp/`（`/mcp` 会 307 跳转到 `/mcp/`，客户端自动跟随）
+- 认证：独立 Bearer Token（`MCP_BEARER_TOKEN`），缺失/错误 token 返回 401 + `WWW-Authenticate: Bearer`
+- 暴露工具：当前注册表全部只读工具（含必须存在的 `list_my_classes` / `list_exams` / `student_lookup` / `student_exam_detail` / `student_trend` / `student_learning_profile` / `class_trend` / `multi_exam_progress_ranking` / `focus_list` / `student_homework_summary` / `student_notes` 共 11 个在内），全部标注 `readOnlyHint=true`、`destructiveHint=false`、`idempotentHint=true`、`openWorldHint=false`
+- 安全边界：token 等同**全量只读学情数据**权限（含学生成绩、缺交、谈话档案）；公网必须 HTTPS；SDK 自带 Host/Origin 防护（`MCP_ALLOWED_HOSTS` / `MCP_ALLOWED_ORIGINS` 可配）
+
+**新增业务工具只需一次注册**：在 `tools.py` 的 `TOOL_REGISTRY` 加条目（只读工具标 `read_only: True`）并登记 `TOOL_FUNCTIONS`，聊天助手和 MCP 同时可用，无需写第二份清单或 wrapper。写入/删除类工具不要标 `read_only`，它们不会进入 MCP；未来如需写操作 MCP，必须单独设计权限与确认机制。
+
+Token 生成、NAS 配置、Hermes 笔记本端配置与验证命令见 [DEPLOY.md](DEPLOY.md) 的「只读 MCP 服务端」一节。
 ## 测试
 
 ```bash
