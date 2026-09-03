@@ -15,6 +15,9 @@ raw/
 
 .DS_Store
 
+# 本地开发工具配置（Claude Code 预览启动器等）
+.claude/
+
 # 设计系统同步产物（可再生，不入库）
 .ds-sync/
 ds-bundle/

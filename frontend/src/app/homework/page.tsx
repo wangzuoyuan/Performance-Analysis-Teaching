@@ -17,6 +17,9 @@ import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ClassScopePicker } from '@/components/ClassScopePicker'
 import {
+  HomeworkEntryPreview, HomeworkSubmitFeedback, SubmitFeedback,
+} from '@/components/HomeworkEntryPreview'
+import {
   Dialog, DialogContent, DialogDescription, DialogHeader, DialogTitle,
 } from '@/components/ui/dialog'
 import {
@@ -161,7 +164,7 @@ export default function HomeworkPage() {
   const [previewErrors, setPreviewErrors] = useState<PreviewError[]>([])
   const [previewOpen, setPreviewOpen] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [feedback, setFeedback] = useState('')
+  const [feedback, setFeedback] = useState<HomeworkSubmitFeedback | null>(null)
 
   const [studentOpen, setStudentOpen] = useState(false)
   const [studentDetail, setStudentDetail] = useState<any>(null)
@@ -206,7 +209,7 @@ export default function HomeworkPage() {
 
   async function previewEntry() {
     if (current === 'all' || !raw.trim()) return
-    setFeedback('')
+    setFeedback(null)
     const response = await fetch('/api/homework/smart-input', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -237,14 +240,19 @@ export default function HomeworkPage() {
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.detail?.message || payload.detail || '录入失败')
       const entryErrors = (payload.errors ?? []) as string[]
+      const added = payload.added_count ?? 0
       setFeedback(
-        `已录入 ${payload.added_count} 条记录${entryErrors.length ? `，${entryErrors.length} 条有问题：${entryErrors.join('；')}` : ''}`
+        added > 0 && entryErrors.length === 0
+          ? { tone: 'success', title: `已录入 ${added} 条记录` }
+          : added > 0
+            ? { tone: 'partial', title: `已录入 ${added} 条，另有 ${entryErrors.length} 条未成功`, details: entryErrors }
+            : { tone: 'error', title: '录入失败', details: entryErrors.length ? entryErrors : undefined }
       )
       if (payload.added_count > 0) setRaw('')
       setPreviewOpen(false)
       await load()
     } catch (reason) {
-      setFeedback(reason instanceof Error ? reason.message : '录入失败')
+      setFeedback({ tone: 'error', title: reason instanceof Error ? reason.message : '录入失败' })
     } finally {
       setSaving(false)
     }
@@ -311,6 +319,10 @@ export default function HomeworkPage() {
                       : '周末作业：王小明、李晓华'
               }
             />
+            <div className="mt-3 space-y-3">
+              <HomeworkEntryPreview raw={raw} mode={entryMode} />
+              {feedback && <SubmitFeedback feedback={feedback} />}
+            </div>
           </div>
           <div className="flex flex-col justify-between gap-3">
             <label className="text-sm text-slate-500">
@@ -325,7 +337,6 @@ export default function HomeworkPage() {
               {entryMode === 'smart' ? '解析并预览' : saving ? '录入中…' : '直接录入'}
             </Button>
             <p className="text-xs text-slate-400">姓名只在当前教学班匹配；同名学生需用学号消歧。</p>
-            {feedback && <p className="text-sm text-brand-700">{feedback}</p>}
           </div>
         </CardContent>
       </Card>

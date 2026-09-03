@@ -6,6 +6,7 @@ const dashboard = readFileSync(new URL('../src/app/page.tsx', import.meta.url), 
 const homework = readFileSync(new URL('../src/app/homework/page.tsx', import.meta.url), 'utf8')
 const homeworkSettings = readFileSync(new URL('../src/app/homework/settings/page.tsx', import.meta.url), 'utf8')
 const weeklyFocus = readFileSync(new URL('../src/components/WeeklyFocusCard.tsx', import.meta.url), 'utf8')
+const homeworkEntryPreview = readFileSync(new URL('../src/components/HomeworkEntryPreview.tsx', import.meta.url), 'utf8')
 const classSettings = readFileSync(new URL('../src/app/settings/classes/page.tsx', import.meta.url), 'utf8')
 const examList = readFileSync(new URL('../src/app/exam/page.tsx', import.meta.url), 'utf8')
 const studentList = readFileSync(new URL('../src/app/student/page.tsx', import.meta.url), 'utf8')
@@ -45,6 +46,15 @@ test('homework roster additions bind to the selected teaching class', () => {
   assert.match(homeworkSettings, /setRoster\(\[\]\)/, '切班请求开始时应清空旧花名册')
   assert.match(homeworkSettings, /setRosterError\(true\)/, '花名册失败时应进入显式错误态')
   assert.match(homeworkSettings, /rosterScope !== current/, '花名册范围与选择器不一致时必须禁用新增')
+})
+
+test('homework entry shows a live parse preview while typing', () => {
+  assert.match(homework, /import \{\s*HomeworkEntryPreview[^}]*\} from ['"]@\/components\/HomeworkEntryPreview['"]/, '录入区应使用解析预览组件')
+  assert.match(homework, /<HomeworkEntryPreview raw=\{raw\} mode=\{entryMode\} \/>/, '预览必须跟随输入内容与录入模式实时更新')
+  assert.match(homeworkEntryPreview, /\[:：\]/, '预览按中英冒号切分是核心解析规则')
+  assert.match(homeworkEntryPreview, /行缺少冒号/, 'by_student/by_subject 模式必须对缺冒号的行给出警示')
+  assert.match(homeworkEntryPreview, /mode === 'smart'/, 'smart 模式的无冒号行必须按「姓名+动作」智能识别而不是判错')
+  assert.match(homework, /tone: 'partial'/, '录入反馈必须区分部分成功，错误逐条展示')
 })
 
 test('class creation bootstraps and locks the single teaching subject', () => {
