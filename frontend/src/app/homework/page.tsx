@@ -77,10 +77,10 @@ type PreviewItem = {
 }
 type PreviewError = { raw: string; message: string; candidates?: { student_id: string; name: string }[] }
 
-const CHART_COLORS = ['#2563eb', '#94a3b8', '#ef4444']
+const CHART_COLORS = ['#1f7fd6', '#8fb8dc', '#e15a5a']
 const PIE_COLORS = [
-  '#2563eb', '#0f766e', '#7c3aed', '#db2777', '#ea580c',
-  '#0891b2', '#65a30d', '#dc2626', '#9333ea', '#475569',
+  '#1f7fd6', '#0f9e8e', '#6f5bd6', '#d16ba5', '#e98a3b',
+  '#35b9e9', '#74b856', '#c74444', '#a583e8', '#58789b',
 ]
 // 热力图分级：只用 brand token 类，避免硬编码色值
 const HEAT_LEVELS = [
@@ -483,11 +483,11 @@ export default function HomeworkPage() {
             {(data?.submission_rates.length ?? 0) === 0 ? <Empty /> : (
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={data?.submission_rates} layout="vertical" margin={{ left: 12, right: 20 }}>
-                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#e2e8f0" />
+                  <CartesianGrid strokeDasharray="3 3" horizontal={false} stroke="#dcecf8" />
                   <XAxis type="number" domain={[0, 100]} tickFormatter={(v) => `${v}%`} />
                   <YAxis dataKey="label" type="category" width={74} />
                   <Tooltip formatter={(value) => [value == null ? '—（区间内无记录）' : `${value}%`, '提交率']} />
-                  <Bar dataKey="rate" fill="#2563eb" radius={[0, 5, 5, 0]} />
+                  <Bar dataKey="rate" fill="#1f7fd6" radius={[0, 5, 5, 0]} />
                 </BarChart>
               </ResponsiveContainer>
             )}
@@ -518,8 +518,8 @@ export default function HomeworkPage() {
                     goManage({ start_date: range.start, end_date: range.end })
                   }}
                 >
-                  <defs><linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#2563eb" stopOpacity={0.28} /><stop offset="100%" stopColor="#2563eb" stopOpacity={0.02} /></linearGradient></defs>
-                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                  <defs><linearGradient id="trendFill" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stopColor="#1f7fd6" stopOpacity={0.28} /><stop offset="100%" stopColor="#1f7fd6" stopOpacity={0.02} /></linearGradient></defs>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcecf8" />
                   <XAxis
                     dataKey="period"
                     tick={{ fontSize: 11 }}
@@ -533,7 +533,7 @@ export default function HomeworkPage() {
                         : `${period} 当月`
                     )}
                   />
-                  <Area type="monotone" dataKey="count" name="缺交" stroke="#2563eb" fill="url(#trendFill)" strokeWidth={2} />
+                  <Area type="monotone" dataKey="count" name="缺交" stroke="#1f7fd6" fill="url(#trendFill)" strokeWidth={2} />
                 </AreaChart>
               </ResponsiveContainer>
             )}
@@ -611,11 +611,11 @@ export default function HomeworkPage() {
           {(data?.semester_compare.length ?? 0) === 0 ? <Empty /> : (
             <ResponsiveContainer width="100%" height="100%">
               <BarChart data={data?.semester_compare}>
-                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#dcecf8" />
                 <XAxis dataKey="name" tick={{ fontSize: 11 }} />
                 <YAxis allowDecimals={false} />
                 <Tooltip />
-                <Bar dataKey="misses" name="缺交" fill="#64748b" radius={[5, 5, 0, 0]} />
+                <Bar dataKey="misses" name="缺交" fill="#58789b" radius={[5, 5, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>
           )}

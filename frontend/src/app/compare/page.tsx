@@ -298,24 +298,24 @@ export default function ComparePage() {
               ) : (
                 <ResponsiveContainer width="100%" height={380}>
                   <BarChart data={chartData} margin={{ top: 8, right: 16, left: 0, bottom: 8 }}>
-                    <CartesianGrid strokeDasharray="3 3" stroke="#e2e8f0" vertical={false} />
+                    <CartesianGrid strokeDasharray="3 3" stroke="#dcecf8" vertical={false} />
                     <XAxis
                       dataKey="classLabel"
-                      tick={{ fill: '#475569', fontSize: 12 }}
+                      tick={{ fill: '#58789b', fontSize: 12 }}
                       tickLine={false}
-                      axisLine={{ stroke: '#cbd5e1' }}
+                      axisLine={{ stroke: '#cbe2f5' }}
                     />
                     <YAxis
                       domain={[0, 'dataMax + 20']}
-                      tick={{ fill: '#475569', fontSize: 12 }}
+                      tick={{ fill: '#58789b', fontSize: 12 }}
                       tickLine={false}
-                      axisLine={{ stroke: '#cbd5e1' }}
+                      axisLine={{ stroke: '#cbe2f5' }}
                     />
                     <RTooltip
                       cursor={{ fill: 'rgba(148, 163, 184, 0.08)' }}
                       contentStyle={{
                         borderRadius: 8,
-                        border: '1px solid #e2e8f0',
+                        border: '1px solid #dcecf8',
                         fontSize: 12,
                         boxShadow: '0 4px 12px rgba(15, 23, 42, 0.08)',
                       }}
@@ -327,12 +327,12 @@ export default function ComparePage() {
                     <Bar
                       dataKey="subject_avg"
                       name={metricShort}
-                      fill="#6366f1"
+                      fill="#8f7be0"
                       radius={[4, 4, 0, 0]}
                       maxBarSize={28}
                     >
                       {chartData.map((_row, idx) => (
-                        <Cell key={idx} fill="#6366f1" fillOpacity={0.9} />
+                        <Cell key={idx} fill="#8f7be0" fillOpacity={0.9} />
                       ))}
                     </Bar>
                   </BarChart>

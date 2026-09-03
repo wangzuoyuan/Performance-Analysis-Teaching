@@ -5,7 +5,11 @@ const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElemen
   ({ className, ...props }, ref) => (
     <div
       ref={ref}
-      className={cn('rounded-xl border border-slate-200 bg-white text-slate-900 shadow-sm', className)}
+      className={cn(
+        'rounded-[10px] border bg-white/90 text-slate-900 backdrop-blur-sm',
+        'shadow-[0_6px_18px_rgba(23,84,148,0.06),inset_0_1px_0_#fff]',
+        className
+      )}
       {...props}
     />
   )
@@ -13,8 +17,11 @@ const Card = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElemen
 Card.displayName = 'Card'
 
 const CardHeader = React.forwardRef<HTMLDivElement, React.HTMLAttributes<HTMLDivElement>>(
-  ({ className, ...props }, ref) => (
-    <div ref={ref} className={cn('flex flex-col space-y-1.5 p-6', className)} {...props} />
+  ({ className, children, ...props }, ref) => (
+    <div ref={ref} className={cn('relative flex flex-col space-y-1.5 p-6 pl-10', className)} {...props}>
+      <span aria-hidden="true" className="card-diamond" />
+      {children}
+    </div>
   )
 )
 CardHeader.displayName = 'CardHeader'

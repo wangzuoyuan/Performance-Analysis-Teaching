@@ -31,7 +31,7 @@ export function Shell({ children }: { children: React.ReactNode }) {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 print:min-h-0 print:bg-white">
+    <div className="min-h-screen print:min-h-0 print:bg-white">
       <Sidebar teacher={teacher} onNameChange={handleNameChange} />
       <div className="md:pl-60 print:pl-0">
         <Topbar teacher={teacher} />

@@ -25,3 +25,6 @@ frontend/.ds-barrel.tsx
 frontend/.ds-compiled.css
 frontend/.ds-shim.ts
 frontend/.ds-tailwind.config.js
+
+# Playwright MCP 截图输出（本地验证产物，不入库）
+.playwright-mcp/

@@ -13,35 +13,35 @@ interface TrendLineChartProps {
 export default function TrendLineChart({
   data,
   yDataKey,
-  color = '#2563eb',
+  color = '#1f7fd6',
   yDomain,
   invertY = false,
 }: TrendLineChartProps) {
   return (
     <ResponsiveContainer width="100%" height={280}>
       <LineChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+        <CartesianGrid stroke="#dcecf8" strokeDasharray="3 3" vertical={false} />
         <XAxis
           dataKey="exam_name"
-          tick={{ fontSize: 12, fill: '#64748b' }}
-          stroke="#e2e8f0"
+          tick={{ fontSize: 12, fill: '#58789b' }}
+          stroke="#dcecf8"
         />
         <YAxis
           domain={yDomain || [0, 'auto']}
           reversed={invertY}
-          tick={{ fontSize: 12, fill: '#64748b' }}
-          stroke="#e2e8f0"
+          tick={{ fontSize: 12, fill: '#58789b' }}
+          stroke="#dcecf8"
         />
         <Tooltip
           contentStyle={{
             backgroundColor: '#ffffff',
-            border: '1px solid #e2e8f0',
+            border: '1px solid #dcecf8',
             borderRadius: 8,
             boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
             fontSize: 12,
           }}
-          labelStyle={{ color: '#0f172a', fontWeight: 500 }}
-          itemStyle={{ color: '#334155' }}
+          labelStyle={{ color: '#16324a', fontWeight: 500 }}
+          itemStyle={{ color: '#16324a' }}
         />
         <Line
           type="monotone"

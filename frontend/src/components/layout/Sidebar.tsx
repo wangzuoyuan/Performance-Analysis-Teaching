@@ -115,11 +115,22 @@ export function SidebarContent({ teacher, onNameChange }: SidebarContentProps) {
   }
 
   return (
-    <div className="flex h-full flex-col bg-slate-900 text-slate-100">
+    <div className="flex h-full flex-col bg-[rgba(250,253,255,0.92)] text-[#46688c] backdrop-blur">
       {/* Logo */}
-      <div className="flex h-14 items-center gap-2 border-b border-slate-800 px-5">
-        <GraduationCap className="h-6 w-6 text-brand-500" />
-        <span className="text-lg font-semibold tracking-tight">成绩追踪</span>
+      <div className="relative flex items-center gap-2.5 border-b border-[#cbe2f5]/60 px-5 py-4">
+        <span className="grid h-9 w-9 flex-shrink-0 place-items-center rounded-[9px] bg-gradient-to-br from-[#1f7fd6] to-[#35b9e9] text-white shadow-[0_4px_12px_rgba(31,127,214,0.35),inset_0_1px_0_rgba(255,255,255,0.4)]">
+          <GraduationCap className="h-5 w-5" />
+        </span>
+        <div>
+          <div className="text-[15px] font-semibold tracking-wide text-[#16324a]">成绩追踪</div>
+          <div className="mt-px text-[9px] uppercase tracking-[0.22em] text-[#9cc4e8]">
+            Performance Analysis
+          </div>
+        </div>
+        <span
+          aria-hidden="true"
+          className="absolute bottom-[-3px] left-5 right-5 h-px bg-gradient-to-r from-[#35b9e9] to-transparent opacity-70"
+        />
       </div>
 
       {/* Nav */}
@@ -132,10 +143,10 @@ export function SidebarContent({ teacher, onNameChange }: SidebarContentProps) {
               key={item.href}
               href={item.href}
               className={cn(
-                'flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors',
+                'flex items-center gap-3 rounded-lg border border-transparent px-3 py-2 text-sm font-medium transition-colors',
                 active
-                  ? 'bg-slate-800 text-white'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                  ? 'bg-gradient-to-r from-[#1f7fd6]/95 to-[#35b9e9]/90 text-white shadow-[0_4px_12px_rgba(31,127,214,0.32),inset_0_1px_0_rgba(255,255,255,0.35)]'
+                  : 'text-[#46688c] hover:bg-[#1f7fd6]/[0.07] hover:text-[#0e5fa8]'
               )}
             >
               <Icon className="h-4 w-4" />
@@ -146,14 +157,14 @@ export function SidebarContent({ teacher, onNameChange }: SidebarContentProps) {
       </nav>
 
       {/* Footer card */}
-      <div className="border-t border-slate-800 p-3">
-        <div className="rounded-md bg-slate-800/60 px-3 py-3">
+      <div className="border-t border-[#cbe2f5]/60 p-3">
+        <div className="rounded-[10px] border border-[#cbe2f5] bg-gradient-to-b from-white/90 to-[#eaf5fd]/70 px-3 py-3">
           <div className="flex items-center justify-between">
-            <div className="text-xs text-slate-500">班主任</div>
+            <div className="text-xs text-[#58789b]">班主任</div>
             {!editing && (
               <button
                 onClick={startEdit}
-                className="text-slate-600 hover:text-slate-300 transition-colors"
+                className="text-[#8fb8dc] transition-colors hover:text-[#1f7fd6]"
                 aria-label="编辑姓名"
               >
                 <Pencil className="h-3 w-3" />
@@ -170,29 +181,29 @@ export function SidebarContent({ teacher, onNameChange }: SidebarContentProps) {
                   if (e.key === 'Enter') commitEdit()
                   if (e.key === 'Escape') cancelEdit()
                 }}
-                className="w-full rounded bg-slate-700 px-1.5 py-0.5 text-sm text-slate-100 outline-none focus:ring-1 focus:ring-brand-500"
+                className="w-full rounded bg-white px-1.5 py-0.5 text-sm text-[#16324a] outline-none focus:ring-1 focus:ring-[#1f7fd6]"
                 placeholder="输入姓名"
                 maxLength={20}
               />
-              <button onClick={commitEdit} className="text-success-500 hover:text-green-300">
+              <button onClick={commitEdit} className="text-success-500 hover:text-success-600">
                 <Check className="h-3.5 w-3.5" />
               </button>
-              <button onClick={cancelEdit} className="text-slate-500 hover:text-slate-300">
+              <button onClick={cancelEdit} className="text-[#8fb8dc] hover:text-[#58789b]">
                 <X className="h-3.5 w-3.5" />
               </button>
             </div>
           ) : (
-            <div className="mt-0.5 text-sm font-medium text-slate-100">
+            <div className="mt-0.5 text-sm font-medium text-[#16324a]">
               {teacher?.name || '—'}
             </div>
           )}
           <div className="mt-2 flex items-center justify-between">
-            <div className="text-xs text-slate-500">当前班级</div>
-            <Link href="/settings/classes" className="text-xs text-brand-400 hover:text-brand-300">
+            <div className="text-xs text-[#58789b]">当前班级</div>
+            <Link href="/settings/classes" className="text-xs text-[#1f7fd6] hover:text-[#0e5fa8]">
               管理
             </Link>
           </div>
-          <div className="mt-0.5 text-sm font-medium text-slate-100">
+          <div className="mt-0.5 text-sm font-medium text-[#16324a]">
             {currentScopeLabel(current, classes)}
           </div>
         </div>
@@ -208,7 +219,7 @@ interface SidebarProps {
 
 export function Sidebar({ teacher, onNameChange }: SidebarProps) {
   return (
-    <aside className="hidden md:flex md:w-60 md:flex-col md:fixed md:inset-y-0 md:left-0 md:z-30 print:hidden">
+    <aside className="hidden md:flex md:w-60 md:flex-col md:fixed md:inset-y-0 md:left-0 md:z-30 md:border-r md:border-[#cbe2f5] print:hidden">
       <SidebarContent teacher={teacher} onNameChange={onNameChange} />
     </aside>
   )

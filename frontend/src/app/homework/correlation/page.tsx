@@ -133,19 +133,19 @@ export default function CorrelationPage() {
             <>
               <ResponsiveContainer width="100%" height={420}>
                 <ScatterChart margin={{ top: 16, right: 24, bottom: 32, left: 8 }}>
-                  <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" />
+                  <CartesianGrid stroke="#dcecf8" strokeDasharray="3 3" />
                   <XAxis
                     type="number"
                     dataKey="x"
                     name="缺交次数"
-                    tick={{ fontSize: 11, fill: '#64748b' }}
-                    stroke="#e2e8f0"
+                    tick={{ fontSize: 11, fill: '#58789b' }}
+                    stroke="#dcecf8"
                     label={{
                       value: '缺交次数 →',
                       position: 'insideBottom',
                       offset: -16,
                       fontSize: 12,
-                      fill: '#64748b',
+                      fill: '#58789b',
                     }}
                   />
                   <YAxis
@@ -154,14 +154,14 @@ export default function CorrelationPage() {
                     name={yLabel}
                     reversed
                     domain={['auto', 'auto']}
-                    tick={{ fontSize: 11, fill: '#64748b' }}
-                    stroke="#e2e8f0"
+                    tick={{ fontSize: 11, fill: '#58789b' }}
+                    stroke="#dcecf8"
                     label={{
                       value: `${yLabel}（越上越好）`,
                       angle: -90,
                       position: 'insideLeft',
                       fontSize: 12,
-                      fill: '#64748b',
+                      fill: '#58789b',
                     }}
                   />
                   <ZAxis range={[60, 60]} />
@@ -186,7 +186,7 @@ export default function CorrelationPage() {
                     {points.map((p, i) => (
                       <Cell
                         key={i}
-                        fill={flaggedNames.has(p.name) ? '#dc2626' : '#94a3b8'}
+                        fill={flaggedNames.has(p.name) ? '#c74444' : '#8fb8dc'}
                       />
                     ))}
                     <LabelList
@@ -206,7 +206,7 @@ export default function CorrelationPage() {
                             y={y - 6}
                             textAnchor="middle"
                             fontSize={10}
-                            fill={flagged ? '#dc2626' : '#94a3b8'}
+                            fill={flagged ? '#c74444' : '#8fb8dc'}
                             fontWeight={flagged ? 600 : 400}
                           >
                             {value}

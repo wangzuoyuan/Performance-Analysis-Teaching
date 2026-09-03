@@ -158,7 +158,7 @@ function compareStudentId(
   return av.localeCompare(bv, undefined, { numeric: true })
 }
 
-const RANK_DISTRIBUTION_COLOR = '#4098ff'
+const RANK_DISTRIBUTION_COLOR = '#35b9e9'
 
 export default function ExamDetailPage() {
   const params = useParams<{ id: string }>()
@@ -419,25 +419,25 @@ export default function ExamDetailPage() {
             </div>
             <ResponsiveContainer width="100%" height={260}>
               <BarChart data={distributionData} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-                <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+                <CartesianGrid stroke="#dcecf8" strokeDasharray="3 3" vertical={false} />
                 <XAxis
                   dataKey="band"
-                  tick={{ fontSize: 11, fill: '#64748b' }}
-                  stroke="#e2e8f0"
+                  tick={{ fontSize: 11, fill: '#58789b' }}
+                  stroke="#dcecf8"
                   interval={0}
                   angle={-20}
                   textAnchor="end"
                   height={50}
                 />
-                <YAxis tick={{ fontSize: 12, fill: '#64748b' }} stroke="#e2e8f0" allowDecimals={false} />
+                <YAxis tick={{ fontSize: 12, fill: '#58789b' }} stroke="#dcecf8" allowDecimals={false} />
                 <Tooltip
                   contentStyle={{
                     backgroundColor: '#ffffff',
-                    border: '1px solid #e2e8f0',
+                    border: '1px solid #dcecf8',
                     borderRadius: 8,
                     fontSize: 12,
                   }}
-                  cursor={{ fill: '#f1f5f9' }}
+                  cursor={{ fill: '#eaf5fd' }}
                 />
                 <Bar dataKey="count" name="人数" fill={RANK_DISTRIBUTION_COLOR} radius={[4, 4, 0, 0]} />
               </BarChart>

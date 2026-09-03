@@ -663,41 +663,43 @@ interface KpiCardProps {
 
 function KpiCard({ title, icon, value, spark, valueTone = 'default' }: KpiCardProps) {
   const showSpark = spark && spark.length >= 2
+  const sparkColor = valueTone === 'warning' ? '#e9a23b' : '#35b9e9'
   return (
     <Card>
-      <CardHeader className="pb-2">
-        <CardDescription className="flex items-center gap-2 text-slate-500">
+      <CardContent className="flex items-center gap-3 p-4">
+        <span
+          className="icon-bubble"
+          style={valueTone === 'warning' ? { color: '#e9a23b' } : undefined}
+        >
           {icon}
-          <span>{title}</span>
-        </CardDescription>
-      </CardHeader>
-      <CardContent className="pb-4">
-        <div className="flex items-end justify-between gap-3">
-          <CardTitle
+        </span>
+        <div className="min-w-0">
+          <div
             className={cn(
-              'text-3xl font-semibold tracking-tight',
-              valueTone === 'warning' ? 'text-warning-500' : 'text-slate-900'
+              'num-display truncate text-2xl font-bold tracking-tight',
+              valueTone === 'warning' ? 'text-warning-500' : 'text-[#0e5fa8]'
             )}
           >
             {value}
-          </CardTitle>
-          {showSpark && (
-            <div className="h-8 w-24">
-              <ResponsiveContainer width="100%" height="100%">
-                <LineChart data={spark} margin={{ top: 4, bottom: 4, left: 0, right: 0 }}>
-                  <Line
-                    type="monotone"
-                    dataKey="v"
-                    stroke="#3b82f6"
-                    strokeWidth={2}
-                    dot={false}
-                    isAnimationActive={false}
-                  />
-                </LineChart>
-              </ResponsiveContainer>
-            </div>
-          )}
+          </div>
+          <div className="mt-0.5 text-xs text-slate-500">{title}</div>
         </div>
+        {showSpark && (
+          <div className="ml-auto h-8 w-24 shrink-0">
+            <ResponsiveContainer width="100%" height="100%">
+              <LineChart data={spark} margin={{ top: 4, bottom: 4, left: 0, right: 0 }}>
+                <Line
+                  type="monotone"
+                  dataKey="v"
+                  stroke={sparkColor}
+                  strokeWidth={2}
+                  dot={false}
+                  isAnimationActive={false}
+                />
+              </LineChart>
+            </ResponsiveContainer>
+          </div>
+        )}
       </CardContent>
     </Card>
   )

@@ -513,7 +513,7 @@ export default function StudentPage() {
                           ? '年级百分位'
                           : '原始分'
                     }
-                    stroke="#2563eb"
+                    stroke="#1f7fd6"
                     strokeWidth={2}
                     dot={{ r: 3 }}
                   />

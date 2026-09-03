@@ -1,0 +1,785 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>成绩追踪 · 教学版 —— 浅色科技风预览</title>
+<style>
+  :root {
+    --bg: #ecf5fc;
+    --surface: rgba(255, 255, 255, 0.9);
+    --line: #cbe2f5;
+    --line-soft: rgba(31, 127, 214, 0.1);
+    --ink: #16324a;
+    --sub: #58789b;
+    --faint: #9cc4e8;
+    --blue: #1f7fd6;
+    --blue-deep: #0e5fa8;
+    --cyan: #35b9e9;
+    --green: #2ebd85;
+    --amber: #e9a23b;
+    --red: #e15a5a;
+    --purple: #8f7be0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    font-family: 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', system-ui, sans-serif;
+    color: var(--ink);
+    background: var(--bg);
+    font-size: 14px;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* 坐标纸底 + 双侧柔光 —— 签名元素 ① */
+  body::before {
+    content: '';
+    position: fixed; inset: 0; z-index: -1;
+    background:
+      radial-gradient(900px 420px at 88% -10%, rgba(53, 185, 233, 0.16), transparent 60%),
+      radial-gradient(760px 400px at -12% 34%, rgba(31, 127, 214, 0.11), transparent 62%),
+      linear-gradient(rgba(31, 127, 214, 0.05) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(31, 127, 214, 0.05) 1px, transparent 1px);
+    background-size: auto, auto, 24px 24px, 24px 24px;
+    background-color: var(--bg);
+  }
+  .num { font-family: 'DIN Alternate', 'Bahnschrift', 'Arial Narrow', Arial, sans-serif; letter-spacing: 0.02em; }
+
+  a, button { font: inherit; color: inherit; }
+  a:focus-visible, button:focus-visible, select:focus-visible {
+    outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 6px;
+  }
+
+  /* ---------- 布局 ---------- */
+  .shell { display: flex; min-height: 100vh; }
+  .sidebar {
+    width: 216px; flex-shrink: 0;
+    display: flex; flex-direction: column;
+    background: rgba(250, 253, 255, 0.86);
+    border-right: 1px solid var(--line);
+    backdrop-filter: blur(8px);
+  }
+  .main { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+
+  /* ---------- 侧栏 ---------- */
+  .logo {
+    display: flex; align-items: center; gap: 10px;
+    padding: 16px 18px 14px;
+    border-bottom: 1px solid var(--line-soft);
+    position: relative;
+  }
+  .logo::after {
+    content: ''; position: absolute; left: 18px; right: 18px; bottom: -3px; height: 1px;
+    background: linear-gradient(90deg, var(--cyan), transparent 70%);
+    opacity: 0.7;
+  }
+  .logo-mark {
+    width: 34px; height: 34px; border-radius: 9px; flex-shrink: 0;
+    display: grid; place-items: center; color: #fff;
+    background: linear-gradient(135deg, var(--blue), var(--cyan));
+    box-shadow: 0 4px 12px rgba(31, 127, 214, 0.35), inset 0 1px 0 rgba(255,255,255,0.4);
+  }
+  .logo b { font-size: 15px; letter-spacing: 0.04em; }
+  .logo small { display: block; font-size: 9px; letter-spacing: 0.22em; color: var(--faint); margin-top: 1px; }
+
+  .nav { flex: 1; padding: 14px 12px; display: flex; flex-direction: column; gap: 4px; }
+  .nav a {
+    display: flex; align-items: center; gap: 10px;
+    padding: 9px 12px; border-radius: 8px;
+    color: #46688c; text-decoration: none; font-weight: 500;
+    border: 1px solid transparent;
+  }
+  .nav a svg { width: 16px; height: 16px; flex-shrink: 0; }
+  .nav a:hover { background: rgba(31, 127, 214, 0.07); color: var(--blue-deep); }
+  .nav a.active {
+    background: linear-gradient(90deg, rgba(31, 127, 214, 0.96), rgba(53, 185, 233, 0.88));
+    color: #fff;
+    box-shadow: 0 4px 12px rgba(31, 127, 214, 0.32), inset 0 1px 0 rgba(255,255,255,0.35);
+  }
+  .nav .tag {
+    margin-left: auto; font-size: 10px; color: var(--faint);
+    border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; line-height: 16px;
+  }
+  .nav a.active .tag { color: #eaf7ff; border-color: rgba(255,255,255,0.5); }
+
+  .side-foot { padding: 14px; border-top: 1px solid var(--line-soft); }
+  .side-card {
+    border: 1px solid var(--line); border-radius: 10px; padding: 12px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.9), rgba(234,245,253,0.7));
+  }
+  .side-card .row { display: flex; justify-content: space-between; align-items: center; }
+  .side-card .k { font-size: 11px; color: var(--sub); }
+  .side-card .v { font-size: 13px; font-weight: 600; margin-top: 2px; }
+  .side-card a { font-size: 11px; color: var(--blue); text-decoration: none; }
+  .side-card hr { border: 0; border-top: 1px dashed var(--line); margin: 10px 0; }
+
+  /* ---------- 顶栏 ---------- */
+  .topbar {
+    height: 54px; flex-shrink: 0;
+    display: flex; align-items: center; gap: 14px;
+    padding: 0 22px;
+    background: rgba(255, 255, 255, 0.72);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+    position: relative;
+  }
+  /* 双线科技饰条 —— 签名元素 ② */
+  .topbar::after {
+    content: ''; position: absolute; left: 0; right: 0; bottom: -4px; height: 3px; pointer-events: none;
+    background:
+      linear-gradient(90deg, transparent, rgba(53,185,233,0.65) 18%, rgba(31,127,214,0.65) 50%, rgba(53,185,233,0.65) 82%, transparent),
+      linear-gradient(90deg, transparent 4%, rgba(31,127,214,0.28) 12%, rgba(31,127,214,0.28) 88%, transparent 96%);
+    background-size: 100% 1px, 100% 1px;
+    background-position: 0 0, 0 3px;
+    background-repeat: no-repeat;
+  }
+  .crumb { display: flex; align-items: center; gap: 8px; color: var(--sub); font-size: 13px; }
+  .crumb b { color: var(--ink); font-weight: 600; }
+  .crumb .sep { color: var(--faint); }
+  .top-right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+  .scope-select {
+    appearance: none; border: 1px solid var(--line); border-radius: 8px;
+    background: #fff url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%231f7fd6' fill='none' stroke-width='1.5'/%3E%3C/svg%3E") no-repeat right 10px center;
+    padding: 6px 28px 6px 12px; font-size: 13px; color: var(--blue-deep); font-weight: 500;
+  }
+  .date-chip { font-size: 12px; color: var(--sub); }
+  .avatar {
+    width: 30px; height: 30px; border-radius: 50%;
+    display: grid; place-items: center; font-size: 13px; font-weight: 600; color: var(--blue-deep);
+    background: radial-gradient(circle at 30% 25%, #fff, #cfe8fb 75%);
+    border: 1px solid #bfe0f7; box-shadow: 0 2px 6px rgba(31,127,214,0.18);
+  }
+  .hamburger { display: none; border: 1px solid var(--line); background: #fff; border-radius: 8px; padding: 6px 9px; }
+
+  /* ---------- 内容 ---------- */
+  .content { padding: 22px 22px 34px; display: flex; flex-direction: column; gap: 18px; }
+
+  .page-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+  .page-head .t { display: flex; align-items: center; gap: 10px; }
+  .page-head h1 { font-size: 21px; font-weight: 800; letter-spacing: 0.02em; }
+  .page-head .cap { align-self: center; }
+  .page-head .s { margin-top: 4px; font-size: 12.5px; color: var(--sub); }
+
+  .cap { font-size: 10px; letter-spacing: 0.2em; color: var(--faint); text-transform: uppercase; white-space: nowrap; }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 7px;
+    border-radius: 8px; padding: 8px 15px; font-size: 13px; font-weight: 600;
+    cursor: pointer; border: 1px solid transparent; text-decoration: none;
+  }
+  .btn svg { width: 14px; height: 14px; }
+  .btn-p {
+    background: linear-gradient(135deg, var(--blue), var(--cyan));
+    color: #fff; box-shadow: 0 4px 14px rgba(31, 127, 214, 0.35), inset 0 1px 0 rgba(255,255,255,0.35);
+  }
+  .btn-p:hover { filter: brightness(1.06); }
+  .btn-o { background: #fff; border-color: #bfdcf3; color: var(--blue); }
+  .btn-o:hover { background: #f2f9ff; }
+
+  /* ---------- 卡片 —— 签名元素 ③（菱形标 + 拼音注） ---------- */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    box-shadow: 0 6px 18px rgba(23, 84, 148, 0.06), inset 0 1px 0 #fff;
+    backdrop-filter: blur(6px);
+    min-width: 0;
+  }
+  .card-h {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 13px 16px 11px;
+    border-bottom: 1px solid var(--line-soft);
+  }
+  .card-h .t { display: flex; align-items: center; gap: 9px; font-size: 14px; font-weight: 700; }
+  .diamond {
+    width: 8px; height: 8px; flex-shrink: 0;
+    transform: rotate(45deg);
+    background: linear-gradient(135deg, var(--cyan), var(--blue));
+    box-shadow: 0 0 7px rgba(53, 185, 233, 0.65);
+  }
+  .card-b { padding: 16px; }
+
+  /* KPI 行 + 气泡图标 —— 签名元素 ④ */
+  .kpi-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; }
+  .kpi { display: flex; gap: 13px; align-items: center; padding: 15px 16px; }
+  .bubble {
+    width: 44px; height: 44px; border-radius: 50%; flex-shrink: 0;
+    display: grid; place-items: center; color: var(--blue);
+    background: radial-gradient(circle at 32% 26%, #fff, #cfe8fb 72%);
+    border: 1px solid #bfe0f7;
+    box-shadow: inset 0 -5px 9px rgba(31, 127, 214, 0.13), 0 4px 10px rgba(31, 127, 214, 0.16);
+  }
+  .bubble svg { width: 19px; height: 19px; }
+  .kpi .n { font-size: 26px; font-weight: 700; line-height: 1.1; color: var(--blue-deep); }
+  .kpi .n.warn { color: var(--amber); }
+  .kpi .l { font-size: 12px; color: var(--sub); margin-top: 2px; }
+  .kpi .spark { margin-left: auto; }
+
+  .grid-main { display: grid; grid-template-columns: 2fr 1fr; gap: 14px; align-items: start; }
+  .stack { display: flex; flex-direction: column; gap: 14px; }
+
+  /* 班级总览行 */
+  .class-row {
+    width: 100%; display: flex; align-items: center; gap: 12px;
+    padding: 12px; border: 1px solid #e0effa; border-radius: 9px;
+    background: #fff; text-align: left; cursor: pointer;
+  }
+  .class-row + .class-row { margin-top: 10px; }
+  .class-row:hover { border-color: #9fd0f2; background: #f4faff; }
+  .class-row .name { font-weight: 700; }
+  .class-row .meta { font-size: 12px; color: var(--sub); margin-top: 3px; }
+  .class-row .right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-shrink: 0; }
+  .chip {
+    font-size: 11px; padding: 2px 9px; border-radius: 999px; border: 1px solid;
+    white-space: nowrap;
+  }
+  .chip-blue { color: var(--blue); border-color: #b5daf5; background: #eef7ff; }
+  .chip-amber { color: #b26a10; border-color: #f3d9ae; background: #fdf6e9; }
+  .chip-slate { color: var(--sub); border-color: var(--line); background: #f6fbff; }
+
+  /* 关注名单 */
+  .focus-row { display: flex; align-items: center; gap: 11px; padding: 9px 6px; border-radius: 8px; }
+  .focus-row:hover { background: #f2f9ff; }
+  .focus-row + .focus-row { border-top: 1px dashed #e0effa; }
+  .face {
+    width: 34px; height: 34px; border-radius: 50%; flex-shrink: 0;
+    display: grid; place-items: center; font-size: 13px; font-weight: 600; color: var(--blue-deep);
+    background: radial-gradient(circle at 30% 25%, #fff, #d8edfc 75%);
+    border: 1px solid #c4e2f8;
+  }
+  .focus-row .nm { font-weight: 600; }
+  .focus-row .id { font-size: 11px; color: var(--sub); margin-top: 1px; }
+  .badge { font-size: 11px; font-weight: 600; padding: 2px 9px; border-radius: 6px; margin-left: auto; white-space: nowrap; }
+  .bd-red { color: var(--red); background: rgba(225, 90, 90, 0.1); border: 1px solid rgba(225, 90, 90, 0.3); }
+  .bd-amber { color: #b26a10; background: rgba(233, 162, 59, 0.12); border: 1px solid rgba(233, 162, 59, 0.35); }
+
+  /* 图表区 */
+  .legend { display: flex; gap: 14px; font-size: 11.5px; color: var(--sub); }
+  .legend i { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+  .chart-svg { width: 100%; height: auto; display: block; }
+
+  /* 作业环形图行 */
+  .donut-wrap { display: flex; align-items: center; gap: 18px; }
+  .donut-legend { flex: 1; display: flex; flex-direction: column; gap: 9px; }
+  .donut-legend .li { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--sub); }
+  .donut-legend .li i { width: 9px; height: 9px; border-radius: 2px; }
+  .donut-legend .li b { margin-left: auto; color: var(--ink); }
+
+  /* 备份卡 */
+  .backup-line { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--sub); }
+  .backup-line .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--green); box-shadow: 0 0 6px rgba(46,189,133,0.7); }
+  .backup-actions { display: flex; gap: 8px; margin-top: 12px; }
+
+  /* ---------- 考试分析页 ---------- */
+  .filterbar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .seg { display: inline-flex; border: 1px solid var(--line); border-radius: 8px; overflow: hidden; background: #fff; }
+  .seg button {
+    border: 0; background: transparent; padding: 7px 14px; font-size: 12.5px; color: var(--sub); cursor: pointer;
+  }
+  .seg button + button { border-left: 1px solid var(--line-soft); }
+  .seg button.on {
+    background: linear-gradient(135deg, rgba(31,127,214,0.12), rgba(53,185,233,0.14));
+    color: var(--blue-deep); font-weight: 700;
+    box-shadow: inset 0 -2px 0 var(--blue);
+  }
+
+  .stat-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  thead th {
+    text-align: left; font-size: 11.5px; font-weight: 700; color: #3e6e9e;
+    background: linear-gradient(180deg, #eef7fe, #e0f0fb);
+    padding: 9px 12px; border-bottom: 1px solid var(--line);
+    white-space: nowrap;
+  }
+  thead th:first-child { border-radius: 8px 0 0 8px; }
+  thead th:last-child { border-radius: 0 8px 8px 0; }
+  tbody td { padding: 10px 12px; border-bottom: 1px solid #e7f3fc; }
+  tbody tr:nth-child(even) { background: rgba(234, 245, 253, 0.55); }
+  tbody tr:hover { background: #eef8ff; }
+  .rank-no { font-weight: 700; color: var(--blue-deep); }
+  .delta-up { color: var(--green); font-weight: 600; }
+  .delta-dn { color: var(--red); font-weight: 600; }
+  .band { font-size: 11px; font-weight: 700; padding: 2px 10px; border-radius: 999px; }
+  .band-a { color: #fff; background: linear-gradient(135deg, var(--blue), var(--cyan)); box-shadow: 0 2px 6px rgba(31,127,214,0.3); }
+  .band-b { color: var(--blue-deep); background: #e3f3fd; border: 1px solid #b5daf5; }
+  .band-c { color: #b26a10; background: #fdf6e9; border: 1px solid #f3d9ae; }
+  .band-d { color: var(--red); background: rgba(225,90,90,0.1); border: 1px solid rgba(225,90,90,0.3); }
+
+  /* 预览提示条 */
+  .note {
+    position: fixed; top: 14px; left: 50%; transform: translateX(-50%);
+    background: linear-gradient(135deg, var(--blue), var(--cyan)); color: #fff;
+    font-size: 12.5px; padding: 9px 18px; border-radius: 999px;
+    box-shadow: 0 8px 22px rgba(31,127,214,0.4);
+    opacity: 0; pointer-events: none; transition: opacity 0.25s;
+    z-index: 60; white-space: nowrap;
+  }
+  .note.show { opacity: 1; }
+
+  .hidden { display: none !important; }
+
+  @media (max-width: 1120px) {
+    .grid-main { grid-template-columns: 1fr; }
+    .kpi-row { grid-template-columns: repeat(2, 1fr); }
+    .stat-row { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 880px) {
+    .sidebar { position: fixed; left: 0; top: 0; z-index: 50; transform: translateX(-100%); transition: transform 0.25s; box-shadow: 12px 0 30px rgba(23,84,148,0.15); }
+    .sidebar.open { transform: translateX(0); }
+    .hamburger { display: inline-flex; }
+    .date-chip { display: none; }
+    .kpi-row { grid-template-columns: 1fr; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * { transition: none !important; }
+  }
+</style>
+</head>
+<body>
+<div class="note" id="note">预览稿仅提供「仪表盘 / 考试分析」两个示例页，其余页面落地时套用同一套视觉语言</div>
+
+<div class="shell">
+  <!-- ============ 侧栏 ============ -->
+  <aside class="sidebar" id="sidebar">
+    <div class="logo">
+      <span class="logo-mark">
+        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M22 10L12 5 2 10l10 5 10-5z"/><path d="M6 12v5c0 1.7 2.7 3 6 3s6-1.3 6-3v-5"/></svg>
+      </span>
+      <div>
+        <b>成绩追踪 · 教学版</b>
+        <small>PERFORMANCE ANALYSIS</small>
+      </div>
+    </div>
+    <nav class="nav">
+      <a href="#" class="active" data-view="dashboard">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="3" width="8" height="8" rx="1.5"/><rect x="13" y="3" width="8" height="5" rx="1.5"/><rect x="13" y="10" width="8" height="11" rx="1.5"/><rect x="3" y="13" width="8" height="8" rx="1.5"/></svg>
+        仪表盘
+      </a>
+      <a href="#" data-note>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+        数据上传
+      </a>
+      <a href="#" data-note>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v18h18"/><rect x="7" y="10" width="3" height="8"/><rect x="12" y="6" width="3" height="12"/><rect x="17" y="13" width="3" height="5"/></svg>
+        班级对比
+      </a>
+      <a href="#" data-view="exam">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="8" y="2" width="8" height="4" rx="1"/><path d="M16 4h2a2 2 0 012 2v14a2 2 0 01-2 2H6a2 2 0 01-2-2V6a2 2 0 012-2h2"/><path d="M9 12h6"/><path d="M9 16h6"/></svg>
+        考试列表
+      </a>
+      <a href="#" data-note>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg>
+        学生检索
+      </a>
+      <a href="#" data-note>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 013 3L7 19l-4 1 1-4L16.5 3.5z"/></svg>
+        作业跟踪
+      </a>
+      <a href="#" data-note>
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 21h18"/><path d="M5 21V7l7-4 7 4v14"/><path d="M9 21v-6h6v6"/></svg>
+        班级配置
+      </a>
+    </nav>
+    <div class="side-foot">
+      <div class="side-card">
+        <div class="row"><span class="k">任课教师</span></div>
+        <div class="v">张老师 · 物理</div>
+        <hr />
+        <div class="row">
+          <span class="k">当前范围</span>
+          <a href="#">管理</a>
+        </div>
+        <div class="v">全部物理班（3 个班）</div>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ============ 主区 ============ -->
+  <div class="main">
+    <header class="topbar">
+      <button class="hamburger" id="hamburger" aria-label="打开菜单">☰</button>
+      <div class="crumb"><span>教学分析</span><span class="sep">/</span><b id="crumb-now">仪表盘</b></div>
+      <div class="top-right">
+        <select class="scope-select" aria-label="班级范围">
+          <option>全部物理班</option>
+          <option>高二 物A1</option>
+          <option>高二 物A2</option>
+          <option>高一 物1</option>
+        </select>
+        <span class="date-chip">2026年9月3日 星期四</span>
+        <button class="btn btn-o" style="padding:6px 12px">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 3a6 6 0 016 6c0 2.2-1.2 3.6-2.5 4.8-.7.7-1 1.4-1 2.2h-5c0-.8-.3-1.5-1-2.2C7.2 12.6 6 11.2 6 9a6 6 0 016-6z"/><path d="M10 19h4"/></svg>
+          AI 问答
+        </button>
+        <span class="avatar">张</span>
+      </div>
+    </header>
+
+    <main class="content">
+      <!-- ================= 仪表盘 ================= -->
+      <section id="view-dashboard">
+        <div class="page-head">
+          <div>
+            <div class="t">
+              <span class="diamond"></span>
+              <h1>仪表盘 · 总览</h1>
+              <span class="cap">JIAOXUE SHUJU YILAN</span>
+            </div>
+            <div class="s">任课教师 · 物理 · 我教的所有班级数据概览</div>
+          </div>
+          <a class="btn btn-p" href="#">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 01-2 2H5a2 2 0 01-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>
+            上传新成绩
+          </a>
+        </div>
+
+        <!-- KPI -->
+        <div class="kpi-row" style="margin-top:16px">
+          <div class="card kpi">
+            <span class="bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg></span>
+            <div>
+              <div class="n num">78.6</div>
+              <div class="l">物理均分（原始分）</div>
+            </div>
+            <svg class="spark" width="76" height="30" viewBox="0 0 76 30"><polyline points="2,22 16,18 30,24 44,13 58,9 72,7" fill="none" stroke="#35b9e9" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+          <div class="card kpi">
+            <span class="bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M8 21h8"/><path d="M12 17v4"/><path d="M17 4h2a2 2 0 012 2v3a5 5 0 01-5 5"/><path d="M7 4H5a2 2 0 00-2 2v3a5 5 0 005 5"/><rect x="7" y="2" width="10" height="10" rx="5"/></svg></span>
+            <div>
+              <div class="n num">96 / 41</div>
+              <div class="l">最高 · 最低</div>
+            </div>
+          </div>
+          <div class="card kpi">
+            <span class="bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><rect x="3" y="4" width="18" height="18" rx="2"/><path d="M16 2v4"/><path d="M8 2v4"/><path d="M3 10h18"/></svg></span>
+            <div>
+              <div class="n num">12–1180</div>
+              <div class="l">年级名次区间</div>
+            </div>
+          </div>
+          <div class="card kpi">
+            <span class="bubble" style="color:var(--amber)"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 8v4"/><path d="M12 16h.01"/></svg></span>
+            <div>
+              <div class="n num warn">6</div>
+              <div class="l">重点关注</div>
+            </div>
+            <svg class="spark" width="76" height="30" viewBox="0 0 76 30"><polyline points="2,10 16,14 30,9 44,17 58,15 72,19" fill="none" stroke="#e9a23b" stroke-width="2" stroke-linecap="round"/></svg>
+          </div>
+        </div>
+
+        <!-- 主体 -->
+        <div class="grid-main" style="margin-top:14px">
+          <div class="stack">
+            <!-- 均分趋势 -->
+            <div class="card">
+              <div class="card-h">
+                <span class="t"><span class="diamond"></span>物理均分趋势</span>
+                <span class="legend">
+                  <span><i style="background:#1f7fd6"></i>我的班均分</span>
+                  <span><i style="background:#2ebd85"></i>年级均分</span>
+                </span>
+              </div>
+              <div class="card-b">
+                <svg class="chart-svg" viewBox="0 0 620 216">
+                  <defs>
+                    <linearGradient id="gBlue" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#1f7fd6" stop-opacity="0.28"/>
+                      <stop offset="1" stop-color="#1f7fd6" stop-opacity="0.02"/>
+                    </linearGradient>
+                    <linearGradient id="gGreen" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="0" stop-color="#2ebd85" stop-opacity="0.22"/>
+                      <stop offset="1" stop-color="#2ebd85" stop-opacity="0.02"/>
+                    </linearGradient>
+                  </defs>
+                  <!-- 网格 -->
+                  <g stroke="#dcecf8" stroke-dasharray="3 4">
+                    <line x1="40" y1="20" x2="600" y2="20"/><line x1="40" y1="62.5" x2="600" y2="62.5"/>
+                    <line x1="40" y1="105" x2="600" y2="105"/><line x1="40" y1="147.5" x2="600" y2="147.5"/>
+                  </g>
+                  <line x1="40" y1="190" x2="600" y2="190" stroke="#c6dff2"/>
+                  <g fill="#8fb8dc" font-size="10" text-anchor="end">
+                    <text x="32" y="24">100</text><text x="32" y="66">90</text><text x="32" y="109">80</text><text x="32" y="151">70</text><text x="32" y="194">60</text>
+                  </g>
+                  <!-- 年级均分（绿） -->
+                  <path d="M40,147.1 C76,147.1 112,140.7 148,140.7 C184,140.7 220,143.7 256,143.7 C292,143.7 328,132.6 364,132.6 C400,132.6 436,126.3 472,126.3 C508,126.3 544,122.9 580,122.9 L580,190 L40,190 Z" fill="url(#gGreen)"/>
+                  <path d="M40,147.1 C76,147.1 112,140.7 148,140.7 C184,140.7 220,143.7 256,143.7 C292,143.7 328,132.6 364,132.6 C400,132.6 436,126.3 472,126.3 C508,126.3 544,122.9 580,122.9" fill="none" stroke="#2ebd85" stroke-width="2"/>
+                  <!-- 我的班均分（蓝） -->
+                  <path d="M40,136.9 C76,136.9 112,130.1 148,130.1 C184,130.1 220,139.8 256,139.8 C292,139.8 328,120.3 364,120.3 C400,120.3 436,112.6 472,112.6 C508,112.6 544,110.9 580,110.9 L580,190 L40,190 Z" fill="url(#gBlue)"/>
+                  <path d="M40,136.9 C76,136.9 112,130.1 148,130.1 C184,130.1 220,139.8 256,139.8 C292,139.8 328,120.3 364,120.3 C400,120.3 436,112.6 472,112.6 C508,112.6 544,110.9 580,110.9" fill="none" stroke="#1f7fd6" stroke-width="2.5"/>
+                  <g fill="#fff" stroke="#1f7fd6" stroke-width="2">
+                    <circle cx="40" cy="136.9" r="3.5"/><circle cx="148" cy="130.1" r="3.5"/><circle cx="256" cy="139.8" r="3.5"/>
+                    <circle cx="364" cy="120.3" r="3.5"/><circle cx="472" cy="112.6" r="3.5"/><circle cx="580" cy="110.9" r="4.5"/>
+                  </g>
+                  <g fill="#58789b" font-size="10.5" text-anchor="middle">
+                    <text x="40" y="208">摸底</text><text x="148" y="208">入学</text><text x="256" y="208">9月月考</text>
+                    <text x="364" y="208">期中</text><text x="472" y="208">11月月考</text><text x="580" y="208">期末</text>
+                  </g>
+                </svg>
+              </div>
+            </div>
+
+            <!-- 班级总览 -->
+            <div class="card">
+              <div class="card-h">
+                <span class="t"><span class="diamond"></span>我的班级总览</span>
+                <span class="cap">WO DE BANJI ZONGLAN</span>
+              </div>
+              <div class="card-b">
+                <button class="class-row">
+                  <div>
+                    <div class="name">高二 物A1 <span class="chip chip-blue" style="margin-left:6px">走班</span></div>
+                    <div class="meta">45 人 · 最近：2026-2027 学年 9 月月考</div>
+                  </div>
+                  <div class="right">
+                    <span class="chip chip-blue num">均分 81.2</span>
+                    <span class="chip chip-amber num">关注 2</span>
+                  </div>
+                </button>
+                <button class="class-row">
+                  <div>
+                    <div class="name">高二 物A2 <span class="chip chip-blue" style="margin-left:6px">走班</span></div>
+                    <div class="meta">43 人 · 最近：2026-2027 学年 9 月月考</div>
+                  </div>
+                  <div class="right">
+                    <span class="chip chip-blue num">均分 76.4</span>
+                    <span class="chip chip-amber num">关注 3</span>
+                  </div>
+                </button>
+                <button class="class-row">
+                  <div>
+                    <div class="name">高一 物1 <span class="chip chip-slate" style="margin-left:6px">行政班</span></div>
+                    <div class="meta">40 人 · 最近：2026-2027 学年 9 月月考</div>
+                  </div>
+                  <div class="right">
+                    <span class="chip chip-blue num">均分 74.9</span>
+                    <span class="chip chip-slate num">关注 1</span>
+                  </div>
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 右列 -->
+          <div class="stack">
+            <div class="card">
+              <div class="card-h">
+                <span class="t"><span class="diamond"></span>重点关注</span>
+                <span class="cap">ZHONGDIAN GUANZHU</span>
+              </div>
+              <div class="card-b" style="padding-top:8px">
+                <div class="focus-row">
+                  <span class="face">陈</span>
+                  <div><div class="nm">陈雨桐</div><div class="id">物A1 · 20240117</div></div>
+                  <span class="badge bd-red">退步明显</span>
+                </div>
+                <div class="focus-row">
+                  <span class="face">李</span>
+                  <div><div class="nm">李昊</div><div class="id">物A2 · 20240203</div></div>
+                  <span class="badge bd-red">薄弱段</span>
+                </div>
+                <div class="focus-row">
+                  <span class="face">王</span>
+                  <div><div class="nm">王小宇</div><div class="id">物A1 · 20240126</div></div>
+                  <span class="badge bd-amber">临界段</span>
+                </div>
+                <div class="focus-row">
+                  <span class="face">赵</span>
+                  <div><div class="nm">赵一鸣</div><div class="id">物A2 · 20240215</div></div>
+                  <span class="badge bd-amber">波动</span>
+                </div>
+                <div class="focus-row">
+                  <span class="face">孙</span>
+                  <div><div class="nm">孙悦</div><div class="id">物1 · 20250108</div></div>
+                  <span class="badge bd-amber">临界段</span>
+                </div>
+              </div>
+              <div style="border-top:1px solid var(--line-soft); padding:10px 16px">
+                <a href="#" style="display:block;text-align:center;font-size:12.5px;color:var(--blue);text-decoration:none;font-weight:600">查看全部 →</a>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h">
+                <span class="t"><span class="diamond"></span>作业看板摘要</span>
+                <span class="cap">ZUOYE KANBAN</span>
+              </div>
+              <div class="card-b donut-wrap">
+                <svg width="118" height="118" viewBox="0 0 118 118">
+                  <circle cx="59" cy="59" r="46" fill="none" stroke="#e4f1fb" stroke-width="15"/>
+                  <circle cx="59" cy="59" r="46" fill="none" stroke="#1f7fd6" stroke-width="15"
+                          stroke-dasharray="265.6 289" stroke-linecap="round" transform="rotate(-90 59 59)"/>
+                  <circle cx="59" cy="59" r="46" fill="none" stroke="#e9a23b" stroke-width="15"
+                          stroke-dasharray="14.5 289" stroke-dashoffset="-265.6" transform="rotate(-90 59 59)"/>
+                  <circle cx="59" cy="59" r="46" fill="none" stroke="#35b9e9" stroke-width="15"
+                          stroke-dasharray="8.7 289" stroke-dashoffset="-280.1" transform="rotate(-90 59 59)"/>
+                  <text x="59" y="57" text-anchor="middle" font-size="21" font-weight="700" fill="#0e5fa8" class="num">92%</text>
+                  <text x="59" y="73" text-anchor="middle" font-size="10" fill="#58789b">提交率</text>
+                </svg>
+                <div class="donut-legend">
+                  <div class="li"><i style="background:#1f7fd6"></i>正常提交 <b class="num">118</b></div>
+                  <div class="li"><i style="background:#e9a23b"></i>缺交 <b class="num">7</b></div>
+                  <div class="li"><i style="background:#35b9e9"></i>迟交 <b class="num">3</b></div>
+                  <div class="li" style="color:var(--red)"><i style="background:var(--red)"></i>连续缺交预警 <b class="num" style="color:var(--red)">2</b></div>
+                </div>
+              </div>
+            </div>
+
+            <div class="card">
+              <div class="card-h">
+                <span class="t"><span class="diamond"></span>数据备份</span>
+                <span class="cap">SHUJU BEIFEN</span>
+              </div>
+              <div class="card-b">
+                <div class="backup-line"><span class="dot"></span>上次备份：2026-09-02 21:14 · 共 3 份</div>
+                <div class="backup-actions">
+                  <button class="btn btn-p" style="padding:7px 13px">立即备份</button>
+                  <button class="btn btn-o" style="padding:7px 13px">查看历史</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- ================= 考试分析 ================= -->
+      <section id="view-exam" class="hidden">
+        <div class="page-head">
+          <div>
+            <div class="t">
+              <span class="diamond"></span>
+              <h1>考试分析</h1>
+              <span class="cap">KAOSHI FENXI</span>
+            </div>
+            <div class="s">2026-2027 学年 9 月月考 · 高二 · 物理（原始分）</div>
+          </div>
+          <div class="filterbar">
+            <select class="scope-select" aria-label="选择考试">
+              <option>9 月月考（高二）</option>
+              <option>入学摸底（高二）</option>
+              <option>期末考试（高一）</option>
+            </select>
+            <div class="seg" role="group" aria-label="分数口径">
+              <button class="on">原始分</button><button>等级分</button>
+            </div>
+            <div class="seg" role="group" aria-label="班级">
+              <button class="on">全部班</button><button>物A1</button><button>物A2</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="stat-row" style="margin-top:16px">
+          <div class="card kpi">
+            <span class="bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M23 21v-2a4 4 0 00-3-3.87"/><path d="M16 3.13a4 4 0 010 7.75"/></svg></span>
+            <div><div class="n num">128</div><div class="l">参考人数</div></div>
+          </div>
+          <div class="card kpi">
+            <span class="bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 3v18h18"/><path d="M7 14l4-4 3 3 5-6"/></svg></span>
+            <div><div class="n num">78.6</div><div class="l">均分 · 较上次 +2.2</div></div>
+          </div>
+          <div class="card kpi">
+            <span class="bubble"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9H4.5a2.5 2.5 0 010-5H6"/><path d="M18 9h1.5a2.5 2.5 0 000-5H18"/><path d="M4 22h16"/><path d="M10 14.66V17c0 .55-.47.98-.97 1.21C7.85 18.75 7 20.24 7 22"/><path d="M14 14.66V17c0 .55.47.98.97 1.21C16.15 18.75 17 20.24 17 22"/><path d="M18 2H6v7a6 6 0 0012 0V2z"/></svg></span>
+            <div><div class="n num">14.1%</div><div class="l">优秀段占比</div></div>
+          </div>
+        </div>
+
+        <div class="grid-main" style="margin-top:14px; grid-template-columns: 1fr 1.6fr;">
+          <!-- 段位分布 -->
+          <div class="card">
+            <div class="card-h">
+              <span class="t"><span class="diamond"></span>段位分布</span>
+              <span class="cap">DUANWEI FENBU</span>
+            </div>
+            <div class="card-b">
+              <svg class="chart-svg" viewBox="0 0 340 210">
+                <defs>
+                  <linearGradient id="bA" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#1f7fd6"/><stop offset="1" stop-color="#7cc7f0" stop-opacity="0.35"/></linearGradient>
+                  <linearGradient id="bB" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#35b9e9"/><stop offset="1" stop-color="#a5e2f8" stop-opacity="0.35"/></linearGradient>
+                  <linearGradient id="bC" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2ebd85"/><stop offset="1" stop-color="#a2e6cb" stop-opacity="0.35"/></linearGradient>
+                  <linearGradient id="bD" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#e9a23b"/><stop offset="1" stop-color="#f6d49b" stop-opacity="0.35"/></linearGradient>
+                </defs>
+                <g stroke="#dcecf8" stroke-dasharray="3 4">
+                  <line x1="30" y1="30" x2="320" y2="30"/><line x1="30" y1="75" x2="320" y2="75"/><line x1="30" y1="120" x2="320" y2="120"/>
+                </g>
+                <line x1="30" y1="165" x2="320" y2="165" stroke="#c6dff2"/>
+                <rect x="52" y="111" width="38" height="54" rx="4" fill="url(#bA)"/>
+                <rect x="124" y="39" width="38" height="126" rx="4" fill="url(#bB)"/>
+                <rect x="196" y="27" width="38" height="138" rx="4" fill="url(#bC)"/>
+                <rect x="268" y="99" width="38" height="66" rx="4" fill="url(#bD)"/>
+                <g fill="#0e5fa8" font-size="12" font-weight="700" text-anchor="middle" class="num">
+                  <text x="71" y="103">18</text><text x="143" y="31">42</text><text x="215" y="19">46</text><text x="287" y="91">22</text>
+                </g>
+                <g fill="#58789b" font-size="11" text-anchor="middle">
+                  <text x="71" y="184">优秀</text><text x="143" y="184">良好</text><text x="215" y="184">中等</text><text x="287" y="184">薄弱</text>
+                </g>
+              </svg>
+            </div>
+          </div>
+
+          <!-- 成绩表 -->
+          <div class="card">
+            <div class="card-h">
+              <span class="t"><span class="diamond"></span>学生成绩明细</span>
+              <span class="cap">XUESHENG CHENGJI</span>
+            </div>
+            <div class="card-b" style="padding:12px">
+              <table>
+                <thead>
+                  <tr><th>名次</th><th>姓名</th><th>班级</th><th>分数</th><th>段位</th><th>较上次</th></tr>
+                </thead>
+                <tbody>
+                  <tr><td class="rank-no num">1</td><td>周子航</td><td><span class="chip chip-blue">物A1</span></td><td class="num">96</td><td><span class="band band-a">优秀</span></td><td class="delta-up num">▲2</td></tr>
+                  <tr><td class="rank-no num">2</td><td>林晓彤</td><td><span class="chip chip-blue">物A1</span></td><td class="num">94</td><td><span class="band band-a">优秀</span></td><td class="num" style="color:var(--sub)">—</td></tr>
+                  <tr><td class="rank-no num">3</td><td>黄启铭</td><td><span class="chip chip-blue">物A2</span></td><td class="num">91</td><td><span class="band band-a">优秀</span></td><td class="delta-up num">▲4</td></tr>
+                  <tr><td class="rank-no num">4</td><td>陈雨桐</td><td><span class="chip chip-blue">物A1</span></td><td class="num">88</td><td><span class="band band-b">良好</span></td><td class="delta-dn num">▼6</td></tr>
+                  <tr><td class="rank-no num">5</td><td>王小宇</td><td><span class="chip chip-blue">物A1</span></td><td class="num">76</td><td><span class="band band-c">中等</span></td><td class="delta-dn num">▼3</td></tr>
+                  <tr><td class="rank-no num">6</td><td>赵一鸣</td><td><span class="chip chip-blue">物A2</span></td><td class="num">71</td><td><span class="band band-c">中等</span></td><td class="delta-up num">▲1</td></tr>
+                  <tr><td class="rank-no num">7</td><td>李昊</td><td><span class="chip chip-blue">物A2</span></td><td class="num">52</td><td><span class="band band-d">薄弱</span></td><td class="delta-dn num">▼5</td></tr>
+                  <tr><td class="rank-no num">8</td><td>孙悦</td><td><span class="chip chip-slate">物1</span></td><td class="num">—</td><td><span class="band band-c">中等</span></td><td class="num" style="color:var(--sub)">缺考</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+</div>
+
+<script>
+  var note = document.getElementById('note');
+  var noteTimer = null;
+  function showNote() {
+    note.classList.add('show');
+    clearTimeout(noteTimer);
+    noteTimer = setTimeout(function () { note.classList.remove('show'); }, 2600);
+  }
+  document.querySelectorAll('.nav a').forEach(function (a) {
+    a.addEventListener('click', function (e) {
+      e.preventDefault();
+      var view = a.getAttribute('data-view');
+      document.querySelectorAll('.nav a').forEach(function (x) { x.classList.remove('active'); });
+      a.classList.add('active');
+      if (view) {
+        document.getElementById('view-dashboard').classList.toggle('hidden', view !== 'dashboard');
+        document.getElementById('view-exam').classList.toggle('hidden', view !== 'exam');
+        document.getElementById('crumb-now').textContent = view === 'dashboard' ? '仪表盘' : '考试分析';
+      } else {
+        showNote();
+      }
+      document.getElementById('sidebar').classList.remove('open');
+    });
+  });
+  document.querySelectorAll('.seg').forEach(function (seg) {
+    seg.querySelectorAll('button').forEach(function (b) {
+      b.addEventListener('click', function () {
+        seg.querySelectorAll('button').forEach(function (x) { x.classList.remove('on'); });
+        b.classList.add('on');
+      });
+    });
+  });
+  document.getElementById('hamburger').addEventListener('click', function () {
+    document.getElementById('sidebar').classList.toggle('open');
+  });
+</script>
+</body>
+</html>

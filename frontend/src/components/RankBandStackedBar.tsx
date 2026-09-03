@@ -11,9 +11,9 @@ interface RankBandData {
 
 // 配色对齐设计 token：高分段=brand-500, 临界段=warning-500, 薄弱段=danger-500
 const COLORS = {
-  high_score: '#3b82f6', // brand-500
-  critical: '#f59e0b',   // warning-500
-  weak: '#ef4444',       // danger-500
+  high_score: '#1f7fd6', // brand-500
+  critical: '#e9a23b',   // warning-500
+  weak: '#e15a5a',       // danger-500
 }
 
 interface BandLabels {
@@ -39,27 +39,27 @@ export default function RankBandStackedBar({
   return (
     <ResponsiveContainer width="100%" height={300}>
       <BarChart data={data} margin={{ top: 5, right: 20, bottom: 5, left: 0 }}>
-        <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+        <CartesianGrid stroke="#dcecf8" strokeDasharray="3 3" vertical={false} />
         <XAxis
           dataKey="class_num"
-          tick={{ fontSize: 12, fill: '#64748b' }}
-          stroke="#e2e8f0"
-          label={{ value: '班级', position: 'insideBottom', offset: -5, fill: '#64748b', fontSize: 12 }}
+          tick={{ fontSize: 12, fill: '#58789b' }}
+          stroke="#dcecf8"
+          label={{ value: '班级', position: 'insideBottom', offset: -5, fill: '#58789b', fontSize: 12 }}
         />
-        <YAxis tick={{ fontSize: 12, fill: '#64748b' }} stroke="#e2e8f0" />
+        <YAxis tick={{ fontSize: 12, fill: '#58789b' }} stroke="#dcecf8" />
         <Tooltip
           contentStyle={{
             backgroundColor: '#ffffff',
-            border: '1px solid #e2e8f0',
+            border: '1px solid #dcecf8',
             borderRadius: 8,
             boxShadow: '0 1px 2px 0 rgb(0 0 0 / 0.05)',
             fontSize: 12,
           }}
-          labelStyle={{ color: '#0f172a', fontWeight: 500 }}
-          itemStyle={{ color: '#334155' }}
-          cursor={{ fill: '#f1f5f9' }}
+          labelStyle={{ color: '#16324a', fontWeight: 500 }}
+          itemStyle={{ color: '#16324a' }}
+          cursor={{ fill: '#eaf5fd' }}
         />
-        <Legend wrapperStyle={{ fontSize: 12, color: '#64748b' }} />
+        <Legend wrapperStyle={{ fontSize: 12, color: '#58789b' }} />
         <Bar dataKey="high_score" fill={COLORS.high_score} name={l.high_score} />
         <Bar dataKey="critical" fill={COLORS.critical} name={l.critical} />
         <Bar dataKey="weak" fill={COLORS.weak} name={l.weak} />

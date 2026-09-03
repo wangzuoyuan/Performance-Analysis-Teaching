@@ -10,16 +10,16 @@ module.exports = {
     },
     extend: {
       colors: {
-        // 保留旧 primary 避免破坏老代码
-        primary: { 50: '#eff6ff', 500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8' },
-        // 设计系统语义 token
+        // 保留旧 primary 避免破坏老代码（同步到新蓝色系）
+        primary: { 50: '#eff8ff', 500: '#1f7fd6', 600: '#1668b3', 700: '#0e5fa8' },
+        // 设计系统语义 token（浅色科技风）
         brand: {
-          50: '#eff6ff', 100: '#dbeafe', 200: '#bfdbfe', 300: '#93c5fd',
-          500: '#3b82f6', 600: '#2563eb', 700: '#1d4ed8', 900: '#1e3a8a',
+          50: '#eff8ff', 100: '#e0f0fb', 200: '#bfddf5', 300: '#8ec8f0',
+          400: '#4ba3e3', 500: '#1f7fd6', 600: '#1668b3', 700: '#0e5fa8', 900: '#16324a',
         },
-        success: { 50: '#ecfdf5', 500: '#10b981', 600: '#059669' },
-        warning: { 50: '#fffbeb', 500: '#f59e0b', 600: '#d97706', 700: '#b45309' },
-        danger: { 50: '#fef2f6', 400: '#f87171', 500: '#ef4444', 600: '#dc2626' },
+        success: { 50: '#e9faf3', 300: '#a2e6cb', 500: '#2ebd85', 600: '#1fa06f' },
+        warning: { 50: '#fdf6e9', 300: '#f3d9ae', 500: '#e9a23b', 600: '#b26a10', 700: '#8f5410' },
+        danger: { 50: '#fdeeee', 300: '#f2b8b8', 400: '#ea8383', 500: '#e15a5a', 600: '#c74444' },
         // shadcn CSS 变量映射
         border: 'hsl(var(--border))',
         input: 'hsl(var(--input))',
