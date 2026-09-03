@@ -386,3 +386,62 @@ def test_smart_input_supports_mixed_name_and_type_lines(monkeypatch):
     assert rows["S4"].evaluation == "差"
     assert rows["S5"].subject == "校本作业"
     assert rows["S5"].evaluation == "差"
+
+
+# === 学期自动推算（未配置学期时按日期推算，不落库） ===
+
+from datetime import date
+
+from app.db.models import HomeworkSetting
+from app.homework.service import derive_semester, get_semester
+
+
+def test_derive_semester_autumn_september():
+    d = derive_semester(date(2026, 9, 1))
+    assert d["semester_start"] == "2026-09-01"
+    assert d["semester_end"] == "2027-01-31"
+    assert d["semester_name"] == "2026学年第一学期"
+    assert d["auto"] is True
+
+
+def test_derive_semester_january_belongs_to_previous_autumn():
+    d = derive_semester(date(2027, 1, 15))
+    assert d["semester_start"] == "2026-09-01"
+    assert d["semester_end"] == "2027-01-31"
+
+
+def test_derive_semester_spring_and_edges():
+    spring = derive_semester(date(2026, 3, 10))
+    assert spring["semester_start"] == "2026-02-01"
+    assert spring["semester_end"] == "2026-07-31"
+    assert spring["semester_name"] == "2025学年第二学期"
+    assert derive_semester(date(2026, 7, 31))["semester_end"] == "2026-07-31"
+    assert derive_semester(date(2026, 8, 20))["semester_start"] == "2026-09-01"
+
+
+def test_get_semester_falls_back_to_derived_when_unconfigured():
+    db = make_db()
+    sem = get_semester(db)
+    assert sem["auto"] is True
+    assert sem["semester_id"] is None
+
+
+def test_get_semester_prefers_current_row_over_kv():
+    db = make_db()
+    seed_scope(db)  # 种入 is_current=1 的测试学期
+    db.add(HomeworkSetting(key="semester_start", value="2020-01-01"))
+    db.commit()
+    sem = get_semester(db)
+    assert sem["semester_start"] == "2026-03-01"
+    assert sem["auto"] is False
+
+
+def test_get_semester_kv_real_values_used_before_derive():
+    db = make_db()
+    db.add(HomeworkSetting(key="semester_start", value="2025-09-01"))
+    db.add(HomeworkSetting(key="semester_end", value="2026-01-31"))
+    db.commit()
+    sem = get_semester(db)
+    assert sem["semester_start"] == "2025-09-01"
+    assert sem["semester_end"] == "2026-01-31"
+    assert sem["auto"] is False

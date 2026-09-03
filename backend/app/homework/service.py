@@ -28,11 +28,24 @@ from app.homework.parser import (
     normalize_subject,
 )
 
-DEFAULT_SEMESTER = {
-    "semester_start": "2026-02-17",
-    "semester_end": "2026-07-04",
-    "semester_name": "",
-}
+def derive_semester(today=None):
+    """未配置当前学期时按日期自动推算：9~1 月为第一学期，2~7 月为第二
+    学期，8 月归入即将开始的第一学期。只计算不落库，跨年自动滚动。"""
+    d = today or date.today()
+    y, m = d.year, d.month
+    if m >= 8:
+        start, end, name = f"{y}-09-01", f"{y + 1}-01-31", f"{y}学年第一学期"
+    elif m == 1:
+        start, end, name = f"{y - 1}-09-01", f"{y}-01-31", f"{y - 1}学年第一学期"
+    else:
+        start, end, name = f"{y}-02-01", f"{y}-07-31", f"{y - 1}学年第二学期"
+    return {
+        "semester_id": None,
+        "semester_start": start,
+        "semester_end": end,
+        "semester_name": name,
+        "auto": True,
+    }
 
 
 def get_semester(db):
@@ -48,15 +61,21 @@ def get_semester(db):
             "semester_start": current.start_date,
             "semester_end": current.end_date,
             "semester_name": current.name,
+            "auto": False,
         }
     rows = db.query(HomeworkSetting).filter(
         HomeworkSetting.key.in_(["semester_start", "semester_end", "semester_name"])
     ).all()
-    cfg = dict(DEFAULT_SEMESTER)
-    for row in rows:
-        if row.value is not None:
-            cfg[row.key] = row.value
-    return cfg
+    kv = {row.key: row.value for row in rows if row.value}
+    if kv.get("semester_start") and kv.get("semester_end"):
+        return {
+            "semester_id": None,
+            "semester_start": kv["semester_start"],
+            "semester_end": kv["semester_end"],
+            "semester_name": kv.get("semester_name", ""),
+            "auto": False,
+        }
+    return derive_semester()
 
 
 def set_semester(db, data):
@@ -66,8 +85,9 @@ def set_semester(db, data):
         .order_by(HomeworkSemester.id.desc())
         .first()
     )
-    start = str(data.get("semester_start") or (current.start_date if current else DEFAULT_SEMESTER["semester_start"]))
-    end = str(data.get("semester_end") or (current.end_date if current else DEFAULT_SEMESTER["semester_end"]))
+    derived = derive_semester()
+    start = str(data.get("semester_start") or (current.start_date if current else derived["semester_start"]))
+    end = str(data.get("semester_end") or (current.end_date if current else derived["semester_end"]))
     name = str(data.get("semester_name") or (current.name if current else "") or f"{start} 至 {end}")
     if current:
         current.start_date, current.end_date, current.name = start, end, name

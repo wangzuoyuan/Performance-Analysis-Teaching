@@ -49,12 +49,16 @@ def migrate_homework_dashboard():
                     )
                 ).all()
             }
-            start = settings.get("semester_start") or "2026-02-17"
-            end = settings.get("semester_end") or "2026-07-04"
-            name = settings.get("semester_name") or f"{start} 至 {end}"
-            db.add(HomeworkSemester(
-                name=name, start_date=start, end_date=end, is_current=1
-            ))
+            # 只迁移真实配置过的学期；未配置时交给 service.derive_semester()
+            # 按日期自动推算，不再种入硬编码默认学期（避免新环境被过期
+            # 学期窗口过滤掉新记录）。
+            start = settings.get("semester_start")
+            end = settings.get("semester_end")
+            if start and end:
+                name = settings.get("semester_name") or f"{start} 至 {end}"
+                db.add(HomeworkSemester(
+                    name=name, start_date=start, end_date=end, is_current=1
+                ))
         db.merge(HomeworkSetting(key="homework_dashboard_schema", value="1"))
         db.commit()
     finally:
