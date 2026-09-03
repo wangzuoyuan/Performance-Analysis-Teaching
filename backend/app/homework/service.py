@@ -29,16 +29,16 @@ from app.homework.parser import (
 )
 
 def derive_semester(today=None):
-    """未配置当前学期时按日期自动推算：9~1 月为第一学期，2~7 月为第二
-    学期，8 月归入即将开始的第一学期。只计算不落库，跨年自动滚动。"""
+    """未配置当前学期时按日期自动推算：9~1 月为第一学期，2~6 月为第二
+    学期，7~8 月暑假沿用刚结束的第二学期。只计算不落库，跨年自动滚动。"""
     d = today or date.today()
     y, m = d.year, d.month
-    if m >= 8:
+    if m >= 9:
         start, end, name = f"{y}-09-01", f"{y + 1}-01-31", f"{y}学年第一学期"
     elif m == 1:
         start, end, name = f"{y - 1}-09-01", f"{y}-01-31", f"{y - 1}学年第一学期"
     else:
-        start, end, name = f"{y}-02-01", f"{y}-07-31", f"{y - 1}学年第二学期"
+        start, end, name = f"{y}-02-01", f"{y}-06-30", f"{y - 1}学年第二学期"
     return {
         "semester_id": None,
         "semester_start": start,

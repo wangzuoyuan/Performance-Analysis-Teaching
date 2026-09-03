@@ -413,10 +413,13 @@ def test_derive_semester_january_belongs_to_previous_autumn():
 def test_derive_semester_spring_and_edges():
     spring = derive_semester(date(2026, 3, 10))
     assert spring["semester_start"] == "2026-02-01"
-    assert spring["semester_end"] == "2026-07-31"
+    assert spring["semester_end"] == "2026-06-30"
     assert spring["semester_name"] == "2025学年第二学期"
-    assert derive_semester(date(2026, 7, 31))["semester_end"] == "2026-07-31"
-    assert derive_semester(date(2026, 8, 20))["semester_start"] == "2026-09-01"
+    for day in (date(2026, 7, 5), date(2026, 8, 20)):
+        vacation = derive_semester(day)
+        assert vacation["semester_start"] == "2026-02-01"
+        assert vacation["semester_end"] == "2026-06-30"
+        assert vacation["semester_name"] == "2025学年第二学期"
 
 
 def test_get_semester_falls_back_to_derived_when_unconfigured():
