@@ -4,6 +4,19 @@
 
 ## [未发布]
 
+## [2.0.8] - 2026-09-03
+
+### 变更
+- 前端整体换装「浅色科技风」视觉语言：浅蓝坐标纸底、卡片菱形标题标、KPI 气泡图标、渐变按钮与图表、浅色半透明侧栏 + 渐变激活胶囊、顶栏双线科技饰条；覆盖仪表盘、考试分析、班级对比、学生画像、作业跟踪、班级配置等全部页面。业务逻辑、API 契约与无障碍成果（焦点环、窄屏 16px 输入）保持不变。
+- 数字展示改用系统自带 DIN 系字体（DIN Alternate / Bahnschrift），不引入 webfont。
+- 表格统一主题：浅蓝渐变表头 + 斑马行；打印时自动还原黑白友好样式。
+- 图表色板整体迁移到新色系（主蓝 #1f7fd6、青 #35b9e9、绿 #2ebd85、警示橙 #e9a23b、红 #e15a5a）。
+
+### 新增
+- `design-preview/` 设计方案预览页（纯静态 HTML，`python3 -m http.server --directory design-preview` 即可本地查看）。
+
+[2.0.8]: https://github.com/wangzuoyuan/Performance-Analysis-Teaching/releases/tag/v2.0.8
+
 ## [2.0.7] - 2026-09-03
 
 ### 新增
