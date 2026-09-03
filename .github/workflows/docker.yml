@@ -7,9 +7,9 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "镜像版本标签（例如 2.0.8）"
+        description: "镜像版本标签（例如 2.0.9）"
         required: true
-        default: "2.0.8"
+        default: "2.0.9"
 
 permissions:
   contents: read
