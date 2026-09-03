@@ -3,7 +3,8 @@
 
 set -eu
 
-PROJECT_DIR="/volume1/docker/performance-analysis-teaching"
+SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+PROJECT_DIR="$SCRIPT_DIR"
 PROJECT_NAME="performance_teaching"
 COMPOSE_FILE="docker-compose.nas.yml"
 DOCKER="/usr/local/bin/docker"
