@@ -92,3 +92,17 @@ def test_parse_action_homework_type_status_and_evaluation():
     assert weak["subject"] == "校本作业"
     assert weak["submission_status"] == "已交"
     assert weak["evaluation"] == "差"
+
+
+def test_is_full_submission():
+    from app.homework.parser import is_full_submission
+    assert is_full_submission("全交") is True
+    assert is_full_submission("齐") is True
+    assert is_full_submission("齐了") is True
+    assert is_full_submission("全齐") is True
+    assert is_full_submission("交齐！") is True
+    assert is_full_submission("都交齐") is True
+    # 整体匹配才算：混了姓名不是全交
+    assert is_full_submission("全交、张三") is False
+    assert is_full_submission("张三") is False
+    assert is_full_submission("") is False

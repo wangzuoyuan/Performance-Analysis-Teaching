@@ -128,6 +128,19 @@ def split_colon(line):
     return parts[0].strip(), parts[1].strip()
 
 
+# 「全班都交了」的表达：右侧整体匹配才算（如「校本作业：全交」「周末作业：齐了」）
+_FULL_SUBMIT_TOKENS = {"全交", "齐", "全齐", "交齐", "都交", "全交齐", "都交齐"}
+
+
+def is_full_submission(text):
+    """右侧列表是否为「全交/齐」类表达（忽略 了/嘛/吗/标点/空白）。
+
+    命中时由路由展开为范围内每人一条「已交」记录：只有缺交记录时「全交日」
+    不可见，连续缺交预警会把 缺-交-缺 误判为连续。"""
+    normalized = re.sub(r"[了嘛吗！!。，,、\s]", "", str(text or ""))
+    return normalized in _FULL_SUBMIT_TOKENS
+
+
 POSITIVE_EVALUATIONS = ("优秀", "认真", "良好", "工整", "整洁", "进步", "棒", "优")
 NEGATIVE_EVALUATIONS = ("不合格", "不认真", "马虎", "潦草", "敷衍", "不工整", "退步", "差")
 LEAVE_WORDS = ("请假", "病假", "事假")

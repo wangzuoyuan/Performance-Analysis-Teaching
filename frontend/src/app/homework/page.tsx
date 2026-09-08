@@ -67,13 +67,16 @@ type Dashboard = {
 }
 type PreviewItem = {
   raw: string
-  student_id: string
-  name: string
-  subject: string
-  submission_status: string
-  evaluation: string
-  content: string
-  special_type: string
+  student_id?: string
+  name?: string
+  subject?: string
+  submission_status?: string
+  evaluation?: string
+  content?: string
+  special_type?: string
+  /** 「作业种类：全交」摘要行：整行展开为全班已交，不逐人显示 */
+  full_submission?: boolean
+  member_count?: number
 }
 type PreviewError = { raw: string; message: string; candidates?: { student_id: string; name: string }[] }
 
@@ -313,10 +316,10 @@ export default function HomeworkPage() {
                 current === 'all'
                   ? '请选择一个具体教学班后录入'
                   : entryMode === 'smart'
-                    ? '每行一条，可混合写：\n张三校本优秀\n订正缺交：李四、王五\n校本差：吴六、赵七'
+                    ? '每行一条，可混合写：\n张三校本优秀\n订正缺交：李四、王五\n校本差：吴六、赵七\n周末作业：全交'
                     : entryMode === 'by_student'
                       ? '王小明：校本作业、试卷订正'
-                      : '周末作业：王小明、李晓华'
+                      : '周末作业：王小明、李晓华\n校本作业：全交'
               }
             />
             <div className="mt-3 space-y-3">
@@ -630,13 +633,20 @@ export default function HomeworkPage() {
           </DialogHeader>
           <div className="space-y-2">
             {preview.map((item, index) => (
-              <div key={`${item.raw}-${index}`} className="grid gap-1 rounded-lg border border-slate-200 p-3 text-sm sm:grid-cols-[1fr_auto_auto]">
-                <div><span className="font-medium">{item.name}</span><span className="ml-2 text-xs text-slate-400">{item.student_id}</span><div className="text-xs text-slate-400">{item.raw}</div></div>
-                <Badge variant="outline">{item.special_type || item.subject}</Badge>
-                <Badge className={item.submission_status === '缺交' ? 'border-0 bg-danger-50 text-danger-600' : 'border-0 bg-success-50 text-success-700'}>
-                  {item.special_type || item.evaluation || item.submission_status}
-                </Badge>
-              </div>
+              item.full_submission ? (
+                <div key={`${item.raw}-${index}`} className="rounded-lg border border-success-500/30 bg-success-50 p-3 text-sm text-success-700">
+                  <span className="font-medium">{item.subject}：全班全交</span>
+                  <span className="ml-2 text-xs">按 {item.member_count ?? '全班'} 人展开为「已交」；当天已有记录或请假的人自动跳过</span>
+                </div>
+              ) : (
+                <div key={`${item.raw}-${index}`} className="grid gap-1 rounded-lg border border-slate-200 p-3 text-sm sm:grid-cols-[1fr_auto_auto]">
+                  <div><span className="font-medium">{item.name}</span><span className="ml-2 text-xs text-slate-400">{item.student_id}</span><div className="text-xs text-slate-400">{item.raw}</div></div>
+                  <Badge variant="outline">{item.special_type || item.subject}</Badge>
+                  <Badge className={item.submission_status === '缺交' ? 'border-0 bg-danger-50 text-danger-600' : 'border-0 bg-success-50 text-success-700'}>
+                    {item.special_type || item.evaluation || item.submission_status}
+                  </Badge>
+                </div>
+              )
             ))}
             {previewErrors.map((item, index) => (
               <div key={`${item.raw}-${index}`} className="rounded-lg bg-danger-50 p-3 text-sm text-danger-600">
@@ -648,7 +658,7 @@ export default function HomeworkPage() {
           <div className="flex justify-end gap-2">
             <Button variant="outline" onClick={() => setPreviewOpen(false)}>取消</Button>
             <Button onClick={confirmEntry} disabled={saving || preview.length === 0 || previewErrors.length > 0}>
-              {saving ? '提交中…' : `确认录入 ${preview.length} 条`}
+              {saving ? '提交中…' : preview.some((p) => p.full_submission) ? '确认录入' : `确认录入 ${preview.length} 条`}
             </Button>
           </div>
         </DialogContent>

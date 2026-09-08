@@ -109,7 +109,7 @@ tail -f ~/.exam-tracker/frontend.log
 ### homework router（`/api/homework`，`homework/router.py`）
 | 方法 | 路径 | 说明 |
 |------|------|------|
-| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录；显式教学班必须属于教师当前学科，录入后自动导出当天 Excel |
+| POST | `/records` `/special-records` | 智能文本录入缺交 / 特殊记录；显式教学班必须属于教师当前学科，录入后自动导出当天 Excel。「作业种类：全交/齐」（by_subject 与智能录入均支持）展开为范围内每人一条「已交」，跳过当天已有记录者与请假者（`parser.is_full_submission` 判定，幂等） |
 | GET  | `/dashboard` `/kpi` `/trend` `/subjects` `/rankings` `/warnings` | 看板默认仅聚合当前学科合法教学班成员；显式他科班返回 409；`warnings` 为同一作业种类连续缺交预警（连续 2 次黄、≥3 次红） |
 | GET  | `/correlation` | 总缺交 × 当前学科班内排名，支持 `teaching_class_id` |
 | GET  | `/correlation/subjects` | 历史兼容路径，不得返回其他学科统计 |

@@ -23,6 +23,7 @@ from app.analysis.scope import student_class_map_multi
 from app.homework import service
 from app.homework.export import export_daily_report
 from app.homework.parser import (
+    is_full_submission,
     is_subject_item,
     parse_homework_item,
     split_colon,
@@ -260,6 +261,66 @@ def _resolve_student(db, name, teaching_class_id=None):
     return matches[0].student_id, None
 
 
+def _scope_member_infos(db, member_ids):
+    """成员学号 -> (姓名, 教学班 label)，供「全交」为占位成员补花名册行。"""
+    if not member_ids:
+        return {}
+    rows = (
+        db.query(TeachingClassMember, TeachingClass)
+        .join(TeachingClass, TeachingClass.id == TeachingClassMember.teaching_class_id)
+        .filter(TeachingClassMember.student_id.in_(member_ids))
+        .all()
+    )
+    infos = {}
+    for member, tc in rows:
+        # 成员姓名缓存为空时用学号兜底：class_roster.name 非空，占位成员
+        # 「先有名单后有姓名」也要能建行
+        name = (member.name or "").strip() or member.student_id
+        infos.setdefault(member.student_id, (name, tc.label))
+    return infos
+
+
+def _expand_full_submission(db, member_ids, target_date, subj,
+                            content=None, remark=None,
+                            batch_leave_sids=(), batch_hw_pairs=()):
+    """「全交」展开：作业范围内每个成员写一条「已交」记录，返回新增条数。
+
+    跳过：当天该作业种类已有记录（重复录入/已单独录过不覆盖）、当天请假的
+    人（请假不算已交）、同批次已有记录的人。仅姓名占位成员补建花名册行
+    （与智能录入单行流程一致），否则外键挂不上。全交记录让连续缺交预警的
+    own_dates 机制在「缺-交-缺」场景正确打断 streak。"""
+    if not member_ids:
+        return 0
+    infos = _scope_member_infos(db, member_ids)
+    leave_sids = {r[0] for r in db.query(SpecialRecord.student_id).filter(
+        SpecialRecord.student_id.in_(member_ids),
+        SpecialRecord.date == target_date,
+        SpecialRecord.type.like("%请假%"),
+    ).all()} | set(batch_leave_sids)
+    batch_pairs = set(batch_hw_pairs)
+    added = 0
+    for sid in sorted(member_ids):
+        if sid in leave_sids or (sid, subj) in batch_pairs:
+            continue
+        exists = db.query(HomeworkRecord.id).filter(
+            HomeworkRecord.student_id == sid,
+            HomeworkRecord.date == target_date,
+            HomeworkRecord.subject == subj,
+        ).first()
+        if exists:
+            continue
+        if not db.query(ClassRoster.student_id).filter(
+            ClassRoster.student_id == sid
+        ).first():
+            name, label = infos.get(sid, (None, None))
+            db.add(ClassRoster(student_id=sid, name=name, class_label=label))
+        db.add(HomeworkRecord(student_id=sid, date=target_date, subject=subj,
+                              content=content, remark=remark,
+                              submission_status="已交"))
+        added += 1
+    return added
+
+
 @router.post("/homework/records")
 async def hw_add_records(payload: RecordsPayload):
     date = payload.date or _today()
@@ -267,7 +328,7 @@ async def hw_add_records(payload: RecordsPayload):
     added = 0
     errors = []
     try:
-        _validate_homework_scope(db, payload.teaching_class_id)
+        member_ids = _validate_homework_scope(db, payload.teaching_class_id)
         if not payload.raw_text.strip():
             raise HTTPException(400, "请输入记录内容")
         lines = [l.strip() for l in payload.raw_text.split("\n") if l.strip()]
@@ -295,6 +356,13 @@ async def hw_add_records(payload: RecordsPayload):
                         errors.append(f"无法识别作业种类: {left}")
                         continue
                     subj, content, remark = parsed
+                    if is_full_submission(right):
+                        # 「校本作业：全交」→ 范围内每人一条「已交」，
+                        # 让连续缺交预警的时间轴看见全交日
+                        added += _expand_full_submission(
+                            db, member_ids, date, subj, content=content, remark=remark
+                        )
+                        continue
                     for name in names:
                         sid, err = _resolve_student(db, name, payload.teaching_class_id)
                         if not sid:
@@ -343,7 +411,7 @@ class SmartInputPayload(BaseModel):
 async def hw_smart_input(payload: SmartInputPayload):
     db = next(get_db())
     try:
-        _validate_homework_scope(db, payload.teaching_class_id)
+        member_ids = _validate_homework_scope(db, payload.teaching_class_id)
         if not payload.raw_text.strip():
             raise HTTPException(400, "请输入记录内容")
         tc = db.query(TeachingClass).filter(
@@ -394,6 +462,14 @@ async def hw_smart_input(payload: SmartInputPayload):
                         parsed.append(item)
                 else:
                     # 动作/作业种类：学生1、学生2
+                    if is_full_submission(right):
+                        parsed.append({
+                            "raw": stripped,
+                            "full_submission": True,
+                            "member_count": len(member_ids),
+                            "subject": parse_action(left)["subject"],
+                        })
+                        continue
                     for name in split_names(right):
                         if name not in by_name:
                             parsed.append({
@@ -412,6 +488,10 @@ async def hw_smart_input(payload: SmartInputPayload):
         for item in parsed:
             if item.get("error"):
                 errors.append({"raw": item["raw"], "message": item["error"]})
+                continue
+            if item.get("full_submission"):
+                # 全交行不走姓名匹配，整行作为一个摘要项进预览
+                preview.append(item)
                 continue
             matches = by_name[item["name"]]
             explicit_sid = item.pop("explicit_student_id", None)
@@ -439,8 +519,24 @@ async def hw_smart_input(payload: SmartInputPayload):
         if errors:
             raise HTTPException(422, {"message": "存在未匹配或同名记录", "errors": errors})
         target_date = payload.date or _today()
+        full_items = [it for it in preview if it.get("full_submission")]
+        regular = [it for it in preview if not it.get("full_submission")]
+        # 全交展开需要知道同批次里谁请了假、谁已有单行记录，避免重复/误跳
+        batch_leave_sids = {
+            it["student_id"] for it in regular if it.get("special_type") == "请假"
+        }
+        batch_hw_pairs = {
+            (it["student_id"], it.get("subject")) for it in regular if it.get("student_id")
+        }
         try:
-            for item in preview:
+            expanded = 0
+            for it in full_items:
+                expanded += _expand_full_submission(
+                    db, member_ids, target_date, it["subject"],
+                    batch_leave_sids=batch_leave_sids,
+                    batch_hw_pairs=batch_hw_pairs,
+                )
+            for item in regular:
                 # 缺交/特殊记录按学号挂到花名册（HomeworkRecord.student_id 外键指向
                 # class_roster）。仅姓名占位成员尚无花名册行时补建一条，使其记录能
                 # 进看板/预警的统计口径，避免录了却「查无此人」。
@@ -472,7 +568,7 @@ async def hw_smart_input(payload: SmartInputPayload):
             raise
         if preview:
             export_daily_report(target_date, db=db)
-        return {"success": True, "added_count": len(preview), "errors": []}
+        return {"success": True, "added_count": len(regular) + expanded, "errors": []}
     finally:
         db.close()
 
