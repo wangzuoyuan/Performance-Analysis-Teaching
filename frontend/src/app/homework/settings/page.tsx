@@ -35,7 +35,6 @@ interface RosterRow {
   student_id: string
   name: string
   seat_no: number | null
-  gender: string | null
   excluded: number
   record_count: number
   class_num: number | null
@@ -235,7 +234,6 @@ export default function HomeworkSettingsPage() {
                   <TableHead>座号</TableHead>
                   <TableHead>姓名</TableHead>
                   <TableHead>班级</TableHead>
-                  <TableHead>性别</TableHead>
                   <TableHead className="text-right">记录数</TableHead>
                   <TableHead className="text-center">排除统计</TableHead>
                 </TableRow>
@@ -256,7 +254,6 @@ export default function HomeworkSettingsPage() {
                       )}
                     </TableCell>
                     <TableCell className="text-slate-500">{row.class_num ?? '—'}</TableCell>
-                    <TableCell className="text-slate-500">{row.gender ?? '—'}</TableCell>
                     <TableCell className="text-right tabular-nums">{row.record_count}</TableCell>
                     <TableCell className="text-center">
                       <button
