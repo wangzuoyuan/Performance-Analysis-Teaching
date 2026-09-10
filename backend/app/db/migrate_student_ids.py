@@ -18,7 +18,7 @@ strip_id_namespace 把 g 前缀还原为原学号。
 
 import re
 
-from sqlalchemy import func, text
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from app.analysis.scope import strip_id_namespace
@@ -56,66 +56,55 @@ def migrate_colliding_student_ids(db: Session) -> dict:
         for row in db.query(Exam.id, Exam.grade).all()
     }
 
-    colliding = [
-        row[0]
-        for row in db.execute(
-            text(
-                "SELECT student_id FROM subject_score "
-                "WHERE name IS NOT NULL AND TRIM(name) != '' "
-                "GROUP BY student_id "
-                "HAVING COUNT(DISTINCT TRIM(name)) > 1"
-            )
-        ).fetchall()
-    ]
-    if not colliding:
-        return stats
+    # 批量预载「学号 → 姓名集合」映射，内存中筛选候选，快路径仅 3 次扫描
+    score_names: dict[str, set[str]] = {}
+    for sid, nm in db.query(SubjectScore.student_id, SubjectScore.name).all():
+        nm = (nm or "").strip()
+        if nm:
+            score_names.setdefault(sid, set()).add(nm)
+    roster_map: dict[str, set[str]] = {}
+    for sid, nm in db.query(ClassRoster.student_id, ClassRoster.name).all():
+        nm = (nm or "").strip()
+        if nm:
+            roster_map.setdefault(sid, set()).add(nm)
+    member_map: dict[str, set[str]] = {}
+    for sid, nm in db.query(TeachingClassMember.student_id, TeachingClassMember.name).all():
+        nm = (nm or "").strip()
+        if nm:
+            member_map.setdefault(sid, set()).add(nm)
 
-    for sid in colliding:
+    # 候选：教师侧（成员/花名册）持有该学号，且成绩里存在与教师侧姓名
+    # 不一致的行。纯历史学号（教师侧无人持有）无当前身份争议，不动。
+    candidates = [
+        sid
+        for sid, names in score_names.items()
+        if (roster_map.get(sid, set()) | member_map.get(sid, set()))
+        and names - (roster_map.get(sid, set()) | member_map.get(sid, set()))
+    ]
+
+    for sid in candidates:
         stats["collisions"] += 1
         rows = (
             db.query(SubjectScore)
             .filter(SubjectScore.student_id == sid)
             .all()
         )
-        # 按姓名分组：{姓名: [行...]}
+        # 按姓名分组：{姓名: [行...]}；姓名为空的行无法判定归属，不动
         groups: dict[str, list] = {}
         for r in rows:
             key = (r.name or "").strip()
-            groups.setdefault(key, []).append(r)
+            if key:
+                groups.setdefault(key, []).append(r)
+        if not groups:
+            continue
 
-        # 活跃身份姓名：优先取成员/花名册里该学号的姓名
-        roster_names = {
-            (n or "").strip()
-            for n in db.query(ClassRoster.name)
-            .filter(ClassRoster.student_id == sid, ClassRoster.name.isnot(None))
-            .all()
-            if (n or "").strip()
-        }
-        member_name_rows = (
-            db.query(TeachingClassMember.name)
-            .filter(
-                TeachingClassMember.student_id == sid,
-                TeachingClassMember.name.isnot(None),
-            )
-            .all()
-        )
-        member_names = {
-            (n or "").strip()
-            for (n,) in member_name_rows
-            if (n or "").strip()
-        }
-        active_names = roster_names | member_names
-
-        def _group_rank(item):
-            name, grp = item
-            grades = [grade_map.get(r.exam_id) for r in grp]
-            grades = [g for g in grades if g is not None]
-            top_grade = max(grades) if grades else -1
-            # 命中成员/花名册姓名者优先，其次年级高者，再而行数多者，最后姓名序保证确定性
-            return (name in active_names, top_grade, len(grp), name)
-
-        active_name, active_grp = max(groups.items(), key=_group_rank)
-        dead = [(name, grp) for name, grp in groups.items() if name != active_name]
+        active_names = roster_map.get(sid, set()) | member_map.get(sid, set())
+        # 未命中教师侧姓名的组都是「别人的历史」，改写为命名空间学号；
+        # 若教师侧姓名在成绩中尚无行（高二成绩未导入的常见时序），全部组改写
+        dead = [
+            (name, grp) for name, grp in groups.items()
+            if name not in active_names
+        ]
 
         for dead_name, dead_rows in dead:
             grades = [grade_map.get(r.exam_id) for r in dead_rows]

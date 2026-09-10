@@ -133,17 +133,54 @@ def test_ambiguous_candidates_go_pending():
     assert stats["pending"][0]["reason"] == "ambiguous"
 
 
-def test_no_collision_untouched():
+def test_member_mismatch_rekeys_all_rows():
+    """成员持有学号但成绩姓名全是别人（高二成绩未导入的真实时序）：
+    全部历史行改写并建链，学号名下清零，画像不再串用他人成绩。"""
     db = make_db()
     seed(db)
-    # 高二行删掉后不撞号，高一数据原样保留
-    db.query(SubjectScore).filter(
-        SubjectScore.exam_id == 2
-    ).delete()
+    # 删掉高二的行：成绩里 7250629 只剩刘梓烨，成员表里它是孙仲仁
+    db.query(SubjectScore).filter(SubjectScore.exam_id == 2).delete()
+    db.commit()
+    stats = migrate_colliding_student_ids(db)
+    assert stats["collisions"] == 1
+    assert score_rows(db, "g1-7250629") == [("化学", "刘梓烨"), ("物理", "刘梓烨")]
+    assert db.query(SubjectScore).filter(
+        SubjectScore.student_id == "7250629"
+    ).count() == 0
+    aliases = {
+        a.student_id: a.identity_id for a in db.query(StudentAlias).all()
+    }
+    assert aliases["g1-7250629"] == aliases["2301001"]
+
+
+def test_matching_names_untouched():
+    """成绩姓名与教师侧身份一致 → 完全不动。"""
+    db = make_db()
+    seed(db)
+    db.query(SubjectScore).filter(SubjectScore.exam_id == 2).delete()
+    db.query(TeachingClassMember).filter(
+        TeachingClassMember.student_id == "7250629"
+    ).update({"name": "刘梓烨"}, synchronize_session=False)
     db.commit()
     stats = migrate_colliding_student_ids(db)
     assert stats["collisions"] == 0
     assert score_rows(db, "7250629") == [("化学", "刘梓烨"), ("物理", "刘梓烨")]
+
+
+def test_orphan_history_untouched():
+    """学号不在任何成员/花名册（纯历史数据）→ 不动。"""
+    db = make_db()
+    seed(db)
+    db.query(TeachingClassMember).filter(
+        TeachingClassMember.student_id == "7250629"
+    ).delete()
+    db.query(ClassRoster).filter(ClassRoster.student_id == "7250629").delete()
+    db.commit()
+    stats = migrate_colliding_student_ids(db)
+    assert stats["collisions"] == 0
+    assert score_rows(db, "7250629") == [
+        ("化学", "刘梓烨"), ("物理", "刘梓烨"), ("物理", "孙仲仁"),
+    ]
 
 
 def test_strip_namespace():
