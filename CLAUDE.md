@@ -29,6 +29,9 @@ npm run build                       # 生产构建
 cd backend && source .venv/bin/activate && pytest tests/
 pytest tests/test_excel_parser.py::test_xxx  # 单个用例
 
+# 维护脚本：分班改号后作业记录归位（先备份；--dry-run 预览；已归位库需 --backup 修复前快照）
+cd backend && python scripts/reassign_homework_renumber.py --db ~/.exam-tracker/db.sqlite --cutoff 2026-07-01 --dry-run
+
 # 日志
 tail -f ~/.exam-tracker/backend.log
 tail -f ~/.exam-tracker/frontend.log
@@ -198,7 +201,7 @@ OPENAI_MODEL=gpt-4o-mini
 
 ## 测试覆盖
 
-有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `homework_dashboard`（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）/ `teaching_router`（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）/ `scope`（范围解析 / 身份链接）
+有测试：`api` / `chat_config` / `chat_tools` / `db` / `excel_parser` / `filename_parser` / `homework_parser`（作业种类解析）/ `homework_router`（看板/相关性/花名册/学期端点 + 皮尔逊单测）/ `homework_dashboard`（范围口径 / 混合智能录入 / 仅姓名成员录缺交 / 占位学号按班隔离迁移 / 同名跨班不串数据）/ `notes_router`（档案增删改 + 跟进）/ `backup_weekly`（备份/恢复/本周关注）/ `teaching_router`（班级 CRUD / 成员 / 四态导入 / 同步 / 当前班）/ `scope`（范围解析 / 身份链接）/ `maintenance_reassign`（改号归位维护脚本：建链改挂 / 离校旧主命名空间 / 复用号姓名判别 / 拒跑与重建幂等）
 
 CI：`.github/workflows/ci.yml`——push 到 `main` 与所有 PR 上跑后端 `pytest` + 前端 `npm run test:ui`/`tsc --noEmit`/`next build`。
 
