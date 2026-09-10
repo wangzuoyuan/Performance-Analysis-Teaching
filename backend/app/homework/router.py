@@ -15,6 +15,7 @@ from app.db.models import (
     ClassRoster,
     HomeworkRecord,
     SpecialRecord,
+    SubjectScore,
     TeachingClass,
     TeachingClassMember,
     get_db,
@@ -788,6 +789,19 @@ async def hw_roster(teaching_class_id: Optional[int] = None):
         ).order_by(
             ClassRoster.excluded.asc(), ClassRoster.seat_no.asc()
         ).all()
+        # 走班成员的花名册行通常没有行政班号，回落取成绩表里的班号用于展示
+        fallback = {}
+        missing = [r.student_id for r in rows if r.class_num is None]
+        if missing:
+            for sid, cn in (
+                db.query(SubjectScore.student_id, SubjectScore.class_num)
+                .filter(
+                    SubjectScore.student_id.in_(missing),
+                    SubjectScore.class_num.isnot(None),
+                )
+                .all()
+            ):
+                fallback.setdefault(sid, cn)
         out = []
         for r in rows:
             count = db.query(HomeworkRecord).filter(
@@ -795,7 +809,8 @@ async def hw_roster(teaching_class_id: Optional[int] = None):
             ).count()
             out.append({
                 "student_id": r.student_id, "name": r.name, "seat_no": r.seat_no,
-                "gender": r.gender, "excluded": r.excluded, "class_num": r.class_num,
+                "gender": r.gender, "excluded": r.excluded,
+                "class_num": r.class_num if r.class_num is not None else fallback.get(r.student_id),
                 "record_count": count,
             })
         return out
@@ -809,7 +824,7 @@ class AddStudentPayload(BaseModel):
     student_id: Optional[str] = None
     seat_no: Optional[int] = None
     gender: Optional[str] = None
-    class_num: int = 6
+    class_num: Optional[int] = None
 
 
 @router.post("/homework/roster")

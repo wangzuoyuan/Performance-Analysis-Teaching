@@ -162,10 +162,13 @@ export default function HomeworkSettingsPage() {
       alert('请先选择具体教学班')
       return
     }
-    const classNum = newClass.trim() ? Number(newClass) : defaultClass
-    if (classNum == null || Number.isNaN(classNum)) {
-      alert('请填写班号（花名册为空时无法自动推断）')
-      return
+    let classNum: number | null = defaultClass
+    if (newClass.trim()) {
+      classNum = Number(newClass)
+      if (Number.isNaN(classNum)) {
+        alert('班号需为数字')
+        return
+      }
     }
     const res = await fetch('/api/homework/roster', {
       method: 'POST',
@@ -303,7 +306,7 @@ export default function HomeworkSettingsPage() {
               value={newClass}
               onChange={(e) => setNewClass(e.target.value)}
               inputMode="numeric"
-              placeholder={defaultClass != null ? `班号（默认 ${defaultClass}）` : '班号'}
+              placeholder={defaultClass != null ? `班号（默认 ${defaultClass}）` : '班号（可留空）'}
               className="w-32 rounded-md border border-slate-200 px-2 py-1 text-sm"
             />
             <Button variant="outline" size="sm" onClick={addStudent}
