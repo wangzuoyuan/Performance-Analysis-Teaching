@@ -1,8 +1,8 @@
 'use client'
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import Link from 'next/link'
-import { ChevronLeft, Plus, Trash2 } from 'lucide-react'
+import { ChevronLeft } from 'lucide-react'
 
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -57,28 +57,6 @@ export default function HomeworkSettingsPage() {
   const [rosterLoading, setRosterLoading] = useState(false)
   const [rosterError, setRosterError] = useState(false)
   const visibleRoster = rosterScope === current ? roster : []
-
-  // 新增学生
-  const [newName, setNewName] = useState('')
-  const [newSeat, setNewSeat] = useState('')
-  const [newClass, setNewClass] = useState('')
-
-  // 花名册里最常见的班号，作为「添加学生」班号留空时的默认值
-  const defaultClass = useMemo(() => {
-    const counts = new Map<number, number>()
-    for (const r of visibleRoster) {
-      if (r.class_num != null) counts.set(r.class_num, (counts.get(r.class_num) ?? 0) + 1)
-    }
-    let best: number | null = null
-    let bestN = 0
-    for (const [cls, n] of counts) {
-      if (n > bestN) {
-        best = cls
-        bestN = n
-      }
-    }
-    return best
-  }, [visibleRoster])
 
   const loadRoster = useCallback(async () => {
     const requestId = ++rosterRequestIdRef.current
@@ -153,47 +131,6 @@ export default function HomeworkSettingsPage() {
 
   async function toggleExcluded(row: RosterRow) {
     await fetch(`/api/homework/roster/${row.student_id}/toggle-excluded`, { method: 'PUT' })
-    await loadRoster()
-  }
-
-  async function addStudent() {
-    if (!newName.trim()) return
-    if (current === 'all') {
-      alert('请先选择具体教学班')
-      return
-    }
-    let classNum: number | null = defaultClass
-    if (newClass.trim()) {
-      classNum = Number(newClass)
-      if (Number.isNaN(classNum)) {
-        alert('班号需为数字')
-        return
-      }
-    }
-    const res = await fetch('/api/homework/roster', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        name: newName.trim(),
-        teaching_class_id: current,
-        seat_no: newSeat ? Number(newSeat) : null,
-        class_num: classNum,
-      }),
-    })
-    if (res.ok) {
-      setNewName('')
-      setNewSeat('')
-      setNewClass('')
-      await loadRoster()
-    } else {
-      const data = await res.json().catch(() => ({}))
-      alert(data.detail || '添加失败')
-    }
-  }
-
-  async function removeStudent(row: RosterRow) {
-    if (!confirm(`删除 ${row.name}？会同时删除其 ${row.record_count} 条作业记录。`)) return
-    await fetch(`/api/homework/roster/${row.student_id}`, { method: 'DELETE' })
     await loadRoster()
   }
 
@@ -286,35 +223,10 @@ export default function HomeworkSettingsPage() {
         <CardContent className="space-y-4">
           <p className="text-sm text-slate-500">
             打开「排除统计」的学生，其缺交不计入看板、排行、预警与相关性。
+            成员的添加与移除统一在
+            <Link href="/settings/classes" className="mx-1 text-brand-600 hover:underline">班级配置</Link>
+            页维护。
           </p>
-
-          {/* 添加学生 */}
-          <div className="flex flex-wrap items-center gap-2">
-            <input
-              value={newSeat}
-              onChange={(e) => setNewSeat(e.target.value)}
-              placeholder="座号"
-              className="w-20 rounded-md border border-slate-200 px-2 py-1 text-sm"
-            />
-            <input
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
-              placeholder="姓名"
-              className="w-32 rounded-md border border-slate-200 px-2 py-1 text-sm"
-            />
-            <input
-              value={newClass}
-              onChange={(e) => setNewClass(e.target.value)}
-              inputMode="numeric"
-              placeholder={defaultClass != null ? `班号（默认 ${defaultClass}）` : '班号（可留空）'}
-              className="w-32 rounded-md border border-slate-200 px-2 py-1 text-sm"
-            />
-            <Button variant="outline" size="sm" onClick={addStudent}
-              disabled={current === 'all' || rosterScope !== current || rosterLoading || rosterError}>
-              <Plus className="mr-1 h-4 w-4" />
-              添加学生
-            </Button>
-          </div>
 
           <div className="overflow-x-auto">
             <Table>
@@ -326,7 +238,6 @@ export default function HomeworkSettingsPage() {
                   <TableHead>性别</TableHead>
                   <TableHead className="text-right">记录数</TableHead>
                   <TableHead className="text-center">排除统计</TableHead>
-                  <TableHead className="text-right">操作</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -362,15 +273,6 @@ export default function HomeworkSettingsPage() {
                             row.excluded ? 'translate-x-4' : 'translate-x-0.5'
                           )}
                         />
-                      </button>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <button
-                        onClick={() => removeStudent(row)}
-                        className="text-slate-400 hover:text-danger-500"
-                        aria-label="删除学生"
-                      >
-                        <Trash2 className="h-4 w-4" />
                       </button>
                     </TableCell>
                   </TableRow>

@@ -36,16 +36,18 @@ test('homework dashboard hides business metrics on load error', () => {
   assert.match(homework, /\{!error && \(\s*<div className="grid grid-cols-2 gap-3 lg:grid-cols-4">/, '错误态不得继续显示四个零指标')
 })
 
-test('homework roster additions bind to the selected teaching class', () => {
+test('homework roster is a read-only view scoped to the selected teaching class', () => {
   assert.match(homeworkSettings, /useClassScope\(\)/, '作业设置应读取当前教学班')
-  assert.match(homeworkSettings, /teaching_class_id: current/, '新增花名册学生必须携带当前教学班')
-  assert.match(homeworkSettings, /current === 'all'/, '全部范围不能新增无归属学生')
   assert.match(homeworkSettings, /const rosterRequestIdRef = useRef\(0\)/, '设置页应跟踪最新花名册请求')
   assert.match(homeworkSettings, /requestId !== rosterRequestIdRef\.current/, '旧班花名册响应不得覆盖当前班')
   assert.match(homeworkSettings, /const visibleRoster = rosterScope === current \? roster : \[\]/, '花名册必须只渲染与当前选择器一致的范围')
   assert.match(homeworkSettings, /setRoster\(\[\]\)/, '切班请求开始时应清空旧花名册')
   assert.match(homeworkSettings, /setRosterError\(true\)/, '花名册失败时应进入显式错误态')
-  assert.match(homeworkSettings, /rosterScope !== current/, '花名册范围与选择器不一致时必须禁用新增')
+  assert.match(homeworkSettings, /toggle-excluded/, '排除统计开关保留在作业设置')
+  assert.doesNotMatch(homeworkSettings, /addStudent|removeStudent/, '成员增删统一在班级配置页维护，作业设置不得再有成员增删')
+  assert.match(homeworkSettings, /\/settings\/classes/, '作业设置应指引用户到班级配置页维护成员')
+  assert.match(classSettings, /添加成员/, '班级配置承载成员添加')
+  assert.match(classSettings, /批量导入/, '班级配置承载成员批量导入')
 })
 
 test('homework entry shows a live parse preview while typing', () => {
