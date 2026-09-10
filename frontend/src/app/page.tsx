@@ -16,6 +16,7 @@ import {
 import { LineChart, Line, ResponsiveContainer } from 'recharts'
 
 import { cn } from '@/lib/utils'
+import { displayStudentId } from '@/lib/student-id'
 import {
   Card,
   CardContent,
@@ -621,7 +622,7 @@ export default function Dashboard() {
                             )}
                           </div>
                           <div className="truncate text-xs text-slate-500">
-                            {s.student_id}
+                            {displayStudentId(s.student_id)}
                           </div>
                         </div>
                         <Badge

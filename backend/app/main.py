@@ -161,6 +161,22 @@ migrate_teaching()
 from app.db.migrate_homework_dashboard import migrate_homework_dashboard  # noqa
 migrate_homework_dashboard()
 
+# 跨届撞号迁移：高二重新编号撞历史旧学号时，改写死号并按姓名建身份链（幂等）。
+from app.db.migrate_student_ids import migrate_colliding_student_ids  # noqa
+
+
+def _run_collision_migration():
+    from app.db.models import SessionLocal
+
+    db = SessionLocal()
+    try:
+        migrate_colliding_student_ids(db)
+    finally:
+        db.close()
+
+
+_run_collision_migration()
+
 from app.ingest.router import router as ingest_router  # noqa
 from app.analysis.router import router as analysis_router  # noqa
 from app.chat.session import router as chat_router  # noqa

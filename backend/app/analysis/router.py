@@ -1060,7 +1060,10 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
     scope_rank 只能按对应教学班成员集合和当前学科有效分数计算；无可靠教学班范围时
     为 null，不得回退行政班或全年级。
     """
-    from app.db.models import SessionLocal, SubjectScore, Exam
+    from app.db.models import (
+        SessionLocal, SubjectScore, Exam, TeachingClassMember, ClassRoster,
+    )
+    from sqlalchemy import func as _func
     from app.analysis.exam_context import (
         resolve_exam_context,
         SubjectNotConfiguredError,
@@ -1132,10 +1135,32 @@ async def get_student(student_id: str, teaching_class_id: Optional[int] = None):
         grades = exam_grades | member_grades
         has_cross_year = len(exam_grades) > 1
 
-        name_row = db.query(SubjectScore).filter(
-            SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None)
-        ).first()
-        name = name_row.name if name_row and name_row.name else student_id
+        # 姓名以教师侧数据（成员/花名册）为准；撞号改写后成绩表里可能残留
+        # 其他届同名号学生的姓名，不能作为首选
+        name = None
+        for _m in (TeachingClassMember, ClassRoster):
+            _row = (
+                db.query(_m.name)
+                .filter(
+                    _m.student_id.in_(ids),
+                    _m.name.isnot(None),
+                    _func.trim(_m.name) != "",
+                )
+                .first()
+            )
+            if _row and _row[0]:
+                name = _row[0].strip()
+                break
+        if not name:
+            # 回落成绩表：取最高年级的姓名行，更贴近当前身份
+            _row = (
+                db.query(SubjectScore.name)
+                .join(Exam, Exam.id == SubjectScore.exam_id)
+                .filter(SubjectScore.student_id.in_(ids), SubjectScore.name.isnot(None))
+                .order_by(Exam.grade.desc(), SubjectScore.id.desc())
+                .first()
+            )
+            name = _row[0].strip() if _row and _row[0] else student_id
 
         # 显式 teaching_class_id：当前年级的 label/tc/rank 强制使用该班
         explicit_tc_obj = None
@@ -1626,6 +1651,7 @@ async def list_students(
         # 姓名过滤
         if q:
             q = q.strip()
+            from app.analysis.scope import strip_id_namespace
             name_rows = (
                 db.query(SubjectScore.student_id, SubjectScore.name)
                 .filter(SubjectScore.student_id.in_(scope_ids))
@@ -1637,6 +1663,7 @@ async def list_students(
             scope_ids = {
                 sid for sid in scope_ids
                 if q in sid
+                or q in strip_id_namespace(sid)
                 or q in member_names.get(sid, "")
                 or q in score_names.get(sid, "")
             }

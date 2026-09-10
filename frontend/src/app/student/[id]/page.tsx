@@ -25,6 +25,7 @@ import HomeworkCard from '@/components/HomeworkCard'
 import StudentNotes from '@/components/StudentNotes'
 import { cn } from '@/lib/utils'
 import { useClassScope, formatTeachingClass } from '@/lib/class-scope'
+import { displayStudentId } from '@/lib/student-id'
 import { Avatar, AvatarFallback } from '@/components/ui/avatar'
 import { Badge } from '@/components/ui/badge'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
@@ -379,7 +380,7 @@ export default function StudentPage() {
               {profile.name || DASH}
             </h1>
             <p className="mt-1 text-sm text-slate-500">
-              学号 {profile.student_id || DASH}
+              学号 {displayStudentId(profile.student_id) || DASH}
               {' · '}
               {classHeaderText ?? DASH}
               {' · '}

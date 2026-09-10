@@ -542,6 +542,26 @@ def reassign_member_id(db, tc, old_sid: str, new_sid: str, name: str | None = No
         who = conflict.name or conflict.student_id
         raise ConflictError(f"学号 {new_sid} 已是本班成员「{who}」，不能重复绑定")
 
+    # 撞号防呆：新学号在历史成绩中已属于另一位学生 → 大概率录错号或跨届撞号，
+    # 静默接受会让画像串人。真为同一人请统一姓名后重试；若为两人请核对学号。
+    from app.db.models import SubjectScore
+
+    score_name_row = (
+        db.query(SubjectScore.name)
+        .filter(
+            SubjectScore.student_id == new_sid,
+            SubjectScore.name.isnot(None),
+        )
+        .first()
+    )
+    score_name = (score_name_row[0] or "").strip() if score_name_row else ""
+    member_name = (name or target.name or "").strip()
+    if score_name and member_name and score_name != member_name:
+        raise ConflictError(
+            f"学号 {new_sid} 在历史成绩中属于「{score_name}」，与成员「{member_name}」不一致。"
+            "若为同一人请先统一姓名再补录；若为两人则是学号撞号，请核对该学号"
+        )
+
     target.student_id = new_sid
     if name:
         target.name = name

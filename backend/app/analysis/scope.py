@@ -13,7 +13,18 @@
 """
 from __future__ import annotations
 
+import re
 from typing import Optional
+
+# 命名空间化学号（g1-7250629：跨届撞号迁移改写的历史学号），见
+# app/db/migrate_student_ids.py
+_NS_PATTERN = re.compile(r"^g(\d+)-(.+)$")
+
+
+def strip_id_namespace(sid: str) -> str:
+    """显示/搜索用：去掉届别命名空间前缀（g1-7250629 → 7250629）。"""
+    m = _NS_PATTERN.match(sid or "")
+    return m.group(2) if m else (sid or "")
 
 
 # ────────────────────────────── 教学班成员范围 ──────────────────────────────

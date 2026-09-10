@@ -14,6 +14,7 @@ import {
 } from 'lucide-react'
 
 import { useClassScope, formatTeachingClass, type TeachingClass } from '@/lib/class-scope'
+import { displayStudentId } from '@/lib/student-id'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -787,7 +788,7 @@ function PickCandidateButton(props: {
       onClick={props.onPick}
       className="rounded-md border border-slate-200 bg-white px-2 py-1 text-left text-xs hover:border-brand-400 hover:bg-brand-50 disabled:opacity-40"
     >
-      <div className="font-mono text-slate-700">{candidate.student_id}</div>
+      <div className="font-mono text-slate-700">{displayStudentId(candidate.student_id)}</div>
       <div className="text-slate-500">
         {candidate.class_num != null ? `${candidate.class_num}班 · ` : ''}
         {candidate.latest_rank != null ? `名次 ${candidate.latest_rank}` : '无成绩'}
@@ -891,7 +892,7 @@ function ImportMembersPanel(props: {
                     className="font-mono text-xs"
                   >
                     {m.name}
-                    <span className="ml-1 opacity-70">{m.student_id}</span>
+                    <span className="ml-1 opacity-70">{displayStudentId(m.student_id)}</span>
                     {m.state === 'new' && <span className="ml-1">新生</span>}
                   </Badge>
                 ))}
@@ -1327,7 +1328,7 @@ function EditMemberDialog(props: {
           <DialogTitle>{member.has_student_id ? '修改学号 / 姓名' : '补录学号'}</DialogTitle>
           <DialogDescription>
             {member.has_student_id
-              ? `「${member.name}」当前学号 ${member.student_id}`
+              ? `「${member.name}」当前学号 ${displayStudentId(member.student_id)}`
               : `「${member.name}」目前仅录入了姓名，尚未绑定学号`}
           </DialogDescription>
         </DialogHeader>

@@ -16,6 +16,7 @@ import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { ClassScopePicker } from '@/components/ClassScopePicker'
+import { displayStudentId } from '@/lib/student-id'
 import {
   HomeworkEntryPreview, HomeworkSubmitFeedback, SubmitFeedback,
 } from '@/components/HomeworkEntryPreview'
@@ -640,7 +641,7 @@ export default function HomeworkPage() {
                 </div>
               ) : (
                 <div key={`${item.raw}-${index}`} className="grid gap-1 rounded-lg border border-slate-200 p-3 text-sm sm:grid-cols-[1fr_auto_auto]">
-                  <div><span className="font-medium">{item.name}</span><span className="ml-2 text-xs text-slate-400">{item.student_id}</span><div className="text-xs text-slate-400">{item.raw}</div></div>
+                  <div><span className="font-medium">{item.name}</span><span className="ml-2 text-xs text-slate-400">{displayStudentId(item.student_id)}</span><div className="text-xs text-slate-400">{item.raw}</div></div>
                   <Badge variant="outline">{item.special_type || item.subject}</Badge>
                   <Badge className={item.submission_status === '缺交' ? 'border-0 bg-danger-50 text-danger-600' : 'border-0 bg-success-50 text-success-700'}>
                     {item.special_type || item.evaluation || item.submission_status}
@@ -651,7 +652,7 @@ export default function HomeworkPage() {
             {previewErrors.map((item, index) => (
               <div key={`${item.raw}-${index}`} className="rounded-lg bg-danger-50 p-3 text-sm text-danger-600">
                 {item.raw}：{item.message}
-                {item.candidates && <div className="mt-1 text-xs">{item.candidates.map((x) => `${x.name}（${x.student_id}）`).join('、')}</div>}
+                {item.candidates && <div className="mt-1 text-xs">{item.candidates.map((x) => `${x.name}（${displayStudentId(x.student_id)}）`).join('、')}</div>}
               </div>
             ))}
           </div>
@@ -673,7 +674,7 @@ export default function HomeworkPage() {
             <div className="space-y-4">
               <div>
                 <div className="text-lg font-semibold">{studentDetail.student.name}</div>
-                <div className="text-xs text-slate-400">学号 {studentDetail.student.student_id}</div>
+                <div className="text-xs text-slate-400">学号 {displayStudentId(studentDetail.student.student_id)}</div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="rounded-lg bg-slate-50 p-3"><div className="text-xs text-slate-500">学期缺交</div><div className="mt-1 text-2xl font-semibold">{studentDetail.total_misses}</div></div>

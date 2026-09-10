@@ -14,6 +14,7 @@ import {
 import { ClassScopePicker } from '@/components/ClassScopePicker'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
+import { displayStudentId } from '@/lib/student-id'
 import {
   Card,
   CardContent,
@@ -229,7 +230,7 @@ export default function StudentSearchPage() {
                     {students.map((student) => (
                       <TableRow key={student.student_id} className="hover:bg-slate-50">
                         <TableCell className="font-mono text-xs text-slate-600">
-                          {student.has_student_id === false ? '待补学号' : student.student_id}
+                          {student.has_student_id === false ? '待补学号' : displayStudentId(student.student_id)}
                         </TableCell>
                         <TableCell>
                           {student.has_profile ? (
@@ -293,7 +294,7 @@ export default function StudentSearchPage() {
                         <div className="min-w-0">
                           <div className="font-medium text-slate-900">{student.name}</div>
                           <div className="mt-0.5 font-mono text-xs text-slate-500">
-                            {student.has_student_id === false ? '待补学号' : student.student_id}
+                            {student.has_student_id === false ? '待补学号' : displayStudentId(student.student_id)}
                           </div>
                         </div>
                         {formatClassChip(student.class_label) ? (

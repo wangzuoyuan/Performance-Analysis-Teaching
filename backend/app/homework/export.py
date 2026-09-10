@@ -19,6 +19,7 @@ from app.db.models import (
     SpecialRecord,
     get_db,
 )
+from app.analysis.scope import strip_id_namespace
 from app.paths import DATA_DIR
 
 EXPORT_DIR = os.environ.get(
@@ -88,7 +89,7 @@ def export_daily_report(target_date, db=None):
             rows.append(
                 {
                     "seat": seat if seat is not None else 10**9,
-                    "学号": (str(seat) if seat is not None else (sid or "")),
+                    "学号": (str(seat) if seat is not None else strip_id_namespace(sid or "")),
                     "姓名": r.name if r else sid,
                     "缺交作业种类": _unique_join(data["subjects"]),
                     "说明": _unique_join(data["contents"]),
