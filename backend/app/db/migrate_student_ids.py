@@ -73,14 +73,25 @@ def migrate_colliding_student_ids(db: Session) -> dict:
         if nm:
             member_map.setdefault(sid, set()).add(nm)
 
+    # 花名册残留姓名修正：补录学号合并旧花名册行时曾保留旧生姓名。
+    # 成员表是老师录入的当前身份，学号有成员行时花名册姓名以成员为准。
+    for sid, mnames in member_map.items():
+        rnames = roster_map.get(sid)
+        if rnames and not (rnames & mnames):
+            row = db.get(ClassRoster, sid)
+            if row:
+                row.name = sorted(mnames)[0]
+                roster_map[sid] = {row.name}
+
     # 候选：教师侧（成员/花名册）持有该学号，且成绩里存在与教师侧姓名
     # 不一致的行。纯历史学号（教师侧无人持有）无当前身份争议，不动。
-    candidates = [
-        sid
-        for sid, names in score_names.items()
-        if (roster_map.get(sid, set()) | member_map.get(sid, set()))
-        and names - (roster_map.get(sid, set()) | member_map.get(sid, set()))
-    ]
+    # 成员姓名优先（老师录入的当前身份），花名册可能残留上一届旧生姓名，
+    # 仅在无成员行时兜底。
+    candidates = []
+    for sid, names in score_names.items():
+        active = member_map.get(sid, set()) or roster_map.get(sid, set())
+        if active and (names - active):
+            candidates.append(sid)
 
     for sid in candidates:
         stats["collisions"] += 1
@@ -98,7 +109,7 @@ def migrate_colliding_student_ids(db: Session) -> dict:
         if not groups:
             continue
 
-        active_names = roster_map.get(sid, set()) | member_map.get(sid, set())
+        active_names = member_map.get(sid, set()) or roster_map.get(sid, set())
         # 未命中教师侧姓名的组都是「别人的历史」，改写为命名空间学号；
         # 若教师侧姓名在成绩中尚无行（高二成绩未导入的常见时序），全部组改写
         dead = [

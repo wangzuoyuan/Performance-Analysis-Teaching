@@ -609,11 +609,19 @@ def reassign_member_id(db, tc, old_sid: str, new_sid: str, name: str | None = No
             cascaded["members"] += 1
 
     if migrate_person_data:
-        # 花名册（PK=student_id，避免主键冲突：新学号已有花名册则删旧留新）
+        # 花名册（PK=student_id，避免主键冲突：新学号已有花名册则删旧留新，
+        # 留下的行姓名以成员姓名为准——旧行可能是上一届学号主人的残留）
         old_roster = db.query(ClassRoster).filter(ClassRoster.student_id == old_sid).first()
         if old_roster:
-            if db.query(ClassRoster).filter(ClassRoster.student_id == new_sid).first():
+            new_roster = (
+                db.query(ClassRoster)
+                .filter(ClassRoster.student_id == new_sid)
+                .first()
+            )
+            if new_roster:
                 db.delete(old_roster)
+                if target.name:
+                    new_roster.name = target.name
             else:
                 old_roster.student_id = new_sid
             cascaded["roster"] += 1

@@ -153,6 +153,27 @@ def test_member_mismatch_rekeys_all_rows():
     assert aliases["g1-7250629"] == aliases["2301001"]
 
 
+def test_stale_roster_name_does_not_block_rekey():
+    """真实 NAS 场景：花名册行残留上一届学号主人的姓名（补录学号时合并
+    花名册的副作用），成员表才是当前身份。判定以成员为准，且花名册残留
+    姓名被修正。"""
+    db = make_db()
+    seed(db)
+    db.add(ClassRoster(student_id="7250629", name="刘梓烨", class_num=6, excluded=0))
+    db.commit()
+    stats = migrate_colliding_student_ids(db)
+    assert stats["collisions"] == 1
+    assert score_rows(db, "g1-7250629") == [("化学", "刘梓烨"), ("物理", "刘梓烨")]
+    # 只有孙仲仁自己的高二行保留
+    assert score_rows(db, "7250629") == [("物理", "孙仲仁")]
+    # 花名册残留姓名修正为成员姓名
+    assert db.get(ClassRoster, "7250629").name == "孙仲仁"
+    aliases = {
+        a.student_id: a.identity_id for a in db.query(StudentAlias).all()
+    }
+    assert aliases["g1-7250629"] == aliases["2301001"]
+
+
 def test_matching_names_untouched():
     """成绩姓名与教师侧身份一致 → 完全不动。"""
     db = make_db()
