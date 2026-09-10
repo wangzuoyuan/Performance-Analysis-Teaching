@@ -1502,3 +1502,120 @@ class TestRankBasisExplicitness:
         assert data["status"] == "ok"
         assert "teaching" in data["bases"], \
             f"应有 teaching rank_basis: {data['bases']}"
+
+
+# ════════════════════════════════════════════════════════════════
+#  学生列表按身份链展开取分：改号/建链学生的历史分（挂在 g<年级>-旧号
+#  或高一旧号下）要在列表显示；未建链的撞号旧分不得串人
+# ════════════════════════════════════════════════════════════════
+
+
+class TestStudentsListIdentityExpansion:
+    """列表成绩摘要按人展开：alias/g1- 旧号命中→映射回成员行；无链不串分。"""
+
+    _SETUP_RENUMBER = textwrap.dedent("""\
+        db = SessionLocal()
+        from app.db.models import (
+            Teacher, TeachingClass, TeachingClassMember, Exam,
+            SubjectScore, StudentIdentity, StudentAlias,
+        )
+        t = Teacher(subject="物理", name="物理老师")
+        db.add(t)
+        db.flush()
+        tc = TeachingClass(grade=2, label="物B1", subject="物理", kind="教学")
+        db.add(tc)
+        db.flush()
+        # s-kept 高一高二同号；s-new 分班改号（历史分在 g1-old 下，已建链）；
+        # s-orphan 改号但漏链；g1-stranger 是别人（未建链）的旧号成绩
+        for sid in ["s-kept", "s-new", "s-orphan"]:
+            db.add(TeachingClassMember(teaching_class_id=tc.id, student_id=sid, source="manual"))
+        ident = StudentIdentity(display_name="学生甲")
+        db.add(ident)
+        db.flush()
+        db.add(StudentAlias(student_id="s-new", identity_id=ident.id, link_source="name_confirmed"))
+        db.add(StudentAlias(student_id="g1-old", identity_id=ident.id, link_source="name_confirmed"))
+        exam = Exam(name="高一5月月考", grade=1, semester="下", exam_type="月考", exam_date="2026-05")
+        db.add(exam)
+        db.flush()
+        db.add(SubjectScore(exam_id=exam.id, student_id="s-kept", subject="物理",
+            raw_score=80, name="同号生", class_num=6))
+        db.add(SubjectScore(exam_id=exam.id, student_id="g1-old", subject="物理",
+            raw_score=90, name="学生甲", class_num=6))
+        db.add(SubjectScore(exam_id=exam.id, student_id="g1-stranger", subject="物理",
+            raw_score=70, name="路人", class_num=6))
+        db.commit()
+        db.close()
+    """)
+
+    def test_linked_member_shows_history_score(self, tmp_path):
+        """s-new 本号无成绩行，但经 alias 展开命中 g1-old=90 → 列表显示 90。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            by_id = {s["student_id"]: s for s in students}
+            s_new = by_id.get("s-new", {})
+            result = {
+                "status": "ok",
+                "raw_score": s_new.get("raw_score"),
+                "has_profile": s_new.get("has_profile"),
+                "latest_exam": (s_new.get("latest_exam") or {}).get("name"),
+                "grades": s_new.get("grades"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_RENUMBER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["raw_score"] == 90, \
+            f"建链成员应显示 g1-old 的 90 分, 得到 {data}"
+        assert data["has_profile"] is True, f"建链成员应有画像: {data}"
+        assert data["latest_exam"] == "高一5月月考", f"latest_exam 应为高一月考: {data}"
+        assert data["grades"] == [1], f"grades 应含高一(1): {data}"
+
+    def test_rank_uses_expanded_scores(self, tmp_path):
+        """scope_rank 用展开后的分数：s-new=90 第1，s-kept=80 第2。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            students = r.json().get("students", [])
+            by_id = {s["student_id"]: s for s in students}
+            result = {
+                "status": "ok",
+                "s_new_rank": by_id.get("s-new", {}).get("scope_rank"),
+                "s_kept_rank": by_id.get("s-kept", {}).get("scope_rank"),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_RENUMBER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["s_new_rank"] == 1, f"s-new(90) 应第1: {data}"
+        assert data["s_kept_rank"] == 2, f"s-kept(80) 应第2: {data}"
+
+    def test_unlinked_collision_score_not_leaked(self, tmp_path):
+        """未建链的 s-orphan 不得串到别人的旧号分；g1-stranger/g1-old 也
+        不作为成员出现在列表里（展开只用于成绩命中，不改成员范围）。"""
+        assert_code = textwrap.dedent("""\
+            r = client.get("/api/students")
+            assert r.status_code == 200, r.text
+            data = r.json()
+            students = data.get("students", [])
+            by_id = {s["student_id"]: s for s in students}
+            orphan = by_id.get("s-orphan", {})
+            result = {
+                "status": "ok",
+                "count": data.get("count"),
+                "orphan_score": orphan.get("raw_score"),
+                "orphan_profile": orphan.get("has_profile"),
+                "has_g1_rows": ("g1-old" in by_id) or ("g1-stranger" in by_id),
+            }
+            print(json.dumps(result))
+        """)
+        proc = _run_isolated_api_test(tmp_path, self._SETUP_RENUMBER, assert_code)
+        data = json.loads(proc.stdout.strip().split("\n")[-1])
+        assert data["status"] == "ok"
+        assert data["count"] == 3, f"列表只应有 3 名成员: {data}"
+        assert data["orphan_score"] is None, f"漏链成员不得串分: {data}"
+        assert data["orphan_profile"] is False, f"漏链成员无画像: {data}"
+        assert not data["has_g1_rows"], f"g1- 旧号不应作为成员行出现: {data}"

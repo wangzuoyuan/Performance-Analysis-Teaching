@@ -1579,6 +1579,11 @@ async def list_students(
     teaching_class_id 为空=我教所有班的成员并集。按「人」去重（同一人多学号
     合并一行，取最新年级学号为代表）。
 
+    成绩摘要按身份链展开：成员学号 → 该人全部学号（跨学年 alias、g<年级>-
+    撞号改写号），取到分后再映射回成员行。改号/建链学生的历史分（如高一成绩
+    挂在 g1-旧号 下）才能在列表显示；成员范围本身仍以教学班成员为准，展开仅
+    用于成绩命中。
+
     每行返回 student_id/name/class_label/teaching_class_id/grades，以及当前
     学科摘要：latest_exam、raw_score、grade_score、grade_percentile、scope_rank。
     没有当前学科分数的合法班级成员留在花名册，但成绩字段为 null。
@@ -1688,6 +1693,13 @@ async def list_students(
                 groups[key] |= ids
                 seen |= ids
 
+        # 按人展开学号：成员学号 → 该人全部学号（跨学年 alias、g<年级>- 撞号
+        # 改写号）。后续成绩查询按展开集合命中，再映射回成员行展示。
+        person_ids: dict[str, set[str]] = {
+            sid: student_ids_of_person(db, sid) | {sid} for sid in scope_ids
+        }
+        all_score_ids = {i for ids_ in person_ids.values() for i in ids_}
+
         # 当前学科在合法范围内有真实分数的考试集合（用于 latest_exam）
         valid_exam_ids = set(
             row[0]
@@ -1695,25 +1707,30 @@ async def list_students(
                 db.query(SubjectScore.exam_id)
                 .filter(
                     SubjectScore.subject == subject,
-                    SubjectScore.student_id.in_(scope_ids),
+                    SubjectScore.student_id.in_(all_score_ids),
                     SubjectScore.raw_score.isnot(None)
                     | SubjectScore.grade_score.isnot(None),
                 )
                 .distinct().all()
             )
         )
-        score_student_ids = {
+        # 成绩行学号（可能挂在 g<年级>- 旧号下）
+        score_row_sids = {
             row[0]
             for row in (
                 db.query(SubjectScore.student_id)
                 .filter(
                     SubjectScore.subject == subject,
-                    SubjectScore.student_id.in_(scope_ids),
+                    SubjectScore.student_id.in_(all_score_ids),
                     SubjectScore.raw_score.isnot(None)
                     | SubjectScore.grade_score.isnot(None),
                 )
                 .distinct().all()
             )
+        }
+        # 归属到成员：成员名下任一学号有真实分即视为有画像
+        score_student_ids = {
+            sid for sid in scope_ids if person_ids[sid] & score_row_sids
         }
         # 最新考试：按年级/日期/id（只在有真实分数的考试中选）
         latest_exam = None
@@ -1726,15 +1743,16 @@ async def list_students(
             )
 
         # 每组取最新年级学号作代表。sid_grade 只取当前学科有真实分数（raw 或
-        # grade_score 非空）的记录，空分残留不得影响 grades；无成绩成员的 grade
-        # 由教学班元数据补全。
-        sid_grade: dict[str, int] = {
+        # grade_score 非空）的记录，空分残留不得影响 grades；成绩年级按人展开
+        # 命中（历史学号如 g1-旧号 也算本人），同人取最高年级；无成绩成员的
+        # grade 由教学班元数据补全。
+        row_grade: dict[str, int] = {
             row[0]: row[1]
             for row in (
                 db.query(SubjectScore.student_id, Exam.grade)
                 .join(Exam, Exam.id == SubjectScore.exam_id)
                 .filter(
-                    SubjectScore.student_id.in_(scope_ids),
+                    SubjectScore.student_id.in_(all_score_ids),
                     SubjectScore.subject == subject,
                     SubjectScore.raw_score.isnot(None)
                     | SubjectScore.grade_score.isnot(None),
@@ -1742,6 +1760,11 @@ async def list_students(
                 .distinct().all()
             )
         }
+        sid_grade: dict[str, int] = {}
+        for sid in scope_ids:
+            grades_ = [row_grade[i] for i in person_ids[sid] if i in row_grade]
+            if grades_:
+                sid_grade[sid] = max(grades_)
         # 用教学班成员元数据补全无成绩成员的 grade（保证花名册有 grade 维度）
         for sid in scope_ids:
             if sid not in sid_grade:
@@ -1763,17 +1786,25 @@ async def list_students(
             if tc_obj:
                 explicit_tc_info = (tc_obj.label, tc_obj.id)
 
-        # 最新考试当前学科成绩（按代表学号或同组任一学号）
+        # 最新考试当前学科成绩：按人展开取分，映射回成员行（同人多个学号都有
+        # 分时优先成员本号行，保证确定性）
         latest_scores: dict[str, SubjectScore] = {}
         if latest_exam:
+            row_by_sid: dict[str, SubjectScore] = {}
             for s in db.query(SubjectScore).filter(
                 SubjectScore.exam_id == latest_exam.id,
                 SubjectScore.subject == subject,
-                SubjectScore.student_id.in_(scope_ids),
+                SubjectScore.student_id.in_(all_score_ids),
                 SubjectScore.raw_score.isnot(None)
                 | SubjectScore.grade_score.isnot(None),
             ).all():
-                latest_scores[s.student_id] = s
+                row_by_sid[s.student_id] = s
+            for sid in scope_ids:
+                cands = [row_by_sid[i] for i in person_ids[sid] if i in row_by_sid]
+                if cands:
+                    latest_scores[sid] = max(
+                        cands, key=lambda r: (r.student_id == sid, r.student_id)
+                    )
 
         # scope_rank：按每个学生所属教学班独立计算（不混排全年级）
         # 显式 teaching_class_id 时，强制所有成员归属该班
