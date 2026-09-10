@@ -805,10 +805,32 @@ async def hw_roster(teaching_class_id: Optional[int] = None):
             ):
                 fallback.setdefault(sid, cn)
         out = []
+        # 记录数按「人」合计：该生全部学段学号（含命名空间旧号）名下的记录
+        from collections import defaultdict
+        from sqlalchemy import func
+
+        from app.analysis.scope import student_ids_of_person
+        from app.db.models import StudentAlias
+
+        counts = dict(
+            db.query(HomeworkRecord.student_id, func.count())
+            .group_by(HomeworkRecord.student_id)
+            .all()
+        )
+        identity_of_sid = dict(
+            db.query(StudentAlias.student_id, StudentAlias.identity_id).all()
+        )
+        by_identity = defaultdict(int)
+        for sid, n in counts.items():
+            iid = identity_of_sid.get(sid)
+            if iid is not None:
+                by_identity[iid] += n
         for r in rows:
-            count = db.query(HomeworkRecord).filter(
-                HomeworkRecord.student_id == r.student_id
-            ).count()
+            iid = identity_of_sid.get(r.student_id)
+            if iid is not None:
+                count = by_identity.get(iid, 0)
+            else:
+                count = sum(counts.get(s, 0) for s in student_ids_of_person(db, r.student_id))
             cls = r.class_num
             if cls is None:
                 cls = fallback.get(r.student_id)

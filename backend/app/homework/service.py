@@ -16,6 +16,7 @@ from app.db.models import (
     HomeworkRecord,
     SpecialRecord,
     HomeworkSetting,
+    StudentAlias,
     TeachingClass,
 )
 from app.analysis.scope import all_my_member_ids, members_of, student_class_map_multi
@@ -133,33 +134,94 @@ def _miss_filters():
     ]
 
 
-def _base_miss_query(db, start, end, student=None, subject=None,
-                     respect_excluded=True, teaching_class_id=None, scoped=True,
-                     scope_ids=None):
-    """缺交有效记录基础查询（join 花名册），返回 (HomeworkRecord, ClassRoster)。
+class _PersonScope:
+    """按「人」聚合的范围解析结果（读时身份展开，不改表结构）。
 
-    scope_ids: 显式成员集合（含 anon），优先于 teaching_class_id 的自动解析。
-    供 weekly_focus 等需要「当前学科范围」语义的调用方传递，避免
-    _scope_student_ids(None) 混入他科教学班成员。
+    分班改号后历史记录挂在旧学号/命名空间学号下；读侧经 student_alias 把
+    同一人的全部学号归并为一个组，教师补链后自动生效（自愈）。
+
+    - fetch_ids: 需抓取的学号集合 = 成员号 ∪ 与成员同身份的全部 alias 学号；
+      未建链离校者的 g<年级>- 行身份不在范围身份内，天然不取。
+    - key_of(sid): ('p', identity_id)（有 alias）或 ('s', sid)（无 alias，
+      含 _anon: 占位成员）。元组键仅内部使用，绝不外泄。
+    - rep_of(key): 组代表成员学号；输出载荷的 student_id/name 一律用它。
+    - roster: 成员号 → ClassRoster（姓名/labels 从代表学号取）。
+    - scope_keys: 范围内人组键全集；name_keys: 姓名筛选命中的键（未筛选 None）。
     """
-    q = (
-        db.query(HomeworkRecord, ClassRoster)
-        .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
-        .filter(*_miss_filters())
+
+    def __init__(self, fetch_ids, key_of, rep_of, roster, scope_keys, name_keys):
+        self.fetch_ids = fetch_ids
+        self.key_of = key_of
+        self.rep_of = rep_of
+        self.roster = roster
+        self.scope_keys = scope_keys
+        self.name_keys = name_keys
+
+    def active_keys(self):
+        """生效人组键：有姓名筛选时为命中的键，否则为全部范围键。"""
+        return self.name_keys if self.name_keys is not None else self.scope_keys
+
+
+def _person_scope(db, teaching_class_id=None, scoped=True, scope_ids=None,
+                  respect_excluded=True, student=None):
+    """解析按人聚合范围。
+
+    scope_ids: 显式成员集合（含 anon），优先于 teaching_class_id 自动解析。
+    respect_excluded=False 或指定 student 时不剔除 excluded 成员（沿用
+    「指定学生查询时不排除」口径）。scoped=False 返回不设范围的键控器
+    （学号即键），供 student_summary 等自行按人过滤的调用方使用。
+    """
+    if not scoped:
+        return _PersonScope(
+            None, lambda s: ("s", s), lambda k: None, {}, set(), None
+        )
+    ids = scope_ids if scope_ids is not None else _scope_student_ids(
+        db, teaching_class_id, include_excluded=True
     )
-    if scoped:
-        # excluded 的剔除交给下方 roster 层，保留「指定学生查询时不排除」的口径
-        if scope_ids is not None:
-            ids = scope_ids
-        else:
-            ids = _scope_student_ids(db, teaching_class_id, include_excluded=True)
-        q = q.filter(HomeworkRecord.student_id.in_(ids))
+    ids = set(ids)
+    if respect_excluded and not student:
+        excluded = {
+            r[0] for r in db.query(ClassRoster.student_id)
+            .filter(ClassRoster.student_id.in_(ids), ClassRoster.excluded == 1).all()
+        }
+        ids -= excluded
+
+    alias_of = dict(db.query(StudentAlias.student_id, StudentAlias.identity_id).all())
+
+    def key_of(sid):
+        iid = alias_of.get(sid)
+        return ("p", iid) if iid is not None else ("s", sid)
+
+    rep = {}
+    for s in sorted(ids):
+        rep.setdefault(key_of(s), s)
+    roster = {
+        r.student_id: r for r in db.query(ClassRoster).filter(
+            ClassRoster.student_id.in_(ids)
+        ).all()
+    }
+    name_keys = None
+    if student:
+        name_keys = {
+            key_of(sid) for sid, r in roster.items() if student in (r.name or "")
+        }
+    fetch_ids = ids | {
+        sid for sid, iid in alias_of.items() if ("p", iid) in rep
+    }
+    return _PersonScope(fetch_ids, key_of, rep.get, roster, set(rep), name_keys)
+
+
+def _miss_records(db, start, end, subject=None, pscope=None):
+    """有效缺交记录列表（按人范围抓取，口径 = _miss_filters）。
+
+    姓名筛选在组层进行（pscope.name_keys / active_keys），这里不做行级姓名
+    过滤——旧学号行没有花名册行，行级过滤会漏掉按人归并的历史记录。
+    """
+    q = db.query(HomeworkRecord).filter(*_miss_filters())
+    if pscope is not None and pscope.fetch_ids is not None:
+        q = q.filter(HomeworkRecord.student_id.in_(pscope.fetch_ids))
     if start and end:
         q = q.filter(HomeworkRecord.date >= start, HomeworkRecord.date <= end)
-    if student:
-        q = q.filter(ClassRoster.name.like(f"%{student}%"))
-    elif respect_excluded:
-        q = q.filter(ClassRoster.excluded == 0)
     if subject:
         keywords = _subject_keywords(subject)
         if keywords:
@@ -167,7 +229,7 @@ def _base_miss_query(db, start, end, student=None, subject=None,
             q = q.filter(or_(*[HomeworkRecord.subject.like(f"%{k}%") for k in keywords]))
         else:
             q = q.filter(HomeworkRecord.subject == subject)
-    return q
+    return q.all()
 
 
 def _scope_student_ids(db, teaching_class_id=None, include_excluded=False):
@@ -238,15 +300,18 @@ def _labels_for(labels, student_id):
 
 
 def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
-    rows = _base_miss_query(db, start, end, student, subject,
-                            teaching_class_id=teaching_class_id).all()
-    total = len(rows)
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id, student=student)
+    records = _miss_records(db, start, end, subject=subject, pscope=pscope)
+    active = pscope.active_keys()
 
     subj_counts = defaultdict(int)
     stu_counts = defaultdict(int)
-    for rec, roster in rows:
+    for rec in records:
         subj_counts[normalize_subject(rec.subject)] += 1
-        stu_counts[(roster.student_id, roster.name)] += 1
+        k = pscope.key_of(rec.student_id)
+        if k in active:
+            stu_counts[k] += 1
+    total = sum(stu_counts.values())
 
     if subj_counts:
         worst_name, worst_count = max(subj_counts.items(), key=lambda x: x[1])
@@ -257,10 +322,16 @@ def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
     labels = student_class_map_multi(
         db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
     )
-    top_students = [
-        {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": c}
-        for (sid, name), c in sorted(stu_counts.items(), key=lambda x: x[1], reverse=True)[:5]
-    ]
+    top_students = []
+    for k, c in sorted(stu_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
+        sid = pscope.rep_of(k)
+        row = pscope.roster.get(sid)
+        top_students.append({
+            "student_id": sid,
+            "name": row.name if row else sid,
+            "class_labels": _labels_for(labels, sid),
+            "count": c,
+        })
     return {
         "total_misses": total,
         "worst_subject": worst_subject,
@@ -269,36 +340,45 @@ def kpi(db, start, end, student=None, subject=None, teaching_class_id=None):
 
 
 def trend(db, start, end, student=None, subject=None, teaching_class_id=None):
-    rows = _base_miss_query(db, start, end, student, subject,
-                            teaching_class_id=teaching_class_id).all()
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id, student=student)
+    records = _miss_records(db, start, end, subject=subject, pscope=pscope)
     by_date = defaultdict(int)
-    for rec, _ in rows:
+    for rec in records:
         by_date[rec.date] += 1
     dates = sorted(by_date)
     return {"dates": dates, "counts": [by_date[d] for d in dates]}
 
 
 def subjects(db, start, end, student=None, subject=None, teaching_class_id=None):
-    rows = _base_miss_query(db, start, end, student, subject,
-                            teaching_class_id=teaching_class_id).all()
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id, student=student)
+    records = _miss_records(db, start, end, subject=subject, pscope=pscope)
+    active = pscope.active_keys()
     totals = defaultdict(int)
     detail = defaultdict(lambda: defaultdict(int))
-    for rec, roster in rows:
+    for rec in records:
         canonical = normalize_subject(rec.subject)
-        totals[canonical] += 1
-        detail[canonical][(roster.student_id, roster.name)] += 1
+        k = pscope.key_of(rec.student_id)
+        if k in active:
+            totals[canonical] += 1
+            detail[canonical][k] += 1
     labels = student_class_map_multi(
         db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
     )
     out = []
-    for name, count in sorted(totals.items(), key=lambda x: x[1], reverse=True):
-        students = sorted(detail[name].items(), key=lambda x: x[1], reverse=True)
+    for kind, count in sorted(totals.items(), key=lambda x: x[1], reverse=True):
+        students = sorted(detail[kind].items(), key=lambda x: x[1], reverse=True)
         out.append({
-            "name": name,
+            "name": kind,
             "value": count,
             "students": [
-                {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": c}
-                for (sid, name), c in students
+                {
+                    "student_id": pscope.rep_of(k),
+                    "name": (pscope.roster.get(pscope.rep_of(k)).name
+                             if pscope.roster.get(pscope.rep_of(k)) else pscope.rep_of(k)),
+                    "class_labels": _labels_for(labels, pscope.rep_of(k)),
+                    "count": c,
+                }
+                for k, c in students
             ],
         })
     return out
@@ -306,22 +386,32 @@ def subjects(db, start, end, student=None, subject=None, teaching_class_id=None)
 
 def rankings(db, start, end, student=None, subject=None, limit=10,
              teaching_class_id=None):
-    rows = _base_miss_query(db, start, end, student, subject,
-                            teaching_class_id=teaching_class_id).all()
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id, student=student)
+    records = _miss_records(db, start, end, subject=subject, pscope=pscope)
+    active = pscope.active_keys()
     counts = defaultdict(int)
-    for _, roster in rows:
-        counts[(roster.student_id, roster.name)] += 1
+    for rec in records:
+        k = pscope.key_of(rec.student_id)
+        if k in active:
+            counts[k] += 1
     ranked = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:limit]
     labels = student_class_map_multi(
         db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
     )
+    students = []
+    for k, count in ranked:
+        sid = pscope.rep_of(k)
+        row = pscope.roster.get(sid)
+        students.append({
+            "student_id": sid,
+            "name": row.name if row else sid,
+            "class_labels": _labels_for(labels, sid),
+            "count": count,
+        })
     return {
-        "names": [name for (_, name), _ in ranked],
-        "counts": [c for _, c in ranked],
-        "students": [
-            {"student_id": sid, "name": name, "class_labels": _labels_for(labels, sid), "count": count}
-            for (sid, name), count in ranked
-        ],
+        "names": [s["name"] for s in students],
+        "counts": [s["count"] for s in students],
+        "students": students,
     }
 
 
@@ -337,56 +427,52 @@ def warnings(db, start, end, teaching_class_id=None, scope_ids=None):
     scope_ids: 显式成员集合（含 anon），优先于 teaching_class_id 的自动解析。
     供 weekly_focus 传递当前学科范围，避免 _scope_student_ids(None) 混入他科成员。
     """
-    if scope_ids is not None:
-        ids = scope_ids
-    else:
-        ids = _scope_student_ids(db, teaching_class_id)
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id,
+                           scope_ids=scope_ids, respect_excluded=True)
     all_rows = (
-        db.query(HomeworkRecord, ClassRoster)
-        .join(ClassRoster, ClassRoster.student_id == HomeworkRecord.student_id)
+        db.query(HomeworkRecord)
         .filter(
-            HomeworkRecord.student_id.in_(ids),
+            HomeworkRecord.student_id.in_(pscope.fetch_ids),
             HomeworkRecord.date >= start,
             HomeworkRecord.date <= end,
             HomeworkRecord.subject != "全科",
         ).all()
     )
-    leave_pairs = {
-        (sid, day)
-        for sid, day in db.query(SpecialRecord.student_id, SpecialRecord.date).filter(
-            SpecialRecord.student_id.in_(ids),
-            SpecialRecord.date >= start,
-            SpecialRecord.date <= end,
-            SpecialRecord.type.like("%请假%"),
-        ).all()
-    }
+    leave_by_key = defaultdict(set)
+    for sid, day in db.query(SpecialRecord.student_id, SpecialRecord.date).filter(
+        SpecialRecord.student_id.in_(pscope.fetch_ids),
+        SpecialRecord.date >= start,
+        SpecialRecord.date <= end,
+        SpecialRecord.type.like("%请假%"),
+    ).all():
+        leave_by_key[pscope.key_of(sid)].add(day)
 
     timeline = defaultdict(set)           # subject -> 有人缺交的日期
-    own_dates = defaultdict(set)          # (subject, sid) -> 该生自身有记录的日期
+    own_dates = defaultdict(set)          # (subject, person_key) -> 该生自身有记录的日期
     missed = defaultdict(set)
-    identities = {}
-    for rec, roster in all_rows:
+    for rec in all_rows:
         subj = normalize_subject(rec.subject)
-        identities[(subj, roster.student_id)] = roster
-        own_dates[(subj, roster.student_id)].add(rec.date)
+        k = pscope.key_of(rec.student_id)
+        own_dates[(subj, k)].add(rec.date)
         if (
             rec.submission_status == "缺交"
             and not (rec.remark or "").strip()
-            and (rec.student_id, rec.date) not in leave_pairs
+            and rec.date not in leave_by_key.get(k, ())
         ):
-            missed[(subj, roster.student_id)].add(rec.date)
+            missed[(subj, k)].add(rec.date)
             timeline[subj].add(rec.date)
 
     labels = student_class_map_multi(
         db, teaching_class_ids=_current_subject_class_ids(db, teaching_class_id)
     )
     serious, warning = [], []
-    for (subj, sid), miss_dates in missed.items():
-        roster = identities[(subj, sid)]
-        axis = sorted(timeline[subj] | own_dates[(subj, sid)])
+    for (subj, k), miss_dates in missed.items():
+        sid = pscope.rep_of(k)
+        roster = pscope.roster.get(sid)
+        axis = sorted(timeline[subj] | own_dates[(subj, k)])
         streak = []
         for d in reversed(axis):
-            if (sid, d) in leave_pairs:
+            if d in leave_by_key.get(k, ()):
                 continue
             if d in miss_dates:
                 streak.append(d)
@@ -396,7 +482,7 @@ def warnings(db, start, end, teaching_class_id=None, scope_ids=None):
             continue
         streak.reverse()
         item = {
-            "name": roster.name,
+            "name": roster.name if roster else sid,
             "student_id": sid,
             "class_labels": _labels_for(labels, sid),
             "subject": subj,
@@ -536,10 +622,18 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     ids = set(roster)
     labels = student_class_map_multi(db, teaching_class_ids=class_ids)
 
+    # 按人聚合：fetch_ids 覆盖成员号 + 同身份旧号；行按 key_of 归组、按
+    # rep_of（代表成员学号）输出。姓名筛选在组层生效（name_keys）。
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id,
+                           scope_ids=scope_ids, respect_excluded=True)
+    rep_by_sid = {sid: pscope.rep_of(pscope.key_of(sid)) for sid in pscope.fetch_ids}
+    name_keys = {pscope.key_of(sid) for sid in ids} if student else None
+    active_keys = name_keys if student else pscope.scope_keys
+
     records = (
         db.query(HomeworkRecord)
         .filter(
-            HomeworkRecord.student_id.in_(ids_all),
+            HomeworkRecord.student_id.in_(pscope.fetch_ids),
             HomeworkRecord.date >= start,
             HomeworkRecord.date <= end,
         ).order_by(HomeworkRecord.date, HomeworkRecord.id).all()
@@ -547,31 +641,32 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     specials = (
         db.query(SpecialRecord)
         .filter(
-            SpecialRecord.student_id.in_(ids_all),
+            SpecialRecord.student_id.in_(pscope.fetch_ids),
             SpecialRecord.date >= start,
             SpecialRecord.date <= end,
         ).all()
     )
-    leave_pairs = {
-        (s.student_id, s.date) for s in specials if "请假" in (s.type or "")
-    }
+    leave_by_key = defaultdict(set)
+    for s in specials:
+        if "请假" in (s.type or ""):
+            leave_by_key[pscope.key_of(s.student_id)].add(s.date)
 
     def is_valid_miss(rec):
-        # 与 _miss_filters() 同一口径的内存版
+        # 与 _miss_filters() 同一口径的内存版（请假按人组抑制）
         return (
             rec.submission_status == "缺交"
             and rec.subject != "全科"
             and not (rec.remark or "").strip()
-            and (rec.student_id, rec.date) not in leave_pairs
+            and rec.date not in leave_by_key.get(pscope.key_of(rec.student_id), ())
         )
 
     misses_all = [r for r in records if is_valid_miss(r)]
-    misses = [r for r in misses_all if r.student_id in ids]
+    misses = [r for r in misses_all if pscope.key_of(r.student_id) in active_keys]
     submitted = [
         r for r in records
-        if r.student_id in ids
+        if pscope.key_of(r.student_id) in active_keys
         and r.submission_status == "已交"
-        and (r.student_id, r.date) not in leave_pairs
+        and r.date not in leave_by_key.get(pscope.key_of(r.student_id), ())
     ]
 
     def student_item(sid, count=0):
@@ -586,22 +681,28 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     miss_counts, excellent_counts = defaultdict(int), defaultdict(int)
     evaluation_counts = {"positive": 0, "neutral": 0, "negative": 0}
     for rec in misses:
-        miss_counts[rec.student_id] += 1
+        miss_counts[pscope.key_of(rec.student_id)] += 1
     # 优秀统计跟随所选区间（不锚定「今天」，历史区间同样有效）
     for rec in submitted:
         tone = evaluation_tone(rec.evaluation)
         evaluation_counts[tone] += 1
         if tone == "positive":
-            excellent_counts[rec.student_id] += 1
+            excellent_counts[pscope.key_of(rec.student_id)] += 1
 
-    missing_ranking = [
-        student_item(sid, count)
-        for sid, count in sorted(miss_counts.items(), key=lambda x: (-x[1], roster[x[0]].name))[:limit]
-    ]
-    excellent_ranking = [
-        student_item(sid, count)
-        for sid, count in sorted(excellent_counts.items(), key=lambda x: (-x[1], roster[x[0]].name))[:limit]
-    ]
+    def ranked_student_items(counts, limit=None):
+        """人组键计数 → 按代表成员学号输出（姓名排序稳定）。"""
+        items = []
+        for k, count in counts.items():
+            sid = pscope.rep_of(k)
+            if sid in roster_all:
+                items.append((sid, count))
+        items.sort(key=lambda x: (-x[1], roster_all[x[0]].name))
+        if limit is not None:
+            items = items[:limit]
+        return [student_item(sid, count) for sid, count in items]
+
+    missing_ranking = ranked_student_items(miss_counts, limit)
+    excellent_ranking = ranked_student_items(excellent_counts, limit)
 
     streaks = warnings(db, start, end, teaching_class_id)
     if student:
@@ -615,8 +716,10 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
 
     forgot = defaultdict(int)
     for sp in specials:
-        if sp.student_id in ids and "忘带" in (sp.type or ""):
-            forgot[sp.student_id] += 1
+        if "忘带" in (sp.type or ""):
+            rep = rep_by_sid.get(sp.student_id)
+            if rep in ids:
+                forgot[rep] += 1
     forgot_warnings = [
         student_item(sid, count)
         for sid, count in sorted(forgot.items(), key=lambda x: -x[1])
@@ -627,7 +730,8 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     by_student_evals = defaultdict(list)
     for rec in submitted:
         if rec.evaluation:
-            by_student_evals[rec.student_id].append(rec)
+            by_student_evals[rep_by_sid.get(rec.student_id)].append(rec)
+    by_student_evals.pop(None, None)
     for sid, rows in by_student_evals.items():
         streak = []
         for rec in reversed(rows):
@@ -642,9 +746,7 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
             negative_streaks.append(item)
 
     excellent_stars = [
-        student_item(sid, count)
-        for sid, count in sorted(excellent_counts.items(), key=lambda x: -x[1])
-        if count >= 3
+        item for item in ranked_student_items(excellent_counts) if item["count"] >= 3
     ]
 
     heatmap_counts = defaultdict(int)
@@ -674,15 +776,18 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     eligible_full_attendance = set()
     for tc in classes:
         class_ids = members_by_class.get(tc.id, set()) & ids_all
-        dates = {r.date for r in records if r.student_id in class_ids}
+        dates = {r.date for r in records if rep_by_sid.get(r.student_id) in class_ids}
         if class_ids and dates:
             eligible_full_attendance |= class_ids
             leave_count = len({
-                (sid, day) for sid, day in leave_pairs
-                if sid in class_ids and day in dates
+                (rep, day) for rep, day in
+                ((rep_by_sid.get(s.student_id), s.date) for s in specials)
+                if rep in class_ids and day in dates
             })
             denominator = len(class_ids) * len(dates) - leave_count
-            class_misses = sum(1 for r in misses_all if r.student_id in class_ids)
+            class_misses = sum(
+                1 for r in misses_all if rep_by_sid.get(r.student_id) in class_ids
+            )
             submitted_slots = max(0, denominator - class_misses)
             rate = round(submitted_slots / denominator * 100, 1) if denominator > 0 else None
         else:
@@ -704,7 +809,8 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
     # 避免零数据班/空区间把全班都评成星。
     full_attendance = [
         student_item(sid) for sid in roster
-        if sid in eligible_full_attendance and miss_counts.get(sid, 0) == 0
+        if sid in eligible_full_attendance
+        and miss_counts.get(pscope.key_of(sid), 0) == 0
     ]
 
     semester_compare = []
@@ -712,7 +818,7 @@ def dashboard(db, start, end, student=None, teaching_class_id=None,
         sem_misses = (
             db.query(HomeworkRecord)
             .filter(
-                HomeworkRecord.student_id.in_(ids_all),
+                HomeworkRecord.student_id.in_(pscope.fetch_ids),
                 HomeworkRecord.date >= sem.start_date,
                 HomeworkRecord.date <= sem.end_date,
                 *_miss_filters(),
@@ -777,12 +883,20 @@ def student_summary(db, student_id=None, name=None):
     sem = get_semester(db)
     start, end = sem["semester_start"], sem["semester_end"]
 
-    # 指定学生查询：不走教学班 scope、不排除 excluded（口径见模块 docstring）
-    miss_rows = [
-        rec for rec, _ in _base_miss_query(
-            db, start, end, respect_excluded=False, scoped=False
-        ).filter(HomeworkRecord.student_id == roster.student_id).all()
-    ]
+    # 按人展开：该生全部学段学号（含命名空间旧号）下的记录一并计入——
+    # 历史跟人。不走教学班 scope、不排除 excluded（口径见模块 docstring）。
+    from app.analysis.scope import student_ids_of_person
+
+    person_ids = student_ids_of_person(db, roster.student_id)
+    miss_rows = (
+        db.query(HomeworkRecord)
+        .filter(
+            HomeworkRecord.student_id.in_(person_ids),
+            *_miss_filters(),
+            HomeworkRecord.date >= start,
+            HomeworkRecord.date <= end,
+        ).all()
+    )
     by_subject = defaultdict(int)
     for r in miss_rows:
         by_subject[normalize_subject(r.subject)] += 1
@@ -790,7 +904,7 @@ def student_summary(db, student_id=None, name=None):
     special_rows = (
         db.query(SpecialRecord)
         .filter(
-            SpecialRecord.student_id == roster.student_id,
+            SpecialRecord.student_id.in_(person_ids),
             SpecialRecord.date >= start,
             SpecialRecord.date <= end,
         )
@@ -804,7 +918,7 @@ def student_summary(db, student_id=None, name=None):
     all_warn = warnings(db, start, end)
     student_warnings = [
         w for w in (all_warn["serious"] + all_warn["warning"])
-        if w["student_id"] == roster.student_id
+        if w["student_id"] in person_ids
     ]
 
     recent_records = [
@@ -932,14 +1046,12 @@ def grade_correlation(db, teaching_class_id=None, exam_id=None,
             rank_map = {}
 
     # 学期内缺交次数（所有作业种类，不得按学科过滤——HomeworkRecord.subject 是作业种类）
-    miss_rows = _base_miss_query(
-        db, start, end,
-        teaching_class_id=teaching_class_id,
-        respect_excluded=True,
-    ).all()
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id)
     miss_by_sid = defaultdict(int)
-    for rec, _roster in miss_rows:
-        miss_by_sid[rec.student_id] += 1
+    for rec in _miss_records(db, start, end, pscope=pscope):
+        rep = pscope.rep_of(pscope.key_of(rec.student_id))
+        if rep:
+            miss_by_sid[rep] += 1
 
     # 花名册（限合法成员范围，排除 excluded）
     roster_rows = (
@@ -1019,14 +1131,12 @@ def subject_correlation_ranking(db, teaching_class_id=None, exam_id=None, start=
             rank_map = {}
 
     # 学期内缺交次数（所有作业种类）
-    miss_rows = _base_miss_query(
-        db, start, end,
-        teaching_class_id=teaching_class_id,
-        respect_excluded=True,
-    ).all()
+    pscope = _person_scope(db, teaching_class_id=teaching_class_id)
     miss_by_sid = defaultdict(int)
-    for rec, _roster in miss_rows:
-        miss_by_sid[rec.student_id] += 1
+    for rec in _miss_records(db, start, end, pscope=pscope):
+        rep = pscope.rep_of(pscope.key_of(rec.student_id))
+        if rep:
+            miss_by_sid[rep] += 1
 
     roster_rows = (
         db.query(ClassRoster)
@@ -1128,18 +1238,17 @@ def weekly_focus(db, teaching_class_id=None, today=None):
         sev = 3 if item["streak"] >= 3 else 2
         add(sid, f"连续缺交{item['streak']}次（{item['subject']}）", sev)
 
-    # ② 本周缺交激增（限当前学科范围）
-    miss_rows = _base_miss_query(
-        db, start, end,
-        scope_ids=hw_scope_ids,
-        respect_excluded=True,
-    ).all()
+    # ② 本周缺交激增（限当前学科范围，按人归并到代表成员学号）
+    pscope = _person_scope(db, scope_ids=hw_scope_ids, respect_excluded=True)
     total_by_sid = defaultdict(int)
     week_by_sid = defaultdict(int)
-    for rec, _roster in miss_rows:
-        total_by_sid[rec.student_id] += 1
+    for rec in _miss_records(db, start, end, pscope=pscope):
+        rep = pscope.rep_of(pscope.key_of(rec.student_id))
+        if not rep:
+            continue
+        total_by_sid[rep] += 1
         if week_start <= rec.date <= today:
-            week_by_sid[rec.student_id] += 1
+            week_by_sid[rep] += 1
     weeks_elapsed = max(1, (date.fromisoformat(min(today, end)) - date.fromisoformat(start)).days / 7)
     for sid, wk in week_by_sid.items():
         avg = total_by_sid[sid] / weeks_elapsed

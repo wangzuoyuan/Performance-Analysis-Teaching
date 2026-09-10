@@ -122,7 +122,7 @@ tail -f ~/.exam-tracker/frontend.log
 | GET/PUT | `/semester` | 学期起止与名称配置 |
 | GET  | `/api/weekly-focus` | 当前学科合法教学班范围的缺交预警、临界/薄弱与谈话跟进待办 |
 
-作业服务的成员、`class_labels`、教学班提交率和记录管理必须共用同一组当前学科合法教学班 ID；`subject` 为 `NULL`、空串或纯空白的旧班按兼容班统一纳入，非空他科班排除。任何按记录 ID、学生 ID 或教学班 ID 的更新/删除/成员操作都必须重新验证领域范围，不能依赖前端菜单隐藏。花名册新增要求具体合法 `teaching_class_id`，并在同一事务内创建 roster 与 class member。
+作业服务的成员、`class_labels`、教学班提交率和记录管理必须共用同一组当前学科合法教学班 ID；`subject` 为 `NULL`、空串或纯空白的旧班按兼容班统一纳入，非空他科班排除。任何按记录 ID、学生 ID 或教学班 ID 的更新/删除/成员操作都必须重新验证领域范围，不能依赖前端菜单隐藏。花名册新增要求具体合法 `teaching_class_id`，并在同一事务内创建 roster 与 class member。**统计读侧按「人」聚合**：service 层经 `_person_scope` 读时展开 student_alias——同一人挂在旧学号（含 `g<年级>-` 命名空间号）下的历史记录与新号自动归并，补链即生效；`_anon:` 占位成员无 alias 自然独立成组；输出载荷的 `student_id` 一律为代表成员学号。**录入与花名册仍按当时学号记录**（学号是时点事实），`scripts/reassign_homework_renumber.py` 负责存量切割归位。
 
 ### notes router（`/api/notes`，`notes/router.py`）
 | 方法 | 路径 | 说明 |
