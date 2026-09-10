@@ -30,7 +30,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
         yield
 
 
-app = FastAPI(title="成绩追踪 API", version="2.0.9", lifespan=_lifespan)
+app = FastAPI(title="成绩追踪 API", version="2.0.10", lifespan=_lifespan)
 
 if _MCP_MOUNT is not None:
     app.mount(MCP_MOUNT_PATH, _MCP_MOUNT.app)
