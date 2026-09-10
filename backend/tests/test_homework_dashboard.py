@@ -448,3 +448,26 @@ def test_get_semester_kv_real_values_used_before_derive():
     assert sem["semester_start"] == "2025-09-01"
     assert sem["semester_end"] == "2026-01-31"
     assert sem["auto"] is False
+
+
+def test_backfill_member_roster_admin_class_num():
+    """行政班真实学号成员缺花名册行时补建并带 class_num——号段不编码班级
+    （如 7260004 第 4-5 位是 00）且成绩未导入时，班级列只剩行政班归属可依。"""
+    from app.db.migrate_teaching import _backfill_anon_member_roster
+
+    db = make_db()
+    db.add_all([
+        TeachingClass(id=2, grade=1, label="6", kind="行政", sort_order=1),
+        TeachingClassMember(teaching_class_id=2, student_id="7260004", source="class_num"),
+        TeachingClassMember(teaching_class_id=2, student_id="7250601", source="class_num"),
+        ClassRoster(student_id="7250601", name="已有行无班号"),
+    ])
+    db.commit()
+    created = _backfill_anon_member_roster(db)
+    db.commit()
+    assert created == 1
+    r = db.query(ClassRoster).filter(ClassRoster.student_id == "7260004").first()
+    assert r is not None and r.class_num == 6
+    # 已有花名册行但 class_num 为空的行政班成员 → 补上，不新建
+    r2 = db.query(ClassRoster).filter(ClassRoster.student_id == "7250601").first()
+    assert r2.class_num == 6

@@ -20,9 +20,10 @@ from app.db.models import (
     TeachingClassMember,
     get_db,
 )
-from app.analysis.scope import student_class_map_multi
+from app.analysis.scope import class_num_from_student_id, student_class_map_multi
 from app.homework import service
 from app.homework.export import export_daily_report
+from app.teaching.service import is_anon_sid
 from app.homework.parser import (
     is_full_submission,
     is_subject_item,
@@ -787,9 +788,10 @@ async def hw_roster(teaching_class_id: Optional[int] = None):
         rows = db.query(ClassRoster).filter(
             ClassRoster.student_id.in_(scope_ids)
         ).order_by(
-            ClassRoster.excluded.asc(), ClassRoster.seat_no.asc()
+            ClassRoster.excluded.asc(), ClassRoster.student_id.asc()
         ).all()
-        # 走班成员的花名册行通常没有行政班号，回落取成绩表里的班号用于展示
+        # 走班成员的花名册行通常没有行政班号，先回落成绩表班号，仍无则按学号
+        # 第 4-5 位推导（7250301 → 3 班；不编码班级的号段如 7260004 返回 None）
         fallback = {}
         missing = [r.student_id for r in rows if r.class_num is None]
         if missing:
@@ -807,10 +809,18 @@ async def hw_roster(teaching_class_id: Optional[int] = None):
             count = db.query(HomeworkRecord).filter(
                 HomeworkRecord.student_id == r.student_id
             ).count()
+            cls = r.class_num
+            if cls is None:
+                cls = fallback.get(r.student_id)
+            if cls is None:
+                cls = class_num_from_student_id(r.student_id)
             out.append({
-                "student_id": r.student_id, "name": r.name, "seat_no": r.seat_no,
+                "student_id": r.student_id,
+                "name": (r.name or "").strip() or r.student_id,
+                "seat_no": r.seat_no,
                 "gender": r.gender, "excluded": r.excluded,
-                "class_num": r.class_num if r.class_num is not None else fallback.get(r.student_id),
+                "has_student_id": not is_anon_sid(r.student_id),
+                "class_num": cls,
                 "record_count": count,
             })
         return out

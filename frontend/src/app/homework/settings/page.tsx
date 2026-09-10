@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
 import { ClassScopePicker } from '@/components/ClassScopePicker'
 import { useClassScope } from '@/lib/class-scope'
+import { displayStudentId } from '@/lib/student-id'
 import { cn } from '@/lib/utils'
 import {
   Table,
@@ -34,7 +35,7 @@ interface SemesterHistory {
 interface RosterRow {
   student_id: string
   name: string
-  seat_no: number | null
+  has_student_id: boolean
   excluded: number
   record_count: number
   class_num: number | null
@@ -231,7 +232,7 @@ export default function HomeworkSettingsPage() {
             <Table>
               <TableHeader>
                 <TableRow>
-                  <TableHead>座号</TableHead>
+                  <TableHead className="w-32">学号</TableHead>
                   <TableHead>姓名</TableHead>
                   <TableHead>班级</TableHead>
                   <TableHead className="text-right">记录数</TableHead>
@@ -244,7 +245,15 @@ export default function HomeworkSettingsPage() {
                     key={row.student_id}
                     className={cn('hover:bg-slate-50', row.excluded && 'opacity-50')}
                   >
-                    <TableCell className="text-slate-500">{row.seat_no ?? '—'}</TableCell>
+                    <TableCell className="font-mono text-xs text-slate-600">
+                      {row.has_student_id ? (
+                        displayStudentId(row.student_id)
+                      ) : (
+                        <Badge variant="outline" className="text-xs text-slate-400">
+                          仅姓名
+                        </Badge>
+                      )}
+                    </TableCell>
                     <TableCell className="font-medium">
                       {row.name}
                       {row.excluded === 1 && (

@@ -116,33 +116,50 @@ def _backfill_member_names(db) -> int:
 
 
 def _backfill_anon_member_roster(db) -> int:
-    """给「仅姓名」占位成员（_anon:）补建花名册行（幂等，只补缺失的）。
+    """给缺花名册行的教学班成员（仅姓名占位与按行政班号同步的真实学号成员）
+    补建花名册行，并给行政班成员补空缺的 class_num（幂等，只补缺失的）。
 
-    花名册是作业模块的学生主体（HomeworkRecord.student_id 外键指向它），而仅姓名
-    成员此前只落在 teaching_class_member、没有花名册行，导致作业看板「0 名有效学生」、
-    录入缺交时「未匹配到当前教学班学生」。这里把它们补进花名册即可正常跟踪。"""
+    花名册是作业模块的学生主体（HomeworkRecord.student_id 外键指向它），成员只落
+    在 teaching_class_member、没有花名册行时，作业设置页的花名册完全看不到他、
+    看板会显示「0 名有效学生」、录入缺交「未匹配到当前教学班学生」。行政班
+    （kind=行政 且 label 为数字）成员连带写 class_num：部分号段不编码班级
+    （如 7260004 的第 4-5 位是 00）、成绩又未导入时，按学号/成绩推导都会落空，
+    行政班归属是唯一可靠来源。"""
     from app.teaching.service import ANON_PREFIX, name_from_anon_sid
 
-    existing = {r[0] for r in db.query(ClassRoster.student_id).all()}
-    # 占位学号已按教学班隔离（_anon:<id>:<姓名>），逐个成员补建花名册
     rows = (
-        db.query(TeachingClassMember.student_id, TeachingClassMember.name, TeachingClass.label)
+        db.query(TeachingClassMember.student_id, TeachingClassMember.name, TeachingClass)
         .join(TeachingClass, TeachingClass.id == TeachingClassMember.teaching_class_id)
-        .filter(TeachingClassMember.student_id.like(f"{ANON_PREFIX}%"))
         .all()
     )
+    # 行政班先处理：由它建行/补 class_num；走班等其余班只补建缺行
+    rows.sort(key=lambda r: 0 if r[2].kind == "行政" else 1)
+
+    admin_class_num = {}
+    for _sid, _name, tc in rows:
+        if tc.kind == "行政" and tc.id not in admin_class_num:
+            try:
+                admin_class_num[tc.id] = int(str(tc.label).strip())
+            except (TypeError, ValueError):
+                admin_class_num[tc.id] = None
+
+    existing = {r.student_id: r for r in db.query(ClassRoster).all()}
     created = 0
-    seen = set()
-    for sid, name, label in rows:
-        if sid in existing or sid in seen:
-            continue
-        seen.add(sid)
-        db.add(ClassRoster(
-            student_id=sid,
-            name=(name or name_from_anon_sid(sid)),
-            class_label=label,
-        ))
-        created += 1
+    for sid, name, tc in rows:
+        roster = existing.get(sid)
+        if roster is None:
+            name = (name or "").strip()
+            if not name and sid.startswith(ANON_PREFIX):
+                name = name_from_anon_sid(sid)
+            db.add(ClassRoster(
+                student_id=sid,
+                name=name or "",
+                class_num=admin_class_num.get(tc.id),
+                class_label=tc.label,
+            ))
+            created += 1
+        elif roster.class_num is None and admin_class_num.get(tc.id):
+            roster.class_num = admin_class_num[tc.id]
     return created
 
 

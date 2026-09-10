@@ -51,16 +51,34 @@ def name_from_anon_sid(sid: Optional[str]) -> str:
     return m.group(1) if m else rest
 
 
-def ensure_anon_roster(db, tc, anon_sid: str, name: str) -> None:
-    """给新建的「仅姓名」占位成员补一条花名册行（作业模块的学生主体）。
+def ensure_member_roster(db, tc, sid: str, name: Optional[str] = None) -> None:
+    """给教学班成员补一条花名册行（作业模块的学生主体，幂等，已存在则跳过）。
 
-    花名册是缺交/特殊记录的外键目标；仅姓名成员若不进花名册，作业看板会显示
-    「0 名有效学生」、录入缺交时也匹配不到。已存在则跳过（幂等）。"""
+    花名册是缺交/特殊记录的关联主体；成员若不进花名册，作业设置页的花名册
+    完全看不到他、录入缺交时也匹配不到。行政班（kind=行政 且 label 为数字）
+    成员连带写 class_num——部分号段不编码班级（如 7260004 的第 4-5 位是 00）、
+    成绩又未导入时，「班级」列仍有值。"""
     from app.db.models import ClassRoster
 
-    if db.query(ClassRoster.student_id).filter(ClassRoster.student_id == anon_sid).first():
+    if db.query(ClassRoster.student_id).filter(ClassRoster.student_id == sid).first():
         return
-    db.add(ClassRoster(student_id=anon_sid, name=name, class_label=tc.label))
+    class_num = None
+    if tc.kind == "行政":
+        try:
+            class_num = int(str(tc.label).strip())
+        except (TypeError, ValueError):
+            class_num = None
+    db.add(ClassRoster(
+        student_id=sid,
+        name=(name or "").strip(),
+        class_num=class_num,
+        class_label=tc.label,
+    ))
+
+
+def ensure_anon_roster(db, tc, anon_sid: str, name: str) -> None:
+    """给「仅姓名」占位成员补花名册行（见 ensure_member_roster）。"""
+    ensure_member_roster(db, tc, anon_sid, name)
 
 
 def name_to_student_ids(db, name: str, grade: Optional[int] = None) -> list[str]:
@@ -228,6 +246,8 @@ def _place_id(db, tc, sid: str, name, upsert: bool, existing: set, by_name: dict
             if row and not row.name:
                 row.name = name
                 by_name.setdefault(name, []).append(sid)
+        # 旧成员可能缺花名册行（按行政班号同步过的真实学号成员），补上
+        ensure_member_roster(db, tc, sid, name)
         return "exists", {"student_id": sid, "name": name}
 
     if upsert and name and name in by_name:
@@ -252,6 +272,7 @@ def _place_id(db, tc, sid: str, name, upsert: bool, existing: set, by_name: dict
             teaching_class_id=tc.id, student_id=sid, name=name, source="manual"
         )
     )
+    ensure_member_roster(db, tc, sid, name)
     existing.add(sid)
     if name:
         by_name.setdefault(name, []).append(sid)
@@ -721,6 +742,8 @@ def sync_by_class_num(db, tc) -> int:
                 teaching_class_id=tc.id, student_id=sid, source="class_num"
             )
         )
+        # 同步进来的成员也要进花名册（作业模块的学生主体），行政班连带 class_num
+        ensure_member_roster(db, tc, sid)
     return db.query(TeachingClassMember).filter(
         TeachingClassMember.teaching_class_id == tc.id
     ).count()
@@ -790,6 +813,7 @@ def sync_members_after_upload(db, exam) -> None:
                         teaching_class_id=tc.id, student_id=sid, source="parser"
                     )
                 )
+                ensure_member_roster(db, tc, sid)
                 existing.add(sid)
 
 

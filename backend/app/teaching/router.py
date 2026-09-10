@@ -67,13 +67,19 @@ def _member_profile(db, tc_id: int) -> list[dict]:
             .first()
         )
         roster = db.query(ClassRoster).filter(ClassRoster.student_id == m.student_id).first()
+        # 行政班：花名册 → 成绩表 → 按学号第 4-5 位推导（7250301 → 3 班）
+        cls_num = roster.class_num if roster else None
+        if cls_num is None:
+            cls_num = cls[0] if cls else None
+        if cls_num is None:
+            cls_num = scope.class_num_from_student_id(m.student_id)
         out.append(
             {
                 "student_id": m.student_id,
                 "name": name,
                 "has_student_id": not is_anon,
                 "source": m.source,
-                "class_num": roster.class_num if roster else (cls[0] if cls else None),
+                "class_num": cls_num,
                 "state": "name_only" if is_anon else service.classify_member(db, _tc_grade(db, tc_id), m.student_id),
             }
         )

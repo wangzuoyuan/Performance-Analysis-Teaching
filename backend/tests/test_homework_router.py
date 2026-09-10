@@ -241,3 +241,39 @@ def test_smart_input_full_submission_preview_and_confirm(client, db_session):
         HomeworkRecord.date == "2026-09-11", HomeworkRecord.subject == "校本作业").all()
     assert {row.student_id for row in rows} == {"tapi-s1", "tapi-s2"}
     assert all(row.submission_status == "已交" for row in rows)
+
+
+def test_roster_covers_id_only_member_and_derives_class(client, request):
+    """仅学号、无成绩、无花名册行的成员也要出现在花名册（走班/新号段场景）；
+    「班级」按学号第 4-5 位推导（7250301 → 3 班）。"""
+    cleanup = seed_minimal_exam_scope(member_ids=())
+    request.addfinalizer(cleanup)
+
+    classes = client.get("/api/teaching/classes?grade=2").json()["classes"]
+    tc = next(c for c in classes if c["label"] == "tapi-scope")
+
+    r = client.post(
+        f"/api/teaching/classes/{tc['id']}/members", json={"student_ids": ["7250301"]}
+    )
+    assert r.status_code == 200 and r.json()["added"] == 1
+
+    def _purge():
+        from app.db.models import SessionLocal, ClassRoster, TeachingClassMember
+
+        db = SessionLocal()
+        try:
+            db.query(TeachingClassMember).filter(
+                TeachingClassMember.student_id == "7250301"
+            ).delete()
+            db.query(ClassRoster).filter(ClassRoster.student_id == "7250301").delete()
+            db.commit()
+        finally:
+            db.close()
+
+    request.addfinalizer(_purge)
+
+    roster = client.get("/api/homework/roster").json()
+    by = {row["student_id"]: row for row in roster}
+    assert "7250301" in by
+    assert by["7250301"]["class_num"] == 3
+    assert by["7250301"]["has_student_id"] is True

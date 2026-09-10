@@ -104,3 +104,15 @@ def test_identity_link_and_union_then_unlink():
         )
         db.commit()
         db.close()
+
+
+def test_class_num_from_student_id():
+    # 7 位真实学号：第 4-5 位是班级（7250301 → 3 班）、末两位是班内序号
+    assert scope.class_num_from_student_id("7250301") == 3
+    assert scope.class_num_from_student_id("7250699") == 6
+    assert scope.class_num_from_student_id("g1-7250601") == 6  # 命名空间前缀剥离
+    # 不编码班级的号段（第 4-5 位为 00）与其他格式 → None
+    assert scope.class_num_from_student_id("7260004") is None
+    assert scope.class_num_from_student_id("_anon:1:张三") is None
+    assert scope.class_num_from_student_id("12345") is None
+    assert scope.class_num_from_student_id(None) is None

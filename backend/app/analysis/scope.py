@@ -27,6 +27,22 @@ def strip_id_namespace(sid: str) -> str:
     return m.group(2) if m else (sid or "")
 
 
+# 真实学号编码行政班：7 位数字中第 4-5 位是班级、末两位是班内序号
+# （7250301 → 3 班 01 号）。部分号段不编码班级（如 7260004 的 4-5 位是 00），
+# 此时返回 None，回落花名册/成绩表数据。
+_CLASS_IN_SID = re.compile(r"^\d{7}$")
+
+
+def class_num_from_student_id(sid: Optional[str]) -> Optional[int]:
+    """从真实学号推行政班号（7250301 → 3）；非 7 位数字（含 _anon: 占位）或
+    第 4-5 位为 00 时返回 None。"""
+    sid = strip_id_namespace(sid or "")
+    if not _CLASS_IN_SID.match(sid):
+        return None
+    n = int(sid[3:5])
+    return n or None
+
+
 # ────────────────────────────── 教学班成员范围 ──────────────────────────────
 
 def members_of(db, teaching_class_id: int, include_anon: bool = False) -> set[str]:
